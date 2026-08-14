@@ -249,7 +249,7 @@ npx tsc --noEmit && npx vite build  # 프론트
 
 **[MIT 라이선스](LICENSE)** — 열쇠와 돈을 다루는 코드라, 직접 읽고 검증하고 고쳐 쓸 수 있어야 한다고 봐요.
 
-취약점을 찾으셨다면 공개 이슈 말고 **[SECURITY.md](SECURITY.md)** 의 비공개 경로로 알려주세요. 같은 문서에 **Kura가 막아주지 못하는 것**도 정직하게 적어뒀어요 — 지갑을 고를 땐 그쪽이 더 중요해요.
+취약점을 발견하셨다면 이슈로 올리기 전에 **[SECURITY.md](SECURITY.md)** 의 비공개 경로로 알려주세요. 같은 문서에 **Kura가 막지 못하는 것**도 적어뒀어요.
 
 함께 담긴 [Pretendard](https://github.com/orioncactus/pretendard) 글꼴은 **SIL Open Font License 1.1**이에요([전문](public/fonts/LICENSE-Pretendard.txt)).
 

@@ -1,6 +1,6 @@
 # 보안
 
-Kura는 개인키를 다루는 지갑이에요. 취약점을 찾으셨다면 **공개 이슈로 올리지 말고** 아래 방법으로 알려주세요.
+Kura는 개인키를 다루는 지갑이에요. 취약점을 발견하셨다면 이슈로 올리기 전에 아래로 먼저 알려주시면 고맙겠어요.
 
 ## 신고하는 법
 
@@ -31,7 +31,7 @@ Kura는 개인키를 다루는 지갑이에요. 취약점을 찾으셨다면 **�
 
 ## 여기서 다루지 않는 것
 
-정직하게 적어둘게요. 아래는 Kura가 **막아주지 못해요.**
+아래는 Kura가 **막지 못해요.**
 
 - **이미 뚫린 맥.** 키로거·화면 녹화·임의 코드 실행이 가능한 상태면 비밀번호를 입력하는 순간 끝이에요. 로컬 지갑의 근본 한계예요.
 - **비밀번호를 잊었는데 12단어도 없는 경우.** 복구 수단이 없어요. 설계가 그래요 — 되살릴 방법이 있으면 남도 되살릴 수 있으니까요.
@@ -41,7 +41,7 @@ Kura는 개인키를 다루는 지갑이에요. 취약점을 찾으셨다면 **�
 
 ## 배포본이 진짜인지 확인
 
-가짜 Kura가 제일 위험한 시나리오예요. 설치한 앱은 이걸로 확인할 수 있어요:
+설치한 앱은 이걸로 확인할 수 있어요:
 
 ```bash
 codesign --verify --deep --strict /Applications/Kura.app   # 서명 후 변조 여부 (실제 검증)
@@ -59,9 +59,9 @@ spctl -a -vv /Applications/Kura.app
 
 ## English
 
-Kura is a wallet that handles private keys. **Please do not open a public issue for vulnerabilities.**
+Kura is a wallet that handles private keys. If you find a vulnerability, please tell me privately before opening an issue.
 
-Report privately via **Security → Report a vulnerability** on this repository, or email `dinggi5@proton.me`. This is a solo project — expect a reply within a week, and please ping again if you don't hear back. Please hold public disclosure until a fix ships. Credit in release notes if you'd like it; no bug bounty.
+Report via **Security → Report a vulnerability** on this repository, or email `dinggi5@proton.me`. This is a solo project — expect a reply within a week, and please ping again if you don't hear back. Please hold public disclosure until a fix ships. Credit in release notes if you'd like it; no bug bounty.
 
 Security fixes land on the **latest release only** (0.1.x).
 
