@@ -475,9 +475,18 @@ else
   # 앞서 있는 건 정상(옛 태그를 다시 빌드하는 경우 등)인데, 같은지만 보면 그때마다
   # "main 에 올려라"는 오탐이 난다.
   if [[ -n "$ORIGIN_MAIN" ]] && ! git merge-base --is-ancestor "$HEAD_FULL" "$ORIGIN_MAIN"; then
-    warn "빌드한 커밋($GIT_SHA)이 아직 origin/main 에 없다."
-    warn "  git push origin main   ← 먼저 이걸 하고 나서 아래 태그를 밀 것"
-    warn "태그만 밀면 릴리스는 생기지만 그 커밋이 브랜치 어디에도 없다."
+    warn "빌드한 커밋($GIT_SHA)이 아직 origin/main 에 없다. 태그만 밀면 릴리스는 생기지만"
+    warn "그 커밋이 브랜치 어디에도 없다 — 먼저 main 에 올리고 나서 태그를 밀 것."
+    # 워크트리·기능 브랜치에서 빌드하는 게 이 프로젝트의 기본 흐름이라, 여기서 그냥
+    # "git push origin main" 이라고 하면 로컬 main(= 이 커밋이 없는 브랜치)을 밀게 된다.
+    CUR_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+    if [[ "$CUR_BRANCH" == "main" ]]; then
+      warn "  git push origin main"
+    else
+      warn "  지금 브랜치는 '$CUR_BRANCH' 다. main 에 머지한 뒤 밀 것:"
+      warn "    git -C \"\$(git rev-parse --show-toplevel)\" checkout main && git merge --ff-only $GIT_SHA && git push origin main"
+      warn "  (그냥 'git push origin main' 은 이 커밋이 없는 로컬 main 을 민다)"
+    fi
   fi
   if ! git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
     # 🔴 `--tags` 를 쓰지 않는다(개발 30 에서 실제 사고). 그 플래그는 로컬 태그를 전부 밀어서,
