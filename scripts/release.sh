@@ -49,7 +49,15 @@ done
 ENV_FILE="$REPO_ROOT/scripts/release.env"
 if [[ -f "$ENV_FILE" ]]; then
   perms="$(stat -f '%Lp' "$ENV_FILE")"
-  [[ "$perms" == "600" ]] || warn "$ENV_FILE 권한이 $perms 다. chmod 600 을 권함"
+  # 정식 배포(공증)에서는 경고로 넘기지 않는다. 이 파일에는 앱 전용 암호나 API 키 위치가
+  # 들어 있고, 그게 새면 "내 이름으로 서명된 악성 앱"이 가능해진다 — 이 지갑에서 제일
+  # 아픈 시나리오다. 점검용(--no-notarize)에서는 경고로 둔다.
+  if [[ "$perms" != "600" ]]; then
+    if [[ $NOTARIZE -eq 1 ]]; then
+      die "$ENV_FILE 권한이 $perms 다. 다른 로컬 계정이 읽을 수 있는 자격증명으로는 정식 배포를 만들지 않는다:  chmod 600 $ENV_FILE"
+    fi
+    warn "$ENV_FILE 권한이 $perms 다. chmod 600 을 권함"
+  fi
   . "$ENV_FILE"
   info "자격증명: scripts/release.env"
 else
@@ -109,6 +117,13 @@ trap cleanup EXIT
 step "사전 점검"
 
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS 에서만 돈다"
+
+# 기본 빌드는 호스트 아키텍처 그대로 나온다. README 와 Homebrew 캐스크는 aarch64/arm64 만
+# 약속하므로(캐스크 depends_on arch: :arm64), 인텔 맥에서 낸 산출물은 이름만 맞고 아무 데서도
+# 안 걸린 채 배포될 수 있다. 인텔까지 덮으려면 --universal 이 따로 있다.
+if [[ $UNIVERSAL -eq 0 && "$(uname -m)" != "arm64" ]]; then
+  die "여기는 $(uname -m) 다. 배포본은 Apple Silicon(arm64) 에서 빌드해야 한다 (인텔까지 덮으려면 --universal)"
+fi
 command -v xcrun >/dev/null || die "xcrun 이 없다. Xcode 또는 Command Line Tools 설치 필요"
 xcrun notarytool --version >/dev/null 2>&1 || die "notarytool 이 없다. Xcode 14 이상 필요"
 
@@ -284,6 +299,14 @@ rm -rf "$BUNDLE_DIR/macos" "$BUNDLE_DIR/dmg"
 OWNS_OUTPUT=1   # 폴더를 비웠으니 이제부터 그 안에 있는 건 전부 이번 실행이 만든 것
 env "${BUILD_ENV[@]}" npm run tauri build -- "${BUILD_ARGS[@]}"
 
+# 빌드 전에 한 번 본 것으로는 부족하다. 빌드·공증은 몇 분씩 걸리고 그 사이에 편집기가
+# 저장을 하거나 cargo 가 lockfile 을 갱신할 수 있는데, 그러면 "태그 = 배포본 소스" 라는
+# 약속이 깨진 채로 서명·공증은 멀쩡히 통과한다(그 조합이 이 게이트의 존재 이유였다).
+if [[ $IS_DIRTY -eq 0 && -n "$(git status --porcelain)" ]]; then
+  git status --short
+  die "빌드 도중에 작업 트리가 바뀌었다. 이 DMG 가 어느 소스에서 나온 건지 보증할 수 없다"
+fi
+
 APP_PATH="$BUNDLE_DIR/macos/Kura.app"
 [[ -d "$APP_PATH" ]] || die "앱이 안 나왔다: $APP_PATH"
 DMG_PATH="$(find "$BUNDLE_DIR/dmg" -maxdepth 1 -name '*.dmg' -print -quit 2>/dev/null || true)"
@@ -305,6 +328,40 @@ APP_SIG="$(codesign -dvvv "$APP_PATH" 2>&1)"
 grep -q 'flags=.*runtime' <<<"$APP_SIG" || die \
   "하드닝 런타임이 안 켜졌다 (tauri.conf.json 의 bundle.macOS.hardenedRuntime 확인)"
 info "하드닝 런타임 켜짐"
+
+# 여기까지의 검사는 "유효한 Developer ID 로 서명됐고 공증됐다"까지만 본다. 그런데 README
+# 와 SECURITY.md 는 받는 사람에게 **특정 값**을 확인하라고 시킨다(팀 74ZAMXKVXN, 번들 ID
+# com.dinggi5.kura). 다른 팀 인증서와 그 팀 자격증명이 환경에 들어와 있으면 지금 검사는
+# 전부 통과하는데 사용자 쪽 확인은 실패한다 → 문서가 약속하는 값을 여기서 그대로 검사한다.
+# (개발 26 "검증 안 되는 약속은 문서가 아니라 게이트로 둔다"와 같은 계열)
+EXPECT_TEAM_ID="74ZAMXKVXN"
+EXPECT_BUNDLE_ID="com.dinggi5.kura"
+APP_TEAM="$(sed -n 's/^TeamIdentifier=//p' <<<"$APP_SIG" | head -1)"
+APP_IDENT="$(sed -n 's/^Identifier=//p' <<<"$APP_SIG" | head -1)"
+[[ "$APP_TEAM" == "$EXPECT_TEAM_ID" ]] || die \
+  "팀 ID 가 다르다: $APP_TEAM (기대 $EXPECT_TEAM_ID). README·SECURITY.md 가 사용자에게 알려주는 값과 어긋난다"
+[[ "$APP_IDENT" == "$EXPECT_BUNDLE_ID" ]] || die \
+  "번들 ID 가 다르다: $APP_IDENT (기대 $EXPECT_BUNDLE_ID)"
+
+# 앱 안의 버전이 파일명·태그·캐스크와 갈리면, 사용자가 설정 → 정보에서 보는 값이 배포 번호와
+# 어긋난다. 파일명은 Tauri 가 붙여 주지만 Info.plist 는 별개다.
+APP_EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
+[[ "$APP_VERSION" == "$VERSION_CONF" ]] || die \
+  "앱 Info.plist 버전이 $APP_VERSION 인데 빌드 버전은 $VERSION_CONF 다"
+[[ -n "$APP_EXEC" && -f "$APP_PATH/Contents/MacOS/$APP_EXEC" ]] || die \
+  "앱 실행 파일을 못 찾음 (CFBundleExecutable=$APP_EXEC)"
+
+# 캐스크가 depends_on arch: :arm64 로 약속하는 값. 유니버설이면 두 아키텍처가 다 있어야 한다.
+APP_ARCHS="$(lipo -archs "$APP_PATH/Contents/MacOS/$APP_EXEC" 2>/dev/null || true)"
+if [[ $UNIVERSAL -eq 1 ]]; then
+  [[ "$APP_ARCHS" == *arm64* && "$APP_ARCHS" == *x86_64* ]] || die \
+    "유니버설 빌드인데 아키텍처가 '$APP_ARCHS' 다 (arm64 와 x86_64 둘 다 필요)"
+else
+  [[ "$APP_ARCHS" == "arm64" ]] || die \
+    "기본 빌드는 arm64 단일이어야 하는데 '$APP_ARCHS' 다"
+fi
+info "신원 확인: 팀 $APP_TEAM · $APP_IDENT · $APP_VERSION · $APP_ARCHS"
 
 if [[ $NOTARIZE -eq 1 ]]; then
   # 사전 점검에서 시험 서명으로 확인했지만, 실제 산출물에서도 확인한다.
@@ -384,14 +441,45 @@ EOF
 # 릴리스에 필요한 건 방금 찍은 버전 태그 하나뿐이므로 그것만 이름으로 지정한다.
 if [[ $IS_DIRTY -eq 1 ]]; then
   warn "커밋 안 된 변경이 섞인 결과물이다. 태그도 릴리스도 하지 말 것"
-elif ! git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
-  cat <<EOF
+elif [[ $NOTARIZE -eq 0 ]]; then
+  # 공증 안 한 결과물에 릴리스 명령을 찍어 주면, 경고를 흘려보고 그대로 붙여넣게 된다.
+  # 이 모드는 파이프라인 점검용이므로 릴리스로 가는 길 자체를 안 보여준다.
+  warn "--no-notarize 결과물이라 릴리스 명령을 출력하지 않는다"
+else
+  # 빌드한 커밋이 아직 origin/main 에 없으면, 태그만 밀 경우 태그가 가리키는 커밋을
+  # 브랜치에서 볼 수 없고, main 을 같이 밀면 태그에 없는 후속 커밋까지 나간다.
+  # 어느 쪽이든 사람이 알고 골라야 하므로, 상태를 말해 주고 명령을 나눠서 준다.
+  git fetch -q origin main 2>/dev/null || true
+  ORIGIN_MAIN="$(git rev-parse -q --verify origin/main || true)"
+  HEAD_FULL="$(git rev-parse HEAD)"
+  if [[ -n "$ORIGIN_MAIN" && "$ORIGIN_MAIN" != "$HEAD_FULL" ]]; then
+    warn "빌드한 커밋($GIT_SHA)이 origin/main($(git rev-parse --short "$ORIGIN_MAIN"))과 다르다."
+    warn "먼저 이 커밋을 main 에 올린 뒤 태그를 밀 것 — 태그만 밀면 브랜치에서 안 보이고,"
+    warn "main 을 통째로 밀면 태그에 없는 커밋까지 함께 나간다."
+  fi
+  if ! git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
+    # 🔴 `--tags` 를 쓰지 않는다(개발 30 에서 실제 사고). 그 플래그는 로컬 태그를 전부 밀어서,
+    # 공개할 생각이 없던 태그(스쿼시 전 원본 히스토리 등)까지 그 커밋 전체와 함께 올라간다.
+    # 원격 태그를 지워도 이미 올라간 객체는 한동안 SHA 로 접근 가능하다 → 애초에 안 민다.
+    cat <<EOF
 
   이 배포본을 릴리스하려면, 방금 빌드한 바로 그 커밋에 태그를 찍는다:
 
-    git tag $VERSION_TAG $GIT_SHA && git push origin main $VERSION_TAG
+    git tag $VERSION_TAG $GIT_SHA
+    git push origin $VERSION_TAG
     gh release create $VERSION_TAG "$DMG_PATH" --title "Kura $VERSION_TAG" --notes "sha256: $SHA256"
 EOF
+  else
+    # 태그가 이미 있으면(= 위 게이트에서 태그 = HEAD 로 확인된 상태) 안내가 통째로
+    # 사라져서, 정작 배포하려는 사람이 다음 명령을 못 받는다.
+    cat <<EOF
+
+  태그 $VERSION_TAG 는 이미 이 커밋($GIT_SHA)에 있다. 남은 단계:
+
+    git push origin $VERSION_TAG
+    gh release create $VERSION_TAG "$DMG_PATH" --title "Kura $VERSION_TAG" --notes "sha256: $SHA256"
+EOF
+  fi
 fi
 
 RELEASE_OK=1   # 여기까지 왔으면 산출물을 남긴다 (cleanup 이 이름을 안 바꾼다)

@@ -98,7 +98,16 @@ open /Applications/Kura.app
 ### 업데이트
 
 - **Homebrew**: `brew upgrade --cask dinggi5/tap/kura`
-- **DMG로 설치했다면**: 아직 앱 안에 자동 업데이트가 없어요. 새 버전은 [Releases](https://github.com/dinggi5/kura/releases)에서 받아 덮어써야 해요. GitHub 저장소 오른쪽 위 **Watch → Custom → Releases**를 켜두면 새 버전이 나올 때 알림이 와요. 지금 쓰는 버전은 앱의 **설정 → 정보**에 있어요.
+- **DMG로 설치했다면**: 아직 앱 안에 자동 업데이트가 없어요. 새 버전은 [Releases](https://github.com/dinggi5/kura/releases)에서 받아 덮어써야 해요. GitHub 저장소 오른쪽 위 **Watch → Custom → Releases**를 켜두면 새 버전이 나올 때 알림이 와요.
+
+⚠️ **덮어쓰기 전에 Kura를 완전히 종료하세요.** Kura는 창을 닫아도 백그라운드에 남아 있어서, 앱 파일만 바꾸면 **이미 켜져 있는 구버전이 그대로 계속 돌아요.** 보안 수정판을 받아놓고 옛 버전을 쓰는 상황이 생겨요.
+
+1. 메뉴바 곳간 아이콘 **우클릭 → 종료** (또는 창에서 ⌘Q)
+2. 새 앱을 `Applications`에 덮어쓰기
+3. Kura 다시 실행
+4. **설정 → 정보**에서 버전이 새 번호인지 확인
+
+- **자동 시작을 켜 뒀다면**: `brew upgrade` 는 옛 버전을 지우면서 로그인 항목(`~/Library/LaunchAgents/Kura.plist`)도 같이 내려요. 업데이트 뒤 **설정에서 자동 시작을 다시 켜 주세요.** (앱이 이 설정을 따로 기억하지 않고 OS 상태만 보기 때문이에요 — 다음 버전에서 고칠 예정이에요.)
 
 ### 지우기
 
@@ -113,7 +122,10 @@ brew uninstall --cask dinggi5/tap/kura   # 또는 /Applications/Kura.app 을 휴
 
 1. **12단어 복구 문구가 손에 있는지 먼저 확인하세요.** 앱의 헤더 열쇠 버튼에서 다시 볼 수 있어요.
 2. 잔액이 남아 있다면 다른 지갑으로 옮기세요.
-3. 그다음에 `rm -rf ~/.jigap`
+3. **Kura를 완전히 종료하세요** (메뉴바 아이콘 우클릭 → 종료). 켜져 있으면 몇 초마다 `~/.jigap`에 상태 파일을 쓰기 때문에, 지운 폴더가 곧바로 다시 생겨요.
+4. Kura MCP를 붙여 둔 AI 도구(Claude Code 등)도 종료하세요. MCP 서버도 같은 폴더에 상태 파일을 써요.
+5. 자동 시작을 켜 뒀다면 꺼 두거나 `rm ~/Library/LaunchAgents/Kura.plist` (앱을 휴지통으로 지우면 이 파일은 남아요. `brew uninstall --cask` 로 지우면 같이 내려가요).
+6. 그다음에 `rm -rf ~/.jigap`
 
 12단어 없이 3번을 하면 **그 지갑의 자산은 누구도 되찾을 수 없어요.**
 
