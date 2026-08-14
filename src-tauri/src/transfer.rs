@@ -1,0 +1,379 @@
+// 온체인 송금 + 잔액 조회 (Session 3~6).
+// do_send_* 코어(서명자 인자)와 비번 래퍼를 분리 — 자율 승인 경로(session)가 코어를 공유한다.
+// 코어가 긴급 잠금·단일/일일 한도·내역·누적 기록을 모두 적용한다.
+
+use alloy::network::{EthereumWallet, TransactionBuilder};
+use alloy::primitives::{
+    utils::{format_ether, format_units},
+    Address, U256,
+};
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::types::TransactionRequest;
+use alloy::signers::local::PrivateKeySigner;
+use serde::Serialize;
+use zeroize::Zeroizing;
+
+use crate::chain::{active_chain, with_pinned_chain, IERC20};
+use crate::history::log_attempt;
+use crate::limits::{parse_eth_nonneg, parse_usdc_nonneg, refund_spend, reserve_spend};
+use crate::lock::read_lock;
+use crate::settings::{effective_rpc, read_settings, redact_urls};
+use crate::trusted::record_trusted;
+use crate::wallet::unlock_signer;
+
+/// 잔액 — 보기 좋게 다듬기 전의 십진수 문자열.
+#[derive(Serialize)]
+pub(crate) struct Balances {
+    eth: String,
+    usdc: String,
+}
+
+/// 체인/RPC 전송 에러를 사람이 읽을 수 있는 한국어로 바꾼다. alloy 의 revert 에러는
+/// "server returned an error response: error code 3: execution reverted: ERC20: transfer amount
+/// exceeds balance, data: \"0x08c3...\"" 처럼 길고 hex 가 붙어 그대로 보여주면 못 읽는다 →
+/// 흔한 원인은 또렷한 안내로 매핑하고, 모르는 건 서버 프리픽스·hex data 노이즈를 떼어 간결하게.
+/// (이 메시지는 GUI 승인 모달·거래 내역·CLI/MCP 결과에 그대로 노출된다.)
+/// `token` = 호출 문맥("USDC"/"ETH") — 막연한 "exceeds balance" 류를 토큰에 맞게 안내하려고.
+fn humanize_chain_error(raw: &str, token: &str) -> String {
+    let low = raw.to_lowercase();
+    // ERC20 transfer 가 잔액 초과로 revert — USDC 경로에서만 나는 구체 revert 사유.
+    if low.contains("transfer amount exceeds balance") {
+        return "USDC 잔액이 부족해요. 충전 후 다시 시도하세요.".into();
+    }
+    // 가스(또는 ETH 송금액) 부족 — 트랜잭션을 낼 ETH가 모자람(가스는 항상 ETH라 토큰 무관).
+    if low.contains("insufficient funds") {
+        return "ETH가 부족해요(가스 포함). ETH를 조금 충전한 뒤 다시 시도하세요.".into();
+    }
+    // 그 밖의 "exceeds balance" 류는 토큰 문맥에 맞춰 안내(ETH 경로를 USDC 부족으로 오안내 방지).
+    if low.contains("exceeds balance") {
+        return format!("{token} 잔액이 부족해요. 충전 후 다시 시도하세요.");
+    }
+    // execution reverted: <사유> 만 뽑고 뒤의 data hex 는 버린다.
+    if let Some(idx) = raw.find("execution reverted:") {
+        let after = &raw[idx + "execution reverted:".len()..];
+        let reason = after.split(", data:").next().unwrap_or(after).trim();
+        if !reason.is_empty() {
+            return format!("전송이 거부됐어요: {reason}");
+        }
+        return "전송이 체인에서 거부됐어요.".into();
+    }
+    // 알 수 없는 에러: 서버 프리픽스·hex data 노이즈 제거 후 간결하게.
+    let cleaned = raw
+        .split(", data:")
+        .next()
+        .unwrap_or(raw)
+        .replace("server returned an error response: ", "")
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        "전송에 실패했어요.".into()
+    } else {
+        format!("전송에 실패했어요: {cleaned}")
+    }
+}
+
+/// 지갑 주소의 ETH(가스용) + USDC(결제용) 잔액을 Base Sepolia에서 조회한다.
+#[tauri::command]
+pub(crate) async fn get_balances(addr_hex: String) -> Result<Balances, String> {
+    let addr: Address = addr_hex.parse().map_err(|e| format!("주소 파싱 실패: {e}"))?;
+
+    let provider = ProviderBuilder::new()
+        .connect(&effective_rpc())
+        .await
+        .map_err(|e| format!("RPC 연결 실패: {}", redact_urls(&e.to_string())))?;
+
+    // ETH와 USDC 잔액을 동시에 조회 (순차 2번 → RPC 왕복 1번 분량).
+    let chain = active_chain();
+    let usdc_contract = IERC20::new(chain.usdc_address, &provider);
+    let (wei, raw): (U256, U256) = tokio::try_join!(
+        async {
+            provider
+                .get_balance(addr)
+                .await
+                .map_err(|e| format!("ETH 잔액 조회 실패: {}", redact_urls(&e.to_string())))
+        },
+        async {
+            usdc_contract
+                .balanceOf(addr)
+                .call()
+                .await
+                .map_err(|e| format!("USDC 잔액 조회 실패: {}", redact_urls(&e.to_string())))
+        },
+    )?;
+
+    let eth = format_ether(wei);
+    let usdc =
+        format_units(raw, chain.usdc_decimals).map_err(|e| format!("USDC 단위 변환 실패: {e}"))?;
+
+    Ok(Balances { eth, usdc })
+}
+
+/// 받는 주소 문자열을 파싱한다 (ETH/USDC 송금·x402 서명 공용).
+pub(crate) fn parse_to_addr(to: &str) -> Result<Address, String> {
+    to.trim()
+        .parse()
+        .map_err(|e| format!("받는 주소가 올바르지 않습니다: {e}"))
+}
+
+/// 서명 가능한(지갑 붙은) provider 를 만든다.
+async fn signing_provider(signer: PrivateKeySigner) -> Result<impl Provider, String> {
+    let wallet = EthereumWallet::from(signer);
+    ProviderBuilder::new()
+        .wallet(wallet)
+        .connect(&effective_rpc())
+        .await
+        .map_err(|e| format!("RPC 연결 실패: {}", redact_urls(&e.to_string())))
+}
+
+/// 비번으로 키를 복호화해 Base Sepolia에서 ETH(가스 토큰)를 송금한다. tx 해시를 돌려준다.
+#[tauri::command]
+pub(crate) async fn send_eth(
+    password: String,
+    to: String,
+    amount_eth: String,
+) -> Result<String, String> {
+    let password = Zeroizing::new(password);
+    // 비번 → 서명자. 실패하면(비번 오류 등) 시도로 기록하고 거부.
+    let signer = match unlock_signer(&password) {
+        Ok(s) => s,
+        Err(e) => {
+            log_attempt("ETH", to.trim(), amount_eth.trim(), "failed", &e);
+            return Err(e);
+        }
+    };
+    let to_addr = to.clone();
+    let hash = do_send_eth(&signer, to, amount_eth).await?;
+    record_trusted(&to_addr); // 비번(사람) 승인 성공 = 신뢰 주소 학습
+    Ok(hash)
+}
+
+/// ETH 송금 코어 — 서명자가 이미 있는 상태에서 실행한다(비번 래퍼와 자율 승인 경로가 공유).
+/// 긴급 잠금·단일/일일 한도·내역·누적 기록을 모두 적용한다.
+pub(crate) async fn do_send_eth(
+    signer: &PrivateKeySigner,
+    to: String,
+    amount_eth: String,
+) -> Result<String, String> {
+    // 작업 진입 시 체인을 한 번 고정 — 이 송금의 한도·장부·RPC·내역이 모두 같은 체인을 본다.
+    with_pinned_chain(active_chain().chain_id, do_send_eth_inner(signer, to, amount_eth)).await
+}
+
+async fn do_send_eth_inner(
+    signer: &PrivateKeySigner,
+    to: String,
+    amount_eth: String,
+) -> Result<String, String> {
+    let amt = amount_eth.trim();
+    let value = parse_eth_nonneg(amt)?;
+    if value.is_zero() {
+        return Err("0보다 큰 금액을 입력하세요".into());
+    }
+    let to_addr = parse_to_addr(&to)?;
+    let to = to.trim();
+
+    // 긴급 잠금: 켜져 있으면 모든 송금을 가장 먼저 차단한다 (비상 스위치).
+    if read_lock() {
+        log_attempt("ETH", to, amt, "blocked", "긴급 잠금");
+        return Err("긴급 잠금이 켜져 있어 송금이 차단됐어요. 해제 후 다시 시도하세요.".into());
+    }
+
+    // 단일 + 일일 누적 한도 검사 + 예약(낙관적 선반영). 락은 이 빠른 파일 I/O 구간만 잡는다
+    // (느린 RPC 가 모든 결제를 전역 정지시키지 않게). 한도 초과면 여기서 거부.
+    let settings = read_settings();
+    let single = parse_eth_nonneg(&settings.single_eth)?;
+    let daily = parse_eth_nonneg(&settings.daily_eth)?;
+    let reserved_day = match reserve_spend("ETH", value, single, daily, 18).await {
+        Ok(d) => d,
+        Err(e) => {
+            log_attempt("ETH", to, amt, "blocked", &e);
+            return Err(e);
+        }
+    };
+
+    // 네트워크 전송은 락 밖에서 — 실패하면 예약한 사용액을 환불한다(예약한 날에만).
+    let provider = match signing_provider(signer.clone()).await {
+        Ok(p) => p,
+        Err(e) => {
+            refund_spend("ETH", value, reserved_day).await;
+            log_attempt("ETH", to, amt, "failed", &e);
+            return Err(e);
+        }
+    };
+    let tx = TransactionRequest::default()
+        .with_to(to_addr)
+        .with_value(value);
+    let pending = match provider.send_transaction(tx).await {
+        Ok(p) => p,
+        Err(e) => {
+            refund_spend("ETH", value, reserved_day).await;
+            let msg = humanize_chain_error(&redact_urls(&e.to_string()), "ETH");
+            log_attempt("ETH", to, amt, "failed", &msg);
+            return Err(msg);
+        }
+    };
+
+    // 전송 성공 → 내역 로그 (누적 사용액은 예약 단계에서 이미 기록됨).
+    let hash = pending.tx_hash().to_string();
+    log_attempt("ETH", to, amt, "sent", &hash);
+
+    Ok(hash)
+}
+
+/// 비번으로 키를 복호화해 Base Sepolia에서 USDC(ERC20)를 송금한다. tx 해시를 돌려준다.
+/// (가스는 ETH로 지불되므로 ETH 잔액도 약간 필요하다.)
+#[tauri::command]
+pub(crate) async fn send_usdc(
+    password: String,
+    to: String,
+    amount_usdc: String,
+) -> Result<String, String> {
+    let password = Zeroizing::new(password);
+    let signer = match unlock_signer(&password) {
+        Ok(s) => s,
+        Err(e) => {
+            log_attempt("USDC", to.trim(), amount_usdc.trim(), "failed", &e);
+            return Err(e);
+        }
+    };
+    let to_addr = to.clone();
+    let hash = do_send_usdc(&signer, to, amount_usdc).await?;
+    record_trusted(&to_addr); // 비번(사람) 승인 성공 = 신뢰 주소 학습
+    Ok(hash)
+}
+
+/// USDC 송금 코어 — 서명자가 이미 있는 상태에서 실행한다(비번 래퍼와 자율 승인 경로가 공유).
+pub(crate) async fn do_send_usdc(
+    signer: &PrivateKeySigner,
+    to: String,
+    amount_usdc: String,
+) -> Result<String, String> {
+    // 작업 진입 시 체인 고정 — decimals·USDC 컨트랙트·RPC·한도·장부·내역이 모두 같은 체인.
+    with_pinned_chain(active_chain().chain_id, do_send_usdc_inner(signer, to, amount_usdc)).await
+}
+
+async fn do_send_usdc_inner(
+    signer: &PrivateKeySigner,
+    to: String,
+    amount_usdc: String,
+) -> Result<String, String> {
+    let dec = active_chain().usdc_decimals;
+    let amt = amount_usdc.trim();
+    let value: U256 = parse_usdc_nonneg(amt, dec)?;
+    if value.is_zero() {
+        return Err("0보다 큰 금액을 입력하세요".into());
+    }
+    let to_addr = parse_to_addr(&to)?;
+    let to = to.trim();
+
+    // 긴급 잠금: 켜져 있으면 모든 송금을 가장 먼저 차단한다 (비상 스위치).
+    if read_lock() {
+        log_attempt("USDC", to, amt, "blocked", "긴급 잠금");
+        return Err("긴급 잠금이 켜져 있어 송금이 차단됐어요. 해제 후 다시 시도하세요.".into());
+    }
+
+    // 한도 검사 + 예약 (do_send_eth 와 동일 — 락은 빠른 파일 I/O 만, 네트워크 전송은 락 밖).
+    let settings = read_settings();
+    let single: U256 = parse_usdc_nonneg(&settings.single_usdc, dec)?;
+    let daily: U256 = parse_usdc_nonneg(&settings.daily_usdc, dec)?;
+    let reserved_day = match reserve_spend("USDC", value, single, daily, dec).await {
+        Ok(d) => d,
+        Err(e) => {
+            log_attempt("USDC", to, amt, "blocked", &e);
+            return Err(e);
+        }
+    };
+
+    // 네트워크 전송은 락 밖에서 — 실패하면 예약한 사용액을 환불한다(예약한 날에만).
+    let provider = match signing_provider(signer.clone()).await {
+        Ok(p) => p,
+        Err(e) => {
+            refund_spend("USDC", value, reserved_day).await;
+            log_attempt("USDC", to, amt, "failed", &e);
+            return Err(e);
+        }
+    };
+    let usdc = IERC20::new(active_chain().usdc_address, &provider);
+    let pending = match usdc.transfer(to_addr, value).send().await {
+        Ok(p) => p,
+        Err(e) => {
+            refund_spend("USDC", value, reserved_day).await;
+            let msg = humanize_chain_error(&redact_urls(&e.to_string()), "USDC");
+            log_attempt("USDC", to, amt, "failed", &msg);
+            return Err(msg);
+        }
+    };
+
+    // 전송 성공 → 내역 로그 (누적 사용액은 예약 단계에서 이미 기록됨).
+    let hash = pending.tx_hash().to_string();
+    log_attempt("USDC", to, amt, "sent", &hash);
+
+    Ok(hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::address;
+
+    // USDC 송금 calldata 가 표준 ERC20 transfer(address,uint256) 인코딩과 일치해야 한다.
+    // (네트워크/잔액 없이 ABI 인코딩만 검증.)
+    #[test]
+    fn usdc_transfer_calldata_is_standard() {
+        use alloy::sol_types::SolCall;
+        let to = address!("0x00000000000000000000000000000000000000Ad");
+        let call = IERC20::transferCall {
+            to,
+            amount: U256::from(1_000_000u64), // 1 USDC (6 decimals)
+        };
+        let data = call.abi_encode();
+        // transfer(address,uint256) 셀렉터 = 0xa9059cbb
+        assert_eq!(&data[..4], &[0xa9, 0x05, 0x9c, 0xbb]);
+        // 인자 2개(주소+금액) = 64바이트 → 셀렉터 포함 68바이트
+        assert_eq!(data.len(), 68);
+    }
+
+    // USDC 금액 파싱: 6 decimals 로 정확히 변환돼야 한다 (음수 거부 헬퍼 경유).
+    #[test]
+    fn usdc_amount_parses_with_6_decimals() {
+        let v: U256 = parse_usdc_nonneg("1.5", 6).unwrap();
+        assert_eq!(v, U256::from(1_500_000u64));
+    }
+
+    // 날것 revert 에러를 사람이 읽을 수 있는 한국어로 매핑하고, hex data 노이즈를 떼어낸다.
+    #[test]
+    fn humanize_maps_common_chain_errors() {
+        let raw = "server returned an error response: error code 3: execution reverted: \
+                   ERC20: transfer amount exceeds balance, data: \"0x08c379a0...\"";
+        assert_eq!(
+            humanize_chain_error(raw, "USDC"),
+            "USDC 잔액이 부족해요. 충전 후 다시 시도하세요."
+        );
+        assert!(humanize_chain_error("insufficient funds for gas * price + value", "ETH")
+            .starts_with("ETH가 부족해요"));
+        // 토큰 문맥: ETH 경로의 막연한 "exceeds balance" 는 ETH 부족으로(USDC 오안내 방지).
+        assert_eq!(
+            humanize_chain_error("transaction cost exceeds balance", "ETH"),
+            "ETH 잔액이 부족해요. 충전 후 다시 시도하세요."
+        );
+        // 알 수 없는 revert: 사유만 남기고 hex data 는 버린다.
+        let other = "execution reverted: Pausable: paused, data: \"0xdeadbeef\"";
+        assert_eq!(humanize_chain_error(other, "USDC"), "전송이 거부됐어요: Pausable: paused");
+        // 완전 미지: 서버 프리픽스 제거 + 간결화.
+        assert_eq!(
+            humanize_chain_error("server returned an error response: nonce too low", "ETH"),
+            "전송에 실패했어요: nonce too low"
+        );
+    }
+
+    // 실제 Base Sepolia RPC로 잔액 조회 (네트워크 필요).
+    #[tokio::test]
+    #[ignore = "네트워크 필요 (Base Sepolia 공개 RPC)"]
+    async fn live_balance_query() {
+        let b = get_balances("0x8b7ba5077d261739f5FeBB31B10167671e590161".into())
+            .await
+            .expect("잔액 조회 성공");
+        println!("ETH = {}  USDC = {}", b.eth, b.usdc);
+        assert!(b.eth.parse::<f64>().is_ok());
+        assert!(b.usdc.parse::<f64>().is_ok());
+    }
+}

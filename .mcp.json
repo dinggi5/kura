@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kura": {
+      "command": "cargo",
+      "args": ["run", "--quiet", "--manifest-path", "./kura-mcp/Cargo.toml"]
+    }
+  }
+}

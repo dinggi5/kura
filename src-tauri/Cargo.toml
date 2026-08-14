@@ -1,0 +1,48 @@
+[package]
+name = "kura"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "kura_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# tray-icon = 메뉴바 상주(개발 26), image-png = 트레이 아이콘을 PNG 로 싣기,
+# macos-private-api = 투명 창(팝오버 둥근 모서리). App Store 심사에선 막히는 옵션이지만
+# 크립토 지갑은 어차피 심사 3.1.5(조직 계정 필수)로 못 올려 DMG/Homebrew 배포라 무관.
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-opener = "2"
+# 로그인 시 자동 시작 (상시 구동 — Session 18)
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+alloy = { version = "2.0.5", features = [
+    "signer-local",
+    "signer-mnemonic",
+    "network",
+    "rpc-types",
+] }
+dirs = "6.0.0"
+rand = "0.8"
+# 키 암호화 (비번 → 키 유도 + AES-256-GCM)
+argon2 = "0.5"
+aes-gcm = "0.10"
+base64 = "0.22"
+zeroize = "1"
+# 잔액 조회 등에서 여러 RPC 호출을 동시에 (try_join! 매크로) + 일일 한도 장부 직렬화(sync::Mutex)
+tokio = { version = "1.52.3", features = ["macros", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
+

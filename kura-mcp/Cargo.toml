@@ -1,0 +1,39 @@
+[package]
+name = "kura-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "Kura 어댑터 — AI 에이전트(MCP)와 사람(CLI)이 로컬 지갑을 조회·결제"
+
+# 두 바이너리가 같은 lib(wallet/flow/payment/x402/chain)을 공유한다:
+#   kura-mcp : stdio MCP 서버 (AI 에이전트용, src/main.rs)
+#   kura     : 터미널 CLI 어댑터 (사람·스크립트용, src/bin/kura.rs)
+# default-run = "kura-mcp" → .mcp.json 의 `cargo run`(--bin 없음)이 계속 MCP 서버를 띄운다.
+default-run = "kura-mcp"
+
+# 독립 크레이트: src-tauri(Tauri 앱)와 분리. 파일 읽기 + RPC만 하므로 Tauri 의존성 불필요.
+# RPC_URL / USDC_ADDRESS 등 일부 상수는 src-tauri/src/lib.rs와 의도적으로 중복(공유 크레이트
+# 안 만드는 정책 — Tauri 빌드 위험 0).
+
+[dependencies]
+# MCP 서버 (공식 Rust SDK). stdio 전송 + 매크로 기반 도구 정의.
+rmcp = { version = "0.16", features = ["server", "macros", "transport-io"] }
+# 비동기 런타임 (stdio I/O + RPC await).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "time"] }
+# JSON 직렬화 + 도구 인자 스키마.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+# 잔액 조회 (Base Sepolia RPC + ERC20 balanceOf). src-tauri와 동일 버전.
+alloy = { version = "2.0.5", features = ["network", "rpc-types"] }
+# 홈 디렉터리(~/.jigap) 탐색.
+dirs = "6.0.0"
+anyhow = "1"
+# x402 HTTP 클라이언트 (Session 12): 402 응답 fetch + X-PAYMENT 재요청.
+# rustls = macOS에서 시스템 openssl 의존성 회피.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# X-PAYMENT 헤더 base64 인코딩 (src-tauri와 동일 버전).
+base64 = "0.22"
+
+[dev-dependencies]
+# 목 x402 서버 검증: 받은 X-PAYMENT의 EIP-3009 서명을 만들고/복구해 라운드트립 검증.
+alloy = { version = "2.0.5", features = ["network", "rpc-types", "signer-local"] }

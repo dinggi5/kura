@@ -1,0 +1,134 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------
+   Pretendard — 앱 안에 번들 (CDN 링크 아님)
+   전에는 jsDelivr 에서 받아 썼는데, 그러면 **앱을 켤 때마다 외부 CDN 에 요청**이 나가
+   IP 와 "Kura 를 쓴다"는 사실이 흘러가고 오프라인에선 폰트가 깨졌다. 폰트가 프론트에
+   남아 있던 유일한 외부 요청이라 파일을 넣어 끊었다(앱 전체의 네트워크 감사는 아니다 —
+   RPC·x402 는 그대로 나간다. README 보안 모델 참고).
+
+   가변 폰트 하나(2MB)로 모든 굵기를 덮는다. 부분집합(subset)으로 더 줄일 수도 있지만,
+   거래 내역 메모처럼 **임의의 글자**가 들어올 수 있어 빠진 글리프가 두부(□)로 보일 위험을
+   지지 않는다. 원본을 그대로 넣는다 — 가공하면 OFL 의 Reserved Font Name 조항 때문에
+   "Pretendard" 이름을 못 쓴다. font-weight 45~920 = 이 폰트의 실제 축 범위.
+   라이선스: SIL OFL 1.1 (public/fonts/LICENSE-Pretendard.txt 동봉, 설정 '정보'에 고지)
+--------------------------------------------------------------- */
+@font-face {
+  font-family: "Pretendard Variable";
+  font-style: normal;
+  font-weight: 45 920;
+  font-display: swap;
+  /* 같은 파일을 두 번 적은 건 형식 문자열 호환용이다(엔진은 지원한다고 판단한 첫 후보
+     하나만 내려받으므로 이중 다운로드가 아니다). woff2-variations 는 옛 문법이라 무시하는
+     엔진이 있어 그때 아래 woff2 로 떨어지게 둔다 — 실제 대상인 WKWebView 가 어느 쪽을
+     고르는지 확인하지 않았으니, 굳이 한 줄로 줄여 걸 이유가 없다. */
+  src:
+    url("/fonts/PretendardVariable.woff2") format("woff2-variations"),
+    url("/fonts/PretendardVariable.woff2") format("woff2");
+}
+
+/* ---------------------------------------------------------------
+   Kura 디자인 토큰
+   - 와비사비: 순백/순흑 대신 미세 아이보리 / 살짝 갈색 잉크
+   - 코다와리: 한글 자간 -0.01em, 그림자/모션 픽셀 단위 조율
+   - 마(間): 간격 한 단계 더 넓게
+--------------------------------------------------------------- */
+
+@theme {
+  /* 색 — 라이트 (아이보리) */
+  --color-ivory-50:  #FCFBF6;  /* 가장 옅은 아이보리, 배경 하이라이트 */
+  --color-ivory-100: #FAFAF7;  /* 기본 배경 */
+  --color-ivory-200: #F5F4EE;  /* 카드 표면 */
+  --color-ivory-300: #ECEAE0;  /* 보더 진함 */
+  --color-ivory-400: #E8E5DC;  /* 보더 기본 */
+
+  /* 잉크 — 순흑 X, 살짝 갈색 섞음 */
+  --color-ink-900: #1A1814;
+  --color-ink-700: #4A4640;
+  --color-ink-500: #8A8478;
+  --color-ink-300: #B5AFA2;
+
+  /* 강조 — 토스블루 (1점만) */
+  --color-accent: #3182F6;
+  --color-accent-hover: #1B6BE3;
+
+  /* 다크 — 잉크 베이스 (살짝 갈색) */
+  --color-night-900: #14130F;
+  --color-night-800: #1A1815;
+  --color-night-700: #23211D;
+  --color-night-600: #2E2B25;
+
+  /* 폰트 */
+  --font-sans: "Pretendard Variable", "Pretendard", -apple-system, BlinkMacSystemFont,
+    "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* 간격 — 한 단계 더 넓게 (마間) */
+  --spacing-tight: 0.5rem;
+  --spacing-snug: 1rem;
+  --spacing-relax: 1.75rem;
+  --spacing-loose: 3rem;
+
+  /* 그림자 — 2단, 부드럽게 */
+  --shadow-soft: 0 1px 2px rgba(26, 24, 20, 0.04),
+                 0 2px 6px rgba(26, 24, 20, 0.03);
+  --shadow-lift: 0 4px 12px rgba(26, 24, 20, 0.06),
+                 0 12px 32px rgba(26, 24, 20, 0.04);
+
+  /* 모션 — 통일된 easing */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 150ms;
+  --duration-base: 220ms;
+  --duration-slow: 360ms;
+
+  /* 라운드 */
+  --radius-card: 14px;
+  --radius-pill: 999px;
+  /* 메뉴바 팝오버 창의 모서리 (macOS 팝오버 관용값) */
+  --radius-window: 14px;
+}
+
+/* ---------- 전역 ---------- */
+:root {
+  font-family: var(--font-sans);
+  font-feature-settings: "ss10", "tnum";
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em; /* 한글 자간 */
+
+  color: var(--color-ink-900);
+  /* 메뉴바 팝오버(개발 26): 창이 투명이라 배경은 shell 이 둥근 모서리로 칠한다.
+     여기서 색을 칠하면 모서리가 사각으로 뭉개진다. */
+  background: transparent;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #E8E5DD;
+  }
+}
+
+body {
+  margin: 0;
+  height: 100vh;
+  background: transparent;
+  /* 팝오버는 창 자체가 고정 크기 — 바깥쪽 스크롤(고무줄)은 없애고 안쪽에서만 스크롤한다. */
+  overflow: hidden;
+}
+
+/* 숫자는 tabular figures + 자간 살짝 좁게 (코다와리) */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  letter-spacing: -0.02em;
+}
+
+/* 큰 잔액 — 미타테 (디지털인데 무게감 있게) */
+.balance {
+  font-weight: 600;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}

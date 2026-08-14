@@ -1,0 +1,7 @@
+<!-- 메뉴바 아이콘 (평상시) — 곳간/금고 문. macOS 템플릿 이미지라 색은 검정 + 알파만 쓴다
+     (시스템이 메뉴바 밝기에 맞춰 자동 반전). 44x44 = 22pt @2x. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
+  <rect x="8.6" y="8.6" width="26.8" height="26.8" rx="7.6"
+        fill="none" stroke="#000" stroke-width="3.2" stroke-linejoin="round"/>
+  <circle cx="22" cy="22" r="3.4" fill="#000"/>
+</svg>

@@ -1,0 +1,54 @@
+# --- Node / 프론트 ---
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+
+# --- Rust / Tauri ---
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+**/*.rs.bk
+
+# --- 환경 / 비밀 ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+
+# 배포 서명·공증 자격증명 (실명 서명 ID, App Store Connect API 키)
+scripts/release.env
+*.p8
+
+# --- 지갑 데이터 (절대 커밋 금지) ---
+.jigap/
+wallet.enc
+*.wallet
+seed.txt
+mnemonic.txt
+
+# --- macOS / 에디터 ---
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+
+# --- AI 코딩 에이전트 로컬 파일 (워크트리·세션·설정) ---
+.claude/
+.codex/
+
+# 개발 일지 — 로컬 전용 (개발 29 결정)
+# 세션마다 솔직하게 적는 인수인계 기록이라, 개인 운영정보(자격증명 보관 위치 등)가
+# 자연스럽게 섞인다. 리포는 공개라 "쓸 때마다 검열"에 기대는 대신 아예 안 올린다.
+DEVLOG.md
+
+# --- 로그 ---
+*.log
+npm-debug.log*
+pnpm-debug.log*

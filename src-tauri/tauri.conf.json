@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Kura",
+  "version": "0.1.0",
+  "identifier": "com.dinggi5.kura",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Kura",
+        "width": 420,
+        "height": 640,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "center": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Finance",
+    "copyright": "© 2026 dinggi5. MIT License.",
+    "shortDescription": "AI 에이전트를 위한 로컬 이더리움 지갑",
+    "longDescription": "키가 이 맥을 떠나지 않는 로컬 전용 지갑. AI 에이전트가 결제를 준비하면 사람이 비밀번호로 승인한다. Base + x402.",
+    "macOS": {
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}

@@ -1,0 +1,7 @@
+<!-- 메뉴바 아이콘 (긴급 잠금) — 자물쇠. 평상시 아이콘과 실루엣 자체가 달라야 16px에서도
+     한눈에 구분된다(채움/비움 차이만으론 안 읽힘). 44x44 = 22pt @2x. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
+  <path d="M15.2 19.5 V15.6 a6.8 6.8 0 0 1 13.6 0 v3.9"
+        fill="none" stroke="#000" stroke-width="3.2" stroke-linecap="round"/>
+  <rect x="9.4" y="19.5" width="25.2" height="16.4" rx="4.6" fill="#000"/>
+</svg>
