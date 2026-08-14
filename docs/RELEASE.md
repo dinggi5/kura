@@ -203,8 +203,12 @@ staple 부터 의심하되 단정하지는 말 것 — 스테이플이 없어도
 git commit -am "v0.1.1"
 # 3. 서명·공증 빌드
 ./scripts/release.sh
-# 4~5. 태그와 릴리스 — release.sh 가 마지막에 **커밋 SHA 를 박아서** 두 줄을 찍어 준다.
-#      그대로 복사해 실행하면 된다. 손으로 `git tag v0.1.1` 을 치지 말 것(아래 이유).
+# 4~5. 태그와 릴리스 — release.sh 가 마지막에 **커밋 SHA 를 박아서** 명령을 찍어 준다
+#      (git tag / git push origin <태그> / gh release create). 손으로 `git tag v0.1.1` 을
+#      치지 말 것(아래 이유).
+#      ⚠️ 빌드한 커밋이 origin/main 에 아직 없으면 스크립트가 경고를 낸다. 그때는
+#      `git push origin main` 을 **먼저** 하고 나서 태그를 민다 — 태그만 밀면 릴리스는
+#      생기지만 그 커밋이 브랜치 어디에도 없다.
 ```
 
 **태그를 빌드 전이 아니라 빌드 뒤에, 그것도 SHA 를 박아서 찍는 이유**: README 는

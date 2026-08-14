@@ -52,7 +52,9 @@ if [[ -f "$ENV_FILE" ]]; then
   # 정식 배포(공증)에서는 경고로 넘기지 않는다. 이 파일에는 앱 전용 암호나 API 키 위치가
   # 들어 있고, 그게 새면 "내 이름으로 서명된 악성 앱"이 가능해진다 — 이 지갑에서 제일
   # 아픈 시나리오다. 점검용(--no-notarize)에서는 경고로 둔다.
-  if [[ "$perms" != "600" ]]; then
+  # 600 만 통과시키면 400(읽기 전용)처럼 **더 엄격한** 설정까지 막는다. 실제 조건은
+  # "그룹·다른 사용자가 못 본다" 이므로 하위 6비트가 0인지로 검사한다.
+  if (( 8#$perms & 077 )); then
     if [[ $NOTARIZE -eq 1 ]]; then
       die "$ENV_FILE 권한이 $perms 다. 다른 로컬 계정이 읽을 수 있는 자격증명으로는 정식 배포를 만들지 않는다:  chmod 600 $ENV_FILE"
     fi
@@ -227,6 +229,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
   fi
 fi
 GIT_SHA="$(git rev-parse --short HEAD)"
+HEAD_BEFORE="$(git rev-parse HEAD)"   # 빌드가 끝난 뒤 같은 커밋인지 대조할 기준
 info "커밋 $GIT_SHA"
 
 # 태그 v<버전> 이 이 배포본의 소스와 맞는지.
@@ -275,8 +278,13 @@ step "빌드 · 서명"
 BUILD_ARGS=(--bundles app,dmg)
 BUNDLE_DIR="src-tauri/target/release/bundle"
 if [[ $UNIVERSAL -eq 1 ]]; then
-  grep -q '^x86_64-apple-darwin$' <<<"$(rustup target list --installed)" || die \
-    "유니버설 빌드에는 x86_64 타깃이 필요하다:  rustup target add x86_64-apple-darwin"
+  # 인텔 호스트에는 x86_64 타깃이 기본으로 있으니 그것만 보면 통과시켜 놓고, 정작 없는
+  # aarch64 때문에 빌드 한참 뒤에 죽는다. 유니버설은 두 쪽이 다 있어야 한다.
+  INSTALLED_TARGETS="$(rustup target list --installed)"
+  for t in x86_64-apple-darwin aarch64-apple-darwin; do
+    grep -q "^$t\$" <<<"$INSTALLED_TARGETS" || die \
+      "유니버설 빌드에는 $t 타깃이 필요하다:  rustup target add $t"
+  done
   BUILD_ARGS+=(--target universal-apple-darwin)
   BUNDLE_DIR="src-tauri/target/universal-apple-darwin/release/bundle"
 fi
@@ -302,7 +310,16 @@ env "${BUILD_ENV[@]}" npm run tauri build -- "${BUILD_ARGS[@]}"
 # 빌드 전에 한 번 본 것으로는 부족하다. 빌드·공증은 몇 분씩 걸리고 그 사이에 편집기가
 # 저장을 하거나 cargo 가 lockfile 을 갱신할 수 있는데, 그러면 "태그 = 배포본 소스" 라는
 # 약속이 깨진 채로 서명·공증은 멀쩡히 통과한다(그 조합이 이 게이트의 존재 이유였다).
-if [[ $IS_DIRTY -eq 0 && -n "$(git status --porcelain)" ]]; then
+#
+# 트리가 더러워지는 것만 보면 부족하다 — 빌드 도중 다른 창에서 커밋하거나 체크아웃하면
+# 트리는 깨끗한데 HEAD 가 옮겨간다. 그러면 마지막에 찍어 주는 태그 명령은 빌드 전에
+# 잡아 둔 GIT_SHA 를 가리키므로, 태그와 산출물이 조용히 갈린다.
+# 명령 치환은 조건문 안에 두면 실패해도 빈 문자열로 통과하니 상태를 따로 받는다.
+STATUS_AFTER="$(git status --porcelain)" || die "빌드 후 git status 가 실패했다. 트리 상태를 확인하지 못했으므로 이 산출물은 보증할 수 없다"
+HEAD_AFTER="$(git rev-parse HEAD)" || die "빌드 후 HEAD 를 읽지 못했다"
+[[ "$HEAD_AFTER" == "$HEAD_BEFORE" ]] || die \
+  "빌드 도중 HEAD 가 $GIT_SHA → $(git rev-parse --short HEAD) 로 바뀌었다. 이 DMG 가 어느 커밋에서 나온 건지 보증할 수 없다"
+if [[ $IS_DIRTY -eq 0 && -n "$STATUS_AFTER" ]]; then
   git status --short
   die "빌드 도중에 작업 트리가 바뀌었다. 이 DMG 가 어느 소스에서 나온 건지 보증할 수 없다"
 fi
@@ -449,13 +466,18 @@ else
   # 빌드한 커밋이 아직 origin/main 에 없으면, 태그만 밀 경우 태그가 가리키는 커밋을
   # 브랜치에서 볼 수 없고, main 을 같이 밀면 태그에 없는 후속 커밋까지 나간다.
   # 어느 쪽이든 사람이 알고 골라야 하므로, 상태를 말해 주고 명령을 나눠서 준다.
-  git fetch -q origin main 2>/dev/null || true
+  if ! git fetch -q origin main 2>/dev/null; then
+    warn "origin/main 을 새로 못 받아왔다(네트워크·권한?). 아래 판단은 마지막으로 받아온 정보 기준이다"
+  fi
   ORIGIN_MAIN="$(git rev-parse -q --verify origin/main || true)"
   HEAD_FULL="$(git rev-parse HEAD)"
-  if [[ -n "$ORIGIN_MAIN" && "$ORIGIN_MAIN" != "$HEAD_FULL" ]]; then
-    warn "빌드한 커밋($GIT_SHA)이 origin/main($(git rev-parse --short "$ORIGIN_MAIN"))과 다르다."
-    warn "먼저 이 커밋을 main 에 올린 뒤 태그를 밀 것 — 태그만 밀면 브랜치에서 안 보이고,"
-    warn "main 을 통째로 밀면 태그에 없는 커밋까지 함께 나간다."
+  # 같은 커밋인지가 아니라 **origin/main 에 들어 있는지**를 본다. main 이 이 커밋보다
+  # 앞서 있는 건 정상(옛 태그를 다시 빌드하는 경우 등)인데, 같은지만 보면 그때마다
+  # "main 에 올려라"는 오탐이 난다.
+  if [[ -n "$ORIGIN_MAIN" ]] && ! git merge-base --is-ancestor "$HEAD_FULL" "$ORIGIN_MAIN"; then
+    warn "빌드한 커밋($GIT_SHA)이 아직 origin/main 에 없다."
+    warn "  git push origin main   ← 먼저 이걸 하고 나서 아래 태그를 밀 것"
+    warn "태그만 밀면 릴리스는 생기지만 그 커밋이 브랜치 어디에도 없다."
   fi
   if ! git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
     # 🔴 `--tags` 를 쓰지 않는다(개발 30 에서 실제 사고). 그 플래그는 로컬 태그를 전부 밀어서,

@@ -127,7 +127,7 @@ brew uninstall --cask dinggi5/tap/kura   # 또는 /Applications/Kura.app 을 휴
 5. 자동 시작을 켜 뒀다면 꺼 두거나 `rm ~/Library/LaunchAgents/Kura.plist` (앱을 휴지통으로 지우면 이 파일은 남아요. `brew uninstall --cask` 로 지우면 같이 내려가요).
 6. 그다음에 `rm -rf ~/.jigap`
 
-12단어 없이 3번을 하면 **그 지갑의 자산은 누구도 되찾을 수 없어요.**
+12단어 없이 마지막 `rm -rf ~/.jigap` 를 하면 **그 지갑의 자산은 누구도 되찾을 수 없어요.**
 
 ---
 
