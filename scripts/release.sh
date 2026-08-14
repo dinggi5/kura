@@ -376,6 +376,12 @@ EOF
 
 # 태그는 "방금 검증한 그 커밋"에 찍혀야 한다. 사람이 나중에 손으로 `git tag v0.1.1` 을
 # 치면 그때의 HEAD 에 붙어서, 빌드한 커밋과 조용히 어긋날 수 있다 → 커밋을 박아서 준다.
+#
+# 🔴 `--tags` 를 쓰지 않는다(개발 30 에서 실제로 사고가 났다). 그 플래그는 로컬 태그를
+# 전부 밀어서, 공개할 생각이 없던 태그(개발 29 가 남긴 스쿼시 전 원본 히스토리
+# pre-squash-dev29 등)까지 태그가 가리키는 커밋 전체와 함께 공개 리포로 올라간다.
+# 원격 태그를 지워도 이미 올라간 객체는 한동안 SHA 로 접근 가능하다 → 애초에 안 민다.
+# 릴리스에 필요한 건 방금 찍은 버전 태그 하나뿐이므로 그것만 이름으로 지정한다.
 if [[ $IS_DIRTY -eq 1 ]]; then
   warn "커밋 안 된 변경이 섞인 결과물이다. 태그도 릴리스도 하지 말 것"
 elif ! git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
@@ -383,7 +389,7 @@ elif ! git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
 
   이 배포본을 릴리스하려면, 방금 빌드한 바로 그 커밋에 태그를 찍는다:
 
-    git tag $VERSION_TAG $GIT_SHA && git push origin main --tags
+    git tag $VERSION_TAG $GIT_SHA && git push origin main $VERSION_TAG
     gh release create $VERSION_TAG "$DMG_PATH" --title "Kura $VERSION_TAG" --notes "sha256: $SHA256"
 EOF
 fi
