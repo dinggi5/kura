@@ -46,3 +46,14 @@ tokio = { version = "1.52.3", features = ["macros", "sync"] }
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
 
+# 인앱 자동 업데이트 (개발 31). 데스크톱 전용 — 모바일 타깃엔 안 들어간다.
+#
+# ⚠️ 지갑에서 자동 업데이트는 **두 번째 신뢰 뿌리**다. 업데이트 서명 개인키를 쥔 쪽은
+# 임의 코드를 이 앱으로 밀어넣을 수 있고, 그 코드는 ~/.jigap/wallet.enc 를 읽을 수 있다.
+# 그래서 (1) 서명 검증은 플러그인이 강제하고(minisign, 끌 수 없음),
+# (2) **조용한 설치는 하지 않는다** — 버전·릴리스 노트를 띄우고 사람이 눌러야 설치된다,
+# (3) 승인 대기 중인 결제가 있으면 재시작을 막는다(update.rs).
+# 자세한 근거는 SECURITY.md "업데이트" 절.
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2.10.1"
+

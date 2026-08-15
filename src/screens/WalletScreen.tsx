@@ -31,7 +31,8 @@ import { BalanceCard } from "@/components/BalanceCard";
 import { ReceiveCard } from "@/components/ReceiveCard";
 import { SendCard } from "@/components/SendCard";
 import { PaymentApprovalModal } from "@/components/PaymentApprovalModal";
-import { BackupNag, LockBanner } from "@/components/banners";
+import { BackupNag, LockBanner, UpdateBanner } from "@/components/banners";
+import { useUpdate } from "@/lib/useUpdate";
 import { SessionBar, UnlockSessionModal } from "@/components/SessionBar";
 import { BackupFlow } from "@/screens/BackupFlow";
 import { HelpScreen } from "@/screens/HelpScreen";
@@ -65,6 +66,9 @@ export function WalletScreen({
   // 새 지갑 생성 직후 1회 환영 투어(주소별 localStorage). 메인 화면 위 오버레이로 띄워
   // 결제 폴링·하트비트·승인 모달이 투어 중에도 살아 있게 한다.
   const [showTour, setShowTour] = useState(() => isWelcomePending(address));
+  // 업데이트 (개발 31) — 여기서 한 번만 부르고 설정 화면에 내려준다.
+  // 설정 안에서 부르면 화면을 닫을 때마다 확인 결과와 다운로드 진행이 사라진다.
+  const update = useUpdate();
   // AI 에이전트(MCP)가 보낸 결제 승인 요청. 1초마다 폴링한다.
   const [pending, setPending] = useState<PaymentRequest | null>(null);
   // AI(MCP 클라이언트)가 지금 이 지갑에 연결돼 있는지 — 메인 화면 배지용.
@@ -118,6 +122,18 @@ export function WalletScreen({
     loadLimits();
     invoke<boolean>("is_locked").then(setLocked).catch(() => {});
   }, [refreshBalances, loadLimits]);
+
+  // 시작 시 업데이트 자동 확인 (개발 31). 설정이 로드된 뒤 **실행당 한 번만** 돈다 —
+  // loadLimits 가 설정 화면을 닫을 때마다 settings 를 새로 받아오므로 ref 로 못을 박는다.
+  // silent: 네트워크가 없는 흔한 경우에 지갑 화면이 에러로 더러워지지 않게.
+  const autoCheckDone = useRef(false);
+  const autoCheckWanted = settings?.auto_check_update;
+  const { check: checkUpdate } = update;
+  useEffect(() => {
+    if (autoCheckDone.current || autoCheckWanted === undefined) return;
+    autoCheckDone.current = true;
+    if (autoCheckWanted) void checkUpdate({ silent: true });
+  }, [autoCheckWanted, checkUpdate]);
 
   // 체인이 바뀌면(설정에서 테스트넷↔메인넷 전환) 잔액·내역은 체인별로 다르므로 다시 불러온다.
   // (사용액 spend 는 loadLimits 가 설정 저장 후 onClose 에서 갱신한다.)
@@ -295,6 +311,7 @@ export function WalletScreen({
       <SettingsScreen
         current={settings}
         spend={spend}
+        update={update}
         onClose={() => {
           setShowSettings(false);
           loadLimits();
@@ -377,6 +394,18 @@ export function WalletScreen({
           />
         )}
         {!backedUp && <BackupNag onBackup={() => setShowBackup(true)} />}
+        {/* 업데이트 안내는 맨 아래 — 긴급 잠금·시드 백업이 먼저다(돈이 걸린 순서).
+            버튼은 설치가 아니라 설정의 정보 카드로 보낸다: 릴리스 노트를 보고 누르는 게 승인. */}
+        {update.info && !update.bannerHidden && (
+          <UpdateBanner
+            version={update.info.version}
+            onOpen={() => {
+              update.hideBanner();
+              setShowSettings(true);
+            }}
+            onHide={update.hideBanner}
+          />
+        )}
       </div>
 
       <div className="w-full max-w-md">

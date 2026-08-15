@@ -94,6 +94,41 @@ cp scripts/release.env.example scripts/release.env && chmod 600 scripts/release.
 이 파일은 `.gitignore` 에 들어 있어 커밋되지 않는다. 개인 계정이라 서명 이름에
 법적 실명이 들어가기 때문에 일부러 리포 밖에 두는 것이다.
 
+### ④ 업데이트 서명 키 만들기 (개발 31 — 1회, 그리고 다시 못 만든다)
+
+인앱 업데이트는 minisign 서명이 맞아야만 설치된다. 키는 **한 번 만들고 영원히 같은 걸
+쓴다** — 바꾸면 그 전 버전을 쓰는 사람들은 새 업데이트를 설치할 수 없다(그들 앱에는 옛
+공개키가 박혀 있으니까). 잃어버려도 마찬가지다.
+
+```bash
+npm run tauri signer generate -- -w ~/.tauri/kura-updater.key
+chmod 600 ~/.tauri/kura-updater.key
+```
+
+암호를 물으면 **강한 것으로 정해 비밀번호 관리자에 넣는다.**
+
+- 개인키 `~/.tauri/kura-updater.key` + 그 암호 → **이 둘을 잃으면 자동 업데이트는 끝난다.**
+  백업은 비밀번호 관리자나 오프라인 매체에. 클라우드 동기화 폴더·리포에는 두지 않는다.
+- 공개키 `~/.tauri/kura-updater.key.pub` → 파일 내용을 그대로 `src-tauri/tauri.conf.json`
+  의 `plugins.updater.pubkey` 에 넣는다(자리표시자 `REPLACE_WITH_UPDATER_PUBLIC_KEY` 를 교체).
+  공개키는 공개돼도 안전하다 — 앱에 박혀서 배포된다.
+
+`scripts/release.env` 에 아래를 추가한다:
+
+```bash
+TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/.tauri/kura-updater.key"
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD="위에서 정한 암호"
+```
+
+> 🔴 **이 키는 Developer ID 인증서만큼, 어떤 면에선 그보다 중요하다.** 인증서가 새면
+> "내 이름으로 서명된 새 악성 앱"이 만들어지지만, 이 키가 새면 **이미 사람들이 믿고
+> 설치해 둔 지갑들**에 임의 코드를 밀어넣을 수 있다. `SECURITY.md` 의 "업데이트" 절에
+> 사용자에게 약속한 내용이 있으니, 키 취급을 바꾸면 그 문서도 같이 고칠 것.
+
+`release.sh` 가 사전 점검에서 공개키가 자리표시자인지 보고, 빌드 뒤에는 나온 서명이
+**앱에 박은 그 공개키로 만들어졌는지** 키 ID 로 대조한다. 어긋나면 배포가 멈춘다 —
+이 실패는 안 막으면 배포가 다 끝난 뒤 "다음 버전을 아무도 설치 못 한다"로만 드러난다.
+
 ---
 
 ## 배포본 만들기
@@ -116,9 +151,14 @@ cp scripts/release.env.example scripts/release.env && chmod 600 scripts/release.
    이게 없으면 애플이 공증을 거부하는데, 빌드가 다 끝난 뒤에 알면 시간이 아깝다
 3. **테스트** — `src-tauri` + `kura-mcp` 의 러스트 테스트와 타입 검사
 4. **빌드·서명** — Tauri 가 하드닝 런타임으로 앱을 서명하고, 애플에 올려 공증받고, 티켓을 앱에 박는다(staple)
-5. **DMG 공증** — Tauri 는 앱까지만 공증하므로 DMG 는 스크립트가 따로 올려 티켓을 박는다
-6. **검증** — `codesign` / `stapler` / `spctl` 로 실제 Gatekeeper 판정을 확인
-7. **결과** — DMG 경로와 `sha256`(Homebrew Cask 에 넣을 값) 출력
+5. **업데이트 산출물 검증**(개발 31) — `Kura.app.tar.gz` 의 서명 키 ID 가 앱에 박은 공개키와
+   같은지 대조하고, **tar 를 풀어서 안에 든 앱**의 서명·팀 ID·번들 ID·버전·공증 티켓까지 본다.
+   DMG 만 검사하면 인앱 업데이트로 나가는 파일은 아무도 안 본 채 배포된다
+6. **DMG 공증** — Tauri 는 앱까지만 공증하므로 DMG 는 스크립트가 따로 올려 티켓을 박는다
+7. **검증** — `codesign` / `stapler` / `spctl` 로 실제 Gatekeeper 판정을 확인
+8. **`latest.json` 생성** — 앱이 물어보는 유일한 파일. 방금 검증한 산출물에서 버전·URL·서명을
+   그대로 만들어 낸다(손으로 쓰면 하나 틀려도 증상 없이 업데이트만 조용히 안 된다)
+9. **결과** — DMG 경로와 `sha256`(Homebrew Cask 에 넣을 값), 업데이트 3종 경로 출력
 
 공증은 애플 서버 응답을 기다리므로 **처음엔 5~15분** 걸릴 수 있다. 그동안 맥이
 잠들지 않게 두는 게 좋다.
@@ -225,6 +265,46 @@ git commit -am "v0.1.1"
 
 Release 노트에는 **sha256 을 반드시 적는다.** 받는 사람이 전송 중 손상을 확인하는 값이다.
 (위조까지 걸러내는 건 서명·공증이지 이 해시가 아니다 — `README.md` 에 그렇게 구분해 뒀다.)
+
+### 업데이트 자산 3종 (개발 31)
+
+`release.sh` 가 찍어 주는 `gh release create` 명령에는 DMG 말고 **세 개가 더** 들어 있다.
+셋 다 올려야 한다:
+
+| 파일 | 없으면 |
+|---|---|
+| `Kura.app.tar.gz` | 설치가 404 로 죽는다 |
+| `Kura.app.tar.gz.sig` | (참고용. 실제 검증에 쓰는 서명은 `latest.json` 안에 들어간다) |
+| `latest.json` | **기존 사용자가 새 버전이 나온 걸 영영 모른다** |
+
+앱이 물어보는 주소는 `releases/latest/download/latest.json` 하나다. 이건 **가장 최신
+정식 릴리스**(프리릴리스 제외)를 가리키므로, 프리릴리스로 올리면 아무한테도 안 간다.
+
+### 릴리스 노트 파일
+
+`docs/release-notes/v<버전>.md` 를 만들어 두면 그 내용이 `latest.json` 의 `notes` 로 들어가고,
+사용자의 **설치 승인 화면에 그대로 뜬다.** 없으면 릴리스 페이지를 보라는 일반 안내만 뜬다
+(스크립트가 경고한다).
+
+지갑에 새 코드를 넣을지 판단하는 유일한 근거라, 짧아도 무엇이 바뀌는지는 적는다.
+
+### 🔴 캐스크에 `auto_updates true` 를 넣는 시점
+
+앱이 스스로 업데이트하게 됐으니 캐스크에도 그 사실을 적어야 한다. 그러면 `brew upgrade`
+가 Kura 를 건드리지 않고, **캐스크의 `uninstall launchctl:` 이 안 돌아서 자동 시작이 안
+지워진다**(개발 30 P2 의 근본 해결).
+
+**다만 0.1.1 캐스크에 같이 넣으면 안 된다.** `auto_updates true` 가 있으면 brew 는
+0.1.0 → 0.1.1 업그레이드 자체를 건너뛰는데, 0.1.0 에는 업데이트 기능이 없어서
+그 사용자들은 어느 경로로도 새 버전을 못 받는다.
+
+순서:
+
+1. **0.1.1 캐스크**: 버전·sha256 만 갱신 (`auto_updates` 없이) → 기존 사용자가 brew 로 올라온다
+2. **0.1.2 캐스크**부터: `auto_updates true` 를 추가 → 이후로는 인앱 업데이트가 담당
+
+`auto_updates true` 를 넣은 뒤에도 캐스크의 버전·sha256 은 계속 갱신한다 —
+새로 설치하는 사람은 캐스크로 받기 때문이다.
 
 ### 🔴 Cask 해시를 갱신하기 전에
 

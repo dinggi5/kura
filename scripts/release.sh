@@ -25,6 +25,23 @@ info() { printf '  %s\n' "$*"; }
 warn() { printf '\033[1;33m  ! %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# minisign 공개키/서명에서 8바이트 키 ID 를 뽑는다 (표준입력 = Tauri 형식, 16진 소문자 출력).
+#
+# Tauri 는 공개키도 서명도 **minisign 텍스트 파일을 통째로 base64 로 한 번 더 감싼 것**을 쓴다.
+# 풀면 둘 다 2번째 줄이 base64 blob 이고, 그 blob 의 레이아웃은
+#   공개키 = 2바이트 알고리즘 + 8바이트 키ID + 32바이트 키
+#   서명   = 2바이트 알고리즘 + 8바이트 키ID + 64바이트 서명
+# 이라 키 ID 위치(2~9번째 바이트)가 같다. 실물 키로 왕복 확인함(개발 31).
+#
+# ⚠️ 이건 서명이 **누구 키로 만들어졌는지**만 본다 — 서명이 수학적으로 맞는지는 검증하지
+# 않는다(그건 minisign 바이너리가 따로 필요하다). 잡으려는 건 "키를 안 넣었거나 다른 키로
+# 서명했다"는 조용한 사고고, 그건 키 ID 로 충분히 잡힌다.
+minisign_keyid() {
+  # 값이 망가졌을 때 od 가 "cannot skip past end of input" 을 stderr 로 뱉는데, 그건
+  # 호출부가 길이로 판단해 제 메시지를 내므로 여기서 삼킨다.
+  base64 -d 2>/dev/null | sed -n '2p' | base64 -d 2>/dev/null | od -An -tx1 -j2 -N8 2>/dev/null | tr -d ' \n'
+}
+
 # ── 인자 ────────────────────────────────────────────────────────────────────
 UNIVERSAL=0
 NOTARIZE=1
@@ -80,8 +97,15 @@ CRED_API_KEY_PATH="${APPLE_API_KEY_PATH:-}"
 CRED_APPLE_ID="${APPLE_ID:-}"
 CRED_PASSWORD="${APPLE_PASSWORD:-}"
 CRED_TEAM_ID="${APPLE_TEAM_ID:-}"
+# 업데이트 서명 키(개발 31)도 같은 이유로 환경에서 뺀다. 오히려 이쪽이 더 아프다 —
+# 애플 자격증명이 새면 "내 이름으로 서명된 앱"이지만, 이 키가 새면 **이미 깔린 지갑들에
+# 임의 코드를 밀어넣을 수 있다**. cargo test·tsc·npm 의존성 스크립트에까지 물려줄 이유가 없다.
+CRED_UPDATER_KEY="${TAURI_SIGNING_PRIVATE_KEY:-}"
+CRED_UPDATER_KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-}"
+CRED_UPDATER_PASS="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 unset APPLE_SIGNING_IDENTITY APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH \
-      APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+      APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+      TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 
 # 실패한 채로 끝나면 배포하면 안 되는 DMG 가 정상 릴리스와 같은 이름·자리에 남는다.
 # 나중에(또는 다른 사람이) 그걸 완성본으로 착각하지 않게 이름을 바꿔 둔다.
@@ -89,12 +113,14 @@ unset APPLE_SIGNING_IDENTITY APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH \
 # DMG_PATH 를 잡기 전이라, 경로 변수에 기대면 정작 위험한 경우를 놓친다.
 PROBE_DIR=""
 NOTARY_ERR=""
+UPDATER_DIR=""
 BUNDLE_DIR=""
 OWNS_OUTPUT=0
 RELEASE_OK=0
 cleanup() {
   if [[ -n "$PROBE_DIR" ]]; then rm -rf "$PROBE_DIR"; fi
   if [[ -n "$NOTARY_ERR" ]]; then rm -f "$NOTARY_ERR"; fi
+  if [[ -n "$UPDATER_DIR" ]]; then rm -rf "$UPDATER_DIR"; fi
   # OWNS_OUTPUT 이 서야 폴더를 건드린다. 그 전에 죽으면 폴더 안은 지난 실행이 남긴
   # 것들이라, 멀쩡히 성공했던 배포본을 실패본으로 잘못 표시하게 된다.
   if [[ $RELEASE_OK -eq 1 || $OWNS_OUTPUT -eq 0 || ! -d "$BUNDLE_DIR/dmg" ]]; then return 0; fi
@@ -209,6 +235,49 @@ else
   warn "--no-notarize: 서명만 한다. 이 결과물은 남에게 주면 Gatekeeper 가 막는다"
 fi
 
+# ── 업데이트 서명 (개발 31) ─────────────────────────────────────────────────
+# 인앱 업데이트는 minisign 서명이 맞아야만 설치된다(플러그인이 강제, 끌 수 없음).
+#
+# 여기서 막는 실패는 전부 **조용하다**. 공개키가 자리표시자든 서명 키가 딴것이든,
+# 빌드·코드서명·공증·DMG 설치까지 전부 멀쩡히 통과한다. 어긋난 게 드러나는 건 그 다음
+# 버전을 사용자가 설치하려는 순간이고, 그때는 이미 배포가 끝난 뒤다.
+# **개발 30 "검증 안 되는 약속은 문서가 아니라 게이트로" 의 같은 자리다.**
+UPDATER_PUBKEY="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json")).get("plugins",{}).get("updater",{}).get("pubkey",""))')"
+[[ -n "$UPDATER_PUBKEY" ]] || die \
+  "tauri.conf.json 에 plugins.updater.pubkey 가 없다. 업데이트 서명 키를 만들 것 (docs/RELEASE.md '업데이트 서명 키')"
+[[ "$UPDATER_PUBKEY" != "REPLACE_WITH_UPDATER_PUBLIC_KEY" ]] || die \
+  "plugins.updater.pubkey 가 아직 자리표시자다. 이대로 내면 앱은 멀쩡히 돌지만 **다음 버전을 아무도 설치할 수 없다**.
+   docs/RELEASE.md '업데이트 서명 키' 를 보고 키를 만들어 공개키를 넣을 것."
+UPDATER_KEYID="$(printf '%s' "$UPDATER_PUBKEY" | minisign_keyid)"
+[[ ${#UPDATER_KEYID} -eq 16 ]] || die \
+  "plugins.updater.pubkey 를 minisign 공개키로 해석하지 못했다. 값이 .key.pub 파일 내용 그대로인지 확인할 것"
+info "업데이트 공개키 ID $UPDATER_KEYID"
+
+# 개인키. 경로(권장)와 내용 둘 다 받는다 — 경로 쪽이 키 문자열을 환경·프로세스 목록에
+# 안 남겨서 낫다.
+if [[ -n "$CRED_UPDATER_KEY_PATH" ]]; then
+  [[ -f "$CRED_UPDATER_KEY_PATH" ]] || die "TAURI_SIGNING_PRIVATE_KEY_PATH 가 가리키는 파일이 없다: $CRED_UPDATER_KEY_PATH"
+  # release.env 와 같은 기준 — 이 키가 새면 이미 깔린 지갑에 코드를 밀어넣을 수 있다.
+  updperms="$(stat -f '%Lp' "$CRED_UPDATER_KEY_PATH")"
+  if (( 8#$updperms & 077 )); then
+    if [[ $NOTARIZE -eq 1 ]]; then
+      die "업데이트 서명 키 권한이 $updperms 다. 다른 로컬 계정이 읽을 수 있는 키로는 정식 배포를 만들지 않는다:  chmod 600 $CRED_UPDATER_KEY_PATH"
+    fi
+    warn "업데이트 서명 키 권한이 $updperms 다. chmod 600 을 권함"
+  fi
+  info "업데이트 서명 키: $CRED_UPDATER_KEY_PATH"
+elif [[ -n "$CRED_UPDATER_KEY" ]]; then
+  info "업데이트 서명 키: 환경변수 내용"
+else
+  die "업데이트 서명 키가 없다. scripts/release.env 에 TAURI_SIGNING_PRIVATE_KEY_PATH 와
+   TAURI_SIGNING_PRIVATE_KEY_PASSWORD 를 넣을 것 (docs/RELEASE.md).
+   키 없이 빌드하면 서명 없는 업데이트 산출물이 나오고, 그건 아무도 설치할 수 없다."
+fi
+# 암호가 걸린 키인데 암호를 안 주면 Tauri 가 입력을 기다리며 멈춘다 — 몇 분짜리 빌드
+# 중간에 조용히 서 있는 것보다 미리 알려주는 편이 낫다.
+[[ -n "$CRED_UPDATER_PASS" ]] || warn \
+  "TAURI_SIGNING_PRIVATE_KEY_PASSWORD 가 비어 있다. 키에 암호가 걸려 있으면 빌드가 입력을 기다리며 멈춘다"
+
 # 버전이 세 파일에서 갈리면 배포본과 업데이트 판단이 어긋난다.
 VERSION_CONF="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
 VERSION_PKG="$(python3 -c 'import json;print(json.load(open("package.json"))["version"])')"
@@ -302,6 +371,16 @@ fi
 if [[ $PLAIN_DMG -eq 1 ]]; then
   BUILD_ENV+=("CI=true")   # bundle_dmg.sh 의 Finder 단계를 건너뛰게 하는 Tauri 쪽 스위치
 fi
+# 업데이트 서명 키(개발 31). 번들러가 .app.tar.gz 를 만들면서 직접 서명하므로 빌드에 넘길
+# 수밖에 없다 — 즉 **개발 30 보류 P1(자격증명이 빌드 전체에 상속된다)이 이 키에도 그대로
+# 적용된다.** beforeBuildCommand·Cargo build script·npm 의존성이 이 값을 읽을 수 있다.
+# 격리 세션에서 애플 자격증명과 함께 손볼 것(DEVLOG 개발 31 "다음").
+if [[ -n "$CRED_UPDATER_KEY_PATH" ]]; then
+  BUILD_ENV+=("TAURI_SIGNING_PRIVATE_KEY_PATH=$CRED_UPDATER_KEY_PATH")
+else
+  BUILD_ENV+=("TAURI_SIGNING_PRIVATE_KEY=$CRED_UPDATER_KEY")
+fi
+BUILD_ENV+=("TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$CRED_UPDATER_PASS")
 
 rm -rf "$BUNDLE_DIR/macos" "$BUNDLE_DIR/dmg"
 OWNS_OUTPUT=1   # 폴더를 비웠으니 이제부터 그 안에 있는 건 전부 이번 실행이 만든 것
@@ -393,6 +472,72 @@ if [[ $NOTARIZE -eq 1 ]]; then
     || die "Gatekeeper 가 앱을 거부했다 — 위 사유 참고"
 fi
 
+# ── 4-b. 업데이트 산출물 검증 (개발 31) ─────────────────────────────────────
+# 위에서 검증한 건 DMG 로 나가는 앱이다. **인앱 업데이트로 나가는 건 이 tar 다** —
+# 다른 파일이고, 아무도 안 열어 봤다. 개발 30 이 "산출물 신원을 아무도 안 봤다"로
+# 한 대 맞은 자리라, 새로 생긴 산출물에는 처음부터 같은 잣대를 댄다.
+step "업데이트 산출물 검증"
+
+UPDATER_TAR="$BUNDLE_DIR/macos/Kura.app.tar.gz"
+UPDATER_SIG="$UPDATER_TAR.sig"
+[[ -f "$UPDATER_TAR" ]] || die \
+  "업데이트 산출물이 안 나왔다: $UPDATER_TAR
+   tauri.conf.json 의 bundle.createUpdaterArtifacts 가 true 인지 확인할 것."
+[[ -f "$UPDATER_SIG" ]] || die \
+  "업데이트 서명이 안 나왔다: $UPDATER_SIG (서명 키가 빌드에 제대로 넘어갔는지 확인)"
+
+# ① 서명이 **앱에 박아 넣은 그 공개키**로 만들어졌는가.
+#    이게 어긋나면 업데이트는 100% 실패하는데, 그 전까지는 아무 증상이 없다.
+#
+#    Tauri CLI 도 빌드 중에 키 불일치를 알려 주긴 한다("does not match the public key…").
+#    다만 그건 수백 줄짜리 빌드 로그 사이의 한 줄이고, 여기서 보는 건 **실제로 나온
+#    산출물**이다(설정이 맞아도 옛 tar 가 남아 있는 등으로 어긋날 수 있다). 알림이 아니라
+#    멈춤이어야 하는 종류의 실패다.
+SIG_KEYID="$(minisign_keyid < "$UPDATER_SIG")"
+[[ ${#SIG_KEYID} -eq 16 ]] || die "업데이트 서명에서 키 ID 를 못 읽었다: $UPDATER_SIG"
+[[ "$SIG_KEYID" == "$UPDATER_KEYID" ]] || die \
+  "업데이트 서명 키가 앱에 박힌 공개키와 다르다 (서명 $SIG_KEYID ≠ 공개키 $UPDATER_KEYID).
+   이대로 내면 이 버전을 쓰는 사람 전원이 다음 업데이트에서 서명 오류로 실패한다."
+info "업데이트 서명 키 ID 일치 ($SIG_KEYID)"
+
+# ② tar 안의 앱이 방금 검증한 그 앱인가.
+#    번들러가 tar 를 공증 전에 말아 버리면, 안에 든 앱은 서명은 됐지만 공증 티켓이 없다.
+#    그러면 업데이트로 설치된 앱은 오프라인에서 Gatekeeper 에 걸린다 — DMG 만 봐서는
+#    절대 안 보이는 실패다. "그럴 리 없다"고 적는 대신 열어서 본다.
+#    (tar 왕복이 서명·티켓을 보존하는 것은 개발 31 에서 실물로 확인했다.)
+UPDATER_DIR="$(mktemp -d)"
+tar -xzf "$UPDATER_TAR" -C "$UPDATER_DIR" || die "업데이트 tar 를 풀지 못했다: $UPDATER_TAR"
+UPDATER_APP="$UPDATER_DIR/Kura.app"
+[[ -d "$UPDATER_APP" ]] || die \
+  "업데이트 tar 안에 Kura.app 이 없다. 들어 있는 것: $(ls -A "$UPDATER_DIR" | tr '\n' ' ')"
+
+codesign --verify --deep --strict "$UPDATER_APP" 2>&1 | sed 's/^/  /' \
+  || die "업데이트 tar 안의 앱이 코드 서명 검증에 실패했다"
+
+UPD_SIG_INFO="$(codesign -dvvv "$UPDATER_APP" 2>&1)"
+UPD_TEAM="$(sed -n 's/^TeamIdentifier=//p' <<<"$UPD_SIG_INFO" | head -1)"
+UPD_IDENT="$(sed -n 's/^Identifier=//p' <<<"$UPD_SIG_INFO" | head -1)"
+[[ "$UPD_TEAM" == "$EXPECT_TEAM_ID" ]] || die \
+  "업데이트 tar 안의 앱 팀 ID 가 '$UPD_TEAM' 다 (기대 $EXPECT_TEAM_ID)"
+[[ "$UPD_IDENT" == "$EXPECT_BUNDLE_ID" ]] || die \
+  "업데이트 tar 안의 앱 번들 ID 가 '$UPD_IDENT' 다 (기대 $EXPECT_BUNDLE_ID)"
+
+UPD_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$UPDATER_APP/Contents/Info.plist" 2>/dev/null || true)"
+[[ "$UPD_VERSION" == "$VERSION_CONF" ]] || die \
+  "업데이트 tar 안의 앱 버전이 '$UPD_VERSION' 다 (기대 $VERSION_CONF).
+   latest.json 이 광고하는 버전과 실제로 설치되는 버전이 어긋나면, 업데이트를 깔아도
+   앱은 계속 옛 버전이라고 보고하고 다음 실행마다 같은 업데이트를 다시 권한다."
+
+if [[ $NOTARIZE -eq 1 ]]; then
+  xcrun stapler validate "$UPDATER_APP" >/dev/null 2>&1 || die \
+    "업데이트 tar 안의 앱에 공증 티켓이 없다. DMG 는 통과해도 **업데이트로 설치된 앱만**
+     오프라인에서 Gatekeeper 에 막힌다."
+  spctl -a -t exec -vvv "$UPDATER_APP" 2>&1 | sed 's/^/  /' \
+    || die "Gatekeeper 가 업데이트 tar 안의 앱을 거부했다 — 위 사유 참고"
+fi
+info "신원 확인: 팀 $UPD_TEAM · $UPD_IDENT · $UPD_VERSION"
+rm -rf "$UPDATER_DIR"; UPDATER_DIR=""
+
 # ── 5. DMG 공증 ─────────────────────────────────────────────────────────────
 # Tauri 는 앱까지만 공증한다. DMG 는 여기서 따로 올려야 받는 사람이 DMG 를
 # 여는 순간부터 경고를 안 본다.
@@ -434,17 +579,75 @@ if [[ $NOTARIZE -eq 1 ]]; then
     || die "Gatekeeper 가 DMG 를 거부했다 — 위 사유 참고"
 fi
 
-# ── 6. 결과 ─────────────────────────────────────────────────────────────────
+# ── 6. latest.json (개발 31) ────────────────────────────────────────────────
+# 앱이 물어보는 곳은 releases/latest/download/latest.json 하나다. 손으로 쓰면 버전·URL·
+# 서명 중 하나가 틀려도 아무 증상 없이 넘어가고, 사용자 쪽 업데이트만 조용히 안 된다
+# → 방금 검증한 산출물에서 그대로 만들어 낸다.
+step "latest.json"
+
+LATEST_JSON="$BUNDLE_DIR/macos/latest.json"
+TAR_URL_BASE="https://github.com/dinggi5/kura/releases/download/$VERSION_TAG"
+
+# 릴리스 노트는 사용자가 "이 코드를 내 지갑에 넣을지" 판단하는 유일한 근거다.
+# 파일이 있으면 그대로 싣고, 없으면 앱에 일반적인 안내만 뜬다는 걸 분명히 알린다.
+NOTES_FILE="docs/release-notes/$VERSION_TAG.md"
+if [[ -f "$NOTES_FILE" ]]; then
+  info "릴리스 노트: $NOTES_FILE"
+else
+  warn "$NOTES_FILE 이 없다. 업데이트 화면에 상세 내용 대신 릴리스 페이지 안내만 뜬다"
+  warn "  지갑에 새 코드를 넣는 승인 화면이라, 무엇이 바뀌는지는 적어 주는 편이 맞다"
+fi
+
+# 아키텍처 키: 기본 빌드는 arm64 하나, --universal 은 같은 tar 를 두 키가 가리킨다.
+UPDATER_TARGETS=(darwin-aarch64)
+[[ $UNIVERSAL -eq 0 ]] || UPDATER_TARGETS+=(darwin-x86_64)
+
+# JSON 은 python 으로 만든다 — 노트에 따옴표·줄바꿈이 들어가도 안 깨지게.
+LATEST_JSON="$LATEST_JSON" \
+LJ_VERSION="$VERSION_CONF" \
+LJ_URL="$TAR_URL_BASE/Kura.app.tar.gz" \
+LJ_SIG_FILE="$UPDATER_SIG" \
+LJ_NOTES_FILE="$NOTES_FILE" \
+LJ_TARGETS="${UPDATER_TARGETS[*]}" \
+python3 - <<'PY' || die "latest.json 을 만들지 못했다"
+import json, os, pathlib, datetime
+
+sig = pathlib.Path(os.environ["LJ_SIG_FILE"]).read_text().strip()
+notes_path = pathlib.Path(os.environ["LJ_NOTES_FILE"])
+notes = notes_path.read_text().strip() if notes_path.is_file() else \
+    "자세한 변경 내용은 릴리스 페이지를 확인하세요: https://github.com/dinggi5/kura/releases"
+
+entry = {"signature": sig, "url": os.environ["LJ_URL"]}
+doc = {
+    "version": os.environ["LJ_VERSION"],
+    "notes": notes,
+    "pub_date": datetime.datetime.now(datetime.timezone.utc)
+                    .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "platforms": {t: entry for t in os.environ["LJ_TARGETS"].split()},
+}
+pathlib.Path(os.environ["LATEST_JSON"]).write_text(
+    json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
+PY
+info "$LATEST_JSON ($(IFS=,; echo "${UPDATER_TARGETS[*]}"))"
+
+# ── 7. 결과 ─────────────────────────────────────────────────────────────────
 step "완료"
 SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
 SIZE="$(du -h "$DMG_PATH" | awk '{print $1}')"
+TAR_SIZE="$(du -h "$UPDATER_TAR" | awk '{print $1}')"
 cat <<EOF
   파일    $DMG_PATH
   크기    $SIZE
   버전    $VERSION_CONF ($GIT_SHA)
   sha256  $SHA256
 
+  업데이트 $UPDATER_TAR ($TAR_SIZE)
+           $UPDATER_SIG
+           $LATEST_JSON
+
   Homebrew Cask 나 릴리스 노트에 넣을 체크섬이 위 sha256 이다.
+  🔴 업데이트 3종(tar·sig·latest.json)을 릴리스에 **같이** 올려야 한다. latest.json 이
+     빠지면 기존 사용자는 새 버전이 나온 걸 영영 모르고, tar 가 빠지면 설치가 404 로 죽는다.
 EOF
 [[ $NOTARIZE -eq 1 ]] || warn "공증을 건너뛴 결과물이다. 배포하지 말 것"
 
@@ -498,7 +701,7 @@ else
 
     git tag $VERSION_TAG $GIT_SHA
     git push origin $VERSION_TAG
-    gh release create $VERSION_TAG "$DMG_PATH" --title "Kura $VERSION_TAG" --notes "sha256: $SHA256"
+    gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" --title "Kura $VERSION_TAG" --notes "sha256: $SHA256"
 EOF
   else
     # 태그가 이미 있으면(= 위 게이트에서 태그 = HEAD 로 확인된 상태) 안내가 통째로
@@ -508,7 +711,7 @@ EOF
   태그 $VERSION_TAG 는 이미 이 커밋($GIT_SHA)에 있다. 남은 단계:
 
     git push origin $VERSION_TAG
-    gh release create $VERSION_TAG "$DMG_PATH" --title "Kura $VERSION_TAG" --notes "sha256: $SHA256"
+    gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" --title "Kura $VERSION_TAG" --notes "sha256: $SHA256"
 EOF
   fi
 fi

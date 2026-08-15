@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  ArrowUpCircle,
   Check,
   ExternalLink,
   Gauge,
@@ -15,6 +16,7 @@ import {
   Loader2,
   Network,
   Power,
+  RefreshCw,
   Settings as SettingsIcon,
   ShieldCheck,
   Trash2,
@@ -26,6 +28,7 @@ import { CHAINS, chainFromId, type ChainConfig } from "@/lib/chain";
 import { fmtAmount, shortenAddress } from "@/lib/format";
 import { GITHUB_URL } from "@/lib/helpContent";
 import type { Settings, SpendView } from "@/lib/types";
+import type { UpdateHook } from "@/lib/useUpdate";
 import { cardBase, enter, inputBase, modalCard, modalOverlay, primaryBtn, shell } from "@/components/ui";
 
 const RPC_CUSTOM = "__custom__";
@@ -53,10 +56,14 @@ function presetUrl(rpc: string | undefined, chain: ChainConfig): string {
 export function SettingsScreen({
   current,
   spend,
+  update,
   onClose,
 }: {
   current: Settings | null;
   spend: SpendView | null;
+  /** 업데이트 상태 (개발 31) — 지갑 화면과 같은 인스턴스를 쓴다. 화면을 여닫아도
+   *  확인 결과·다운로드 진행이 유지되게(여기서 훅을 새로 부르면 열 때마다 초기화된다). */
+  update: UpdateHook;
   onClose: () => void;
 }) {
   const [s, setS] = useState<Settings | null>(current);
@@ -453,7 +460,7 @@ export function SettingsScreen({
         {/* 정보 — 읽기 전용이라 fieldset(저장 중 잠금) 밖에 두고, 설정 로드가 실패해도 보이게
             조건 분기 바깥에 둔다. 버전·소스 링크는 "이 앱이 뭘 하는지 직접 확인할 통로"라
             설정이 안 열리는 상황일수록 오히려 더 필요하다. */}
-        <AboutSection />
+        <AboutSection update={update} autoCheck={current?.auto_check_update ?? true} />
       </div>
 
       <AnimatePresence>
@@ -500,9 +507,11 @@ function Section({
 /** 정보 섹션 (개발 27) — 버전 + "직접 감사할 수 있다"는 신뢰 프레이밍 + 소스 링크.
  *  키를 맡기는 앱이라 "믿어달라"가 아니라 "직접 읽어보라"가 유일하게 정직한 근거 —
  *  그래서 묻힌 링크가 아니라 설정 하단의 제 카드로 둔다. */
-function AboutSection() {
+function AboutSection({ update, autoCheck }: { update: UpdateHook; autoCheck: boolean }) {
   // 버전은 tauri.conf.json(=설치된 앱 번들)이 진실 원천. 실패해도 섹션 자체는 뜬다.
   const [version, setVersion] = useState<string | null>(null);
+  // 앱 관리 필드라 "저장하고 닫기"와 무관하게 즉시 적용(자동 시작 토글과 같은 결).
+  const [autoCheckOn, setAutoCheckOn] = useState(autoCheck);
 
   useEffect(() => {
     let alive = true;
@@ -514,6 +523,21 @@ function AboutSection() {
     };
   }, []);
 
+  // 설정이 늦게 로드되면 동기화 (RPC 모드가 같은 이유로 하는 것과 같은 결 — 개발 18 P3).
+  // 이 화면이 열려 있는 동안 current 는 안 바뀌므로(get_settings 는 마운트·닫기에서만 돈다)
+  // 낙관적 토글을 되돌리지 않는다.
+  useEffect(() => setAutoCheckOn(autoCheck), [autoCheck]);
+
+  async function toggleAutoCheck() {
+    const next = !autoCheckOn;
+    setAutoCheckOn(next); // 낙관적 반영, 실패하면 원복
+    try {
+      await invoke("set_auto_check_update", { enabled: next });
+    } catch {
+      setAutoCheckOn(!next);
+    }
+  }
+
   return (
     <Section icon={<Info size={13} className="text-[var(--color-accent)]" />} title="정보" delay={0.2}>
       <div className="flex items-baseline justify-between">
@@ -522,6 +546,8 @@ function AboutSection() {
           {version ? `v${version}` : "—"}
         </span>
       </div>
+
+      <UpdateBlock update={update} autoCheckOn={autoCheckOn} onToggleAutoCheck={toggleAutoCheck} />
 
       {/* 개발 29에서 현재형으로 복원 — 저장소가 실제로 공개됐다. 다시 비공개로 돌리는 일이
           생기면 이 문장부터 미래형으로 되돌릴 것. 신뢰의 근거로 내세운 문장이라, 사실과
@@ -663,6 +689,144 @@ function TrustedAddrsModal({
 }
 
 /** 설정 화면 공용 on/off 토글 행 (자리비움 잠금·자율 결제 알림 등). */
+/** 업데이트 블록 (개발 31) — 정보 카드 안.
+ *
+ *  여기가 **설치 승인 화면**이다. 지갑에 새 코드를 넣는 일이라, 버전과 릴리스 노트를
+ *  보여준 뒤 사람이 누를 때만 설치된다(update.rs 가 같은 정책을 백엔드에서 강제한다).
+ *  자동으로 도는 건 "확인"까지고, 그 확인조차 아래 토글로 끌 수 있다. */
+function UpdateBlock({
+  update,
+  autoCheckOn,
+  onToggleAutoCheck,
+}: {
+  update: UpdateHook;
+  autoCheckOn: boolean;
+  onToggleAutoCheck: () => void;
+}) {
+  const { info, checking, installing, progress, error, upToDate } = update;
+  const pct =
+    progress && progress.total
+      ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
+      : null;
+
+  return (
+    <div className="mt-4 rounded-[var(--radius-card)] border border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] px-4 py-3.5">
+      {installing ? (
+        // 설치 중 — 다른 조작을 안 내준다. 성공하면 앱이 재시작되므로 이 화면이 마지막이다.
+        <div>
+          <p className="flex items-center gap-2 text-[13px] tracking-tight">
+            <Loader2 size={13} className="animate-spin text-[var(--color-accent)]" />
+            업데이트 설치 중…
+          </p>
+          {/* 크기를 모르면(Content-Length 없음) 퍼센트 대신 받은 용량만 보여준다 —
+              0% 에 멈춘 것처럼 보이는 게 제일 나쁘다. */}
+          <div className="mt-2.5 h-1 w-full overflow-hidden rounded-full bg-[var(--color-ivory-400)] dark:bg-[var(--color-night-700)]">
+            <div
+              className={cn(
+                "h-full bg-[var(--color-accent)] transition-[width] duration-[var(--duration-base)]",
+                pct === null && "animate-pulse w-1/3",
+              )}
+              style={pct === null ? undefined : { width: `${pct}%` }}
+            />
+          </div>
+          <p className="mt-2 text-[11px] text-[var(--color-ink-300)]">
+            {pct === null
+              ? `${fmtBytes(progress?.downloaded ?? 0)} 받는 중`
+              : `${pct}% · ${fmtBytes(progress?.downloaded ?? 0)}`}
+            {" — "}끝나면 앱이 저절로 다시 시작돼요.
+          </p>
+        </div>
+      ) : info ? (
+        <div>
+          <div className="flex items-baseline justify-between gap-3">
+            <p className="text-[13px] tracking-tight">
+              새 버전 <span className="num font-mono">{info.version}</span>
+            </p>
+            <span className="num font-mono text-[11px] text-[var(--color-ink-300)]">
+              지금 {info.current_version}
+            </span>
+          </div>
+          {info.notes && (
+            // 릴리스 노트는 사람이 "이 코드를 내 지갑에 넣을지" 판단하는 유일한 근거라
+            // 자르지 않고 그대로 둔다(길면 카드가 늘어난다 — 그게 맞다).
+            <p className="mt-2 whitespace-pre-wrap text-[11px] leading-snug text-[var(--color-ink-500)]">
+              {info.notes}
+            </p>
+          )}
+          <button
+            type="button"
+            onClick={() => void update.install()}
+            className={cn(primaryBtn, "mt-3 h-9 text-[13px]")}
+          >
+            <ArrowUpCircle size={14} />
+            지금 설치하고 다시 시작
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-3">
+          <p className="min-w-0 text-[12px] text-[var(--color-ink-500)]">
+            {checking ? "확인 중…" : upToDate ? "최신 버전이에요." : "업데이트를 확인할 수 있어요."}
+          </p>
+          <button
+            type="button"
+            onClick={() => void update.check()}
+            disabled={checking}
+            className={cn(
+              "shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-[var(--radius-pill)]",
+              "text-[12px] tracking-tight",
+              "border border-[var(--color-ivory-400)] dark:border-[var(--color-night-700)]",
+              "hover:border-[var(--color-accent)] disabled:opacity-40",
+              "transition-colors duration-[var(--duration-base)]",
+            )}
+          >
+            <RefreshCw size={12} className={cn(checking && "animate-spin")} />
+            업데이트 확인
+          </button>
+        </div>
+      )}
+
+      {error && <p className="mt-2 text-[11px] leading-snug text-red-500">{error}</p>}
+
+      <div className="mt-3 flex items-center justify-between gap-3 border-t border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] pt-3">
+        <div className="min-w-0 pr-1">
+          <p className="text-[12px] tracking-tight">시작할 때 확인</p>
+          {/* 무엇이 나가는지 적는다 — 로컬 전용을 내세운 앱이라 조용한 바깥 통신이 있으면 안 된다. */}
+          <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-ink-300)]">
+            앱을 켤 때 깃허브에 새 버전이 있는지 물어봐요(현재 버전과 IP가 그쪽에 남아요). 설치는
+            어느 쪽이든 직접 눌러야 해요.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoCheckOn}
+          onClick={onToggleAutoCheck}
+          className={cn(
+            "shrink-0 relative w-10 h-6 rounded-full transition-colors duration-[var(--duration-base)]",
+            autoCheckOn
+              ? "bg-[var(--color-accent)]"
+              : "bg-[var(--color-ivory-400)] dark:bg-[var(--color-night-700)]",
+          )}
+        >
+          <span
+            className={cn(
+              "absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all duration-[var(--duration-base)]",
+              autoCheckOn ? "left-5" : "left-1",
+            )}
+          />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** 바이트를 사람이 읽는 단위로. 업데이트 진행률에만 쓴다. */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function ToggleRow({
   title,
   desc,

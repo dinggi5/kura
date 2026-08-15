@@ -29,6 +29,22 @@ export type Settings = {
   auto_trusted_only: boolean;
   /** 활성 체인 ID — 84532=Base Sepolia(테스트넷) / 8453=Base 메인넷. 체인별 데이터 파일 분리. */
   chain_id: number;
+  /** 시작 시 업데이트 자동 확인 (개발 31). 읽기 전용으로만 쓴다 — 변경은 set_auto_check_update. */
+  auto_check_update: boolean;
+};
+
+/** 백엔드가 찾은 업데이트 (개발 31). 사람이 설치를 누르기 전에 보는 값 = 판단 근거 전부. */
+export type UpdateInfo = {
+  version: string;
+  current_version: string;
+  notes: string | null;
+  date: string | null;
+};
+
+/** `update://progress` 이벤트 payload. total 은 서버가 크기를 안 알려주면 null. */
+export type UpdateProgress = {
+  downloaded: number;
+  total: number | null;
 };
 
 /** 자율 결제 세션 상태 (메모리의 잠금 해제 키). */

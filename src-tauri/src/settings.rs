@@ -59,6 +59,34 @@ pub(crate) struct Settings {
     /// 옛 설정엔 없어서 기본 = 테스트넷(실돈 안전). 체인별로 사용액·내역·신뢰목록 파일이 분리된다.
     #[serde(default = "default_chain_id")]
     pub(crate) chain_id: u64,
+
+    // ── 아래 셋은 **앱이 관리하는 필드**다. 설정 화면 폼에서 오는 값이 아니라서
+    //    set_settings 가 클라이언트가 보낸 값을 무시하고 디스크 값을 지킨다(preserve_managed).
+    //    프론트 Settings 타입엔 이 셋이 없으므로, 안 지키면 "저장하고 닫기" 한 번에 전부 None 이 된다.
+    /// 로그인 시 자동 시작 **희망값** (개발 31).
+    ///
+    /// OS 로그인 아이템(LaunchAgent)만 보면 "사용자가 껐다"와 "패키지 관리자가 지웠다"를 구별할
+    /// 수 없다. 캐스크의 `uninstall launchctl:` 은 `brew upgrade`·`brew reinstall` 때도 돌아서
+    /// plist 를 내린다 → 업데이트 한 번에 자동 시작이 조용히 꺼진다(개발 30 코덱스 P2).
+    /// 그래서 희망값을 여기 따로 적어 두고, 시작할 때 대조한다(autostart::reconcile).
+    ///
+    /// None = 아직 모름(이 필드가 없던 시절의 설정 파일) → 첫 실행에서 OS 상태를 그대로 채택한다.
+    /// **기본을 false 로 두면 안 된다** — 자동 시작을 켜 둔 기존 사용자가 "꺼짐을 원했다"로
+    /// 기록되고, 그 뒤 진짜로 꺼졌을 때 복구 대상에서 빠진다.
+    #[serde(default)]
+    pub(crate) autostart: Option<bool>,
+
+    /// 마지막으로 실행된 앱 버전 (개발 31). 자동 시작 복구를 **버전이 바뀐 실행에서만** 하기 위한 표식.
+    /// 매번 무조건 복구하면, 사용자가 시스템 설정 > 로그인 항목에서 끈 것을 앱이 다시 켜 버린다 —
+    /// 지갑 앱이 할 짓이 아니다. 자세한 판정은 autostart::reconcile.
+    #[serde(default)]
+    pub(crate) last_run_version: Option<String>,
+
+    /// 시작할 때 업데이트가 있는지 확인 (개발 31). 기본 켜짐.
+    /// 확인은 깃허브에 HTTPS GET 한 번이고, 그쪽엔 IP 와 현재 버전이 남는다.
+    /// 끄면 업데이트는 사용자가 설정에서 직접 눌러야만 확인된다(설치는 어느 쪽이든 수동).
+    #[serde(default = "default_true")]
+    pub(crate) auto_check_update: bool,
 }
 
 fn default_true() -> bool {
@@ -87,6 +115,9 @@ impl Default for Settings {
             notify_auto: true,
             auto_trusted_only: true,
             chain_id: BASE_SEPOLIA.chain_id, // Base Sepolia(테스트넷) — 신규/옛 설정은 항상 테스트넷
+            autostart: None,                 // 아직 모름 → 첫 실행에서 OS 상태를 채택
+            last_run_version: None,
+            auto_check_update: true,
         }
     }
 }
@@ -102,6 +133,15 @@ pub(crate) fn read_settings() -> Settings {
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// 설정을 그대로 저장한다 (앱 내부용 — 사용자 입력 검증 없음).
+///
+/// `set_settings` 는 폼에서 온 값을 검증하는 경로라, 앱이 스스로 한 필드만 갱신할 때
+/// 그걸 통과시킬 이유가 없다(그리고 통과시키면 옛 설정 파일의 어긋난 값 때문에
+/// 자동 시작 기록 같은 게 저장에 실패한다). 검증이 필요한 값은 여기로 오지 않는다.
+pub(crate) fn save_settings(settings: &Settings) -> Result<(), String> {
+    write_json(settings_path()?, settings)
 }
 
 /// 설정의 RPC를 돌려준다. 비어 있으면 공식 RPC로 폴백.
@@ -174,9 +214,18 @@ pub(crate) fn get_settings() -> Settings {
     read_settings()
 }
 
+/// 시작 시 업데이트 자동 확인 토글 (개발 31).
+/// 앱 관리 필드라 "저장하고 닫기"와 무관하게 즉시 적용된다(자동 시작 토글과 같은 결).
+#[tauri::command]
+pub(crate) fn set_auto_check_update(enabled: bool) -> Result<(), String> {
+    let mut s = read_settings();
+    s.auto_check_update = enabled;
+    save_settings(&s)
+}
+
 /// 한도 설정을 저장한다. 모든 값이 십진수로 파싱되는지 검증 후 기록.
 #[tauri::command]
-pub(crate) fn set_settings(settings: Settings) -> Result<(), String> {
+pub(crate) fn set_settings(mut settings: Settings) -> Result<(), String> {
     // 체인을 먼저 검증한다(미지원 거부) — 그리고 한도는 **들어온 chain_id 의 decimals** 로 검증한다.
     // 저장 전 활성 체인(active_chain) 기준으로 검증하면, 다른 decimals 의 체인으로 토글하는 저장에서
     // 한도 의미가 어긋난다(현재 두 체인 다 6자리라 무해하나, 미래 체인 대비 원자성 — 코덱스 개발20 리뷰).
@@ -204,7 +253,18 @@ pub(crate) fn set_settings(settings: Settings) -> Result<(), String> {
     if !(rpc.is_empty() || rpc.starts_with("http://") || rpc.starts_with("https://")) {
         return Err("RPC 주소는 http(s):// 로 시작해야 합니다".into());
     }
-    write_json(settings_path()?, &settings)
+    // 앱 관리 필드는 클라이언트가 보낸 값을 버리고 디스크 값을 지킨다.
+    // 프론트 Settings 타입엔 이 셋이 없어서 폼 저장은 항상 기본값(None/true)을 실어 보낸다 —
+    // 그대로 쓰면 "저장하고 닫기" 한 번에 자동 시작 희망값이 지워진다(=고치려던 버그의 재발).
+    preserve_managed(&mut settings, &read_settings());
+    save_settings(&settings)
+}
+
+/// 앱이 관리하는 필드(자동 시작 희망값·마지막 실행 버전·자동 업데이트 확인)를 `from` 에서 가져온다.
+fn preserve_managed(settings: &mut Settings, from: &Settings) {
+    settings.autostart = from.autostart;
+    settings.last_run_version = from.last_run_version.clone();
+    settings.auto_check_update = from.auto_check_update;
 }
 
 #[cfg(test)]
@@ -242,6 +302,38 @@ mod tests {
         assert!(s.notify_auto); // 알림은 기본 켜짐 (끄는 쪽이 명시적 선택)
         assert!(s.auto_trusted_only); // 신뢰 주소 가드도 기본 켜짐 (안전 쪽 디폴트)
         assert_eq!(s.chain_id, BASE_SEPOLIA.chain_id); // 옛 파일엔 chain_id 없음 → 테스트넷
+        // 개발 31 필드도 옛 파일에서 안전하게 온다. autostart 기본은 **None**(false 아님) —
+        // false 면 자동 시작을 켜 둔 기존 사용자가 "끔을 원했다"로 기록돼 복구 대상에서 빠진다.
+        assert_eq!(s.autostart, None);
+        assert_eq!(s.last_run_version, None);
+        assert!(s.auto_check_update); // 업데이트 확인은 기본 켜짐
+    }
+
+    // 🔴 폼 저장이 앱 관리 필드를 지우면 안 된다.
+    // 프론트 Settings 타입엔 autostart·last_run_version·auto_check_update 가 없어서, 설정 화면의
+    // "저장하고 닫기"는 항상 이 셋을 기본값(None/None/true)으로 실어 보낸다. 그대로 쓰면
+    // 저장 한 번에 자동 시작 희망값이 날아가고 — 이번 세션이 고치려던 버그가 그대로 되살아난다.
+    #[test]
+    fn form_save_does_not_wipe_app_managed_fields() {
+        let on_disk = Settings {
+            autostart: Some(true),
+            last_run_version: Some("0.1.1".into()),
+            auto_check_update: false,
+            ..Default::default()
+        };
+        // 프론트가 보낸 것 = 폼 필드만 있고 관리 필드는 기본값인 상태.
+        let mut from_form = Settings {
+            single_usdc: "9".into(),
+            ..Default::default()
+        };
+        assert_eq!(from_form.autostart, None); // 전제 확인
+
+        preserve_managed(&mut from_form, &on_disk);
+
+        assert_eq!(from_form.autostart, Some(true)); // 희망값 보존
+        assert_eq!(from_form.last_run_version.as_deref(), Some("0.1.1"));
+        assert!(!from_form.auto_check_update); // 꺼 둔 것도 보존
+        assert_eq!(from_form.single_usdc, "9"); // 폼 값은 그대로 반영
     }
 
     // 음수 한도는 저장을 거부해야 한다 (거대 U256=무제한 둔갑 차단). 양수·0 은 통과.

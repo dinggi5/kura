@@ -1,6 +1,7 @@
 // Kura 코어 — 로컬 전용 AI 에이전트 지갑. (코드네임: 지갑지갑)
 //
 // 모듈 지도 (개발 17 구조 분리 — 동작 무변경):
+//   autostart 로그인 시 자동 시작 + 희망값 보존·복구(개발 31)
 //   chain     체인 상수(Base Sepolia RPC·USDC·chainId) + 온체인 타입(sol!)
 //   store     ~/.jigap 경로, 원자적 파일 쓰기, 시간 헬퍼
 //   wallet    니모닉 생성·주소 파생·비번 암호화(Argon2id + AES-256-GCM)
@@ -15,9 +16,11 @@
 //   session   자율 결제 세션(메모리 키) + 자동 승인
 //   notify    OS 알림 (자율 결제 사후 통지)
 //   tray      메뉴바 상주 — 트레이 아이콘 + 팝오버 위치·자동 숨김
+//   update    인앱 자동 업데이트(개발 31) — 검사·설치, 승인 대기 중 재시작 차단
 //
-// 이 파일에는 앱 셸만 남긴다: 창 제어·자동 시작 커맨드 + run().
+// 이 파일에는 앱 셸만 남긴다: 창 제어 커맨드 + run().
 
+mod autostart;
 mod chain;
 mod history;
 mod ipc;
@@ -30,6 +33,7 @@ mod store;
 mod transfer;
 mod tray;
 mod trusted;
+mod update;
 mod wallet;
 mod x402;
 
@@ -62,20 +66,6 @@ fn release_main_window(app: tauri::AppHandle) {
     tray::sync_always_on_top(&app);
 }
 
-/// 로그인 시 자동 시작 여부 (OS 로그인 아이템 상태가 진실 원천 — settings.json에 안 둔다).
-#[tauri::command]
-fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
-    use tauri_plugin_autostart::ManagerExt;
-    app.autolaunch().is_enabled().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    use tauri_plugin_autostart::ManagerExt;
-    let l = app.autolaunch();
-    if enabled { l.enable() } else { l.disable() }.map_err(|e| e.to_string())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -84,10 +74,15 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(SessionKey::default())
         .manage(tray::PopoverState::default())
+        .manage(update::PendingUpdate::default())
         .setup(|app| {
             tray::build(app.handle())?;
+            // 업데이트가 자동 시작 설정을 지우고 갔는지 확인해 되살린다(개발 31).
+            // 트레이보다 뒤, 창을 띄우기 전 — 실패해도 앱은 그대로 뜬다.
+            autostart::reconcile(app.handle());
             // 평소엔 트레이에만 조용히 상주한다(로그인 자동 시작 때 창이 튀어나오지 않게).
             // 단 첫 실행은 예외 — 메뉴바 아이콘만 뜨고 아무 일도 없으면 뭘 해야 할지 알 수 없다.
             if wallet::needs_setup() {
@@ -149,8 +144,11 @@ pub fn run() {
             trusted::remove_trusted_addr,
             raise_main_window,
             release_main_window,
-            get_autostart,
-            set_autostart
+            autostart::get_autostart,
+            autostart::set_autostart,
+            settings::set_auto_check_update,
+            update::check_update,
+            update::install_update
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
