@@ -64,6 +64,23 @@ done
 # scripts/release.env 는 .gitignore 로 커밋에서 제외된다. 없으면 이미 export 된
 # 환경변수를 그대로 쓴다(CI 용).
 ENV_FILE="$REPO_ROOT/scripts/release.env"
+# 워크트리에서 돌릴 때는 이 파일이 **구조상 절대 없다** — .gitignore 로 커밋에서 빠지는데
+# 워크트리는 커밋에서 만들어지기 때문이다. 그런데 이 프로젝트는 워크트리에서 빌드하는 게
+# 기본 흐름이라, 폴백이 없으면 워크트리를 만들 때마다 손으로 복사해야 한다.
+# → 메인 워킹트리(`--git-common-dir` 의 부모)의 것을 읽는다.
+# 심링크로 때우면 안 된다: 아래 권한 검사의 `stat -f '%Lp'` 는 링크 자신의 모드(777)를 보므로
+# 링크를 두는 순간 정식 배포가 권한 게이트에 막힌다.
+if [[ ! -f "$ENV_FILE" ]]; then
+  common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -n "$common_dir" ]]; then
+    # 상대 경로로 나올 수 있어서 실제로 들어가 절대 경로를 얻는다.
+    main_root="$(cd "$common_dir/.." 2>/dev/null && pwd || true)"
+    if [[ -n "$main_root" && "$main_root" != "$REPO_ROOT" && -f "$main_root/scripts/release.env" ]]; then
+      ENV_FILE="$main_root/scripts/release.env"
+      info "자격증명을 메인 워킹트리에서 읽는다: $ENV_FILE"
+    fi
+  fi
+fi
 if [[ -f "$ENV_FILE" ]]; then
   perms="$(stat -f '%Lp' "$ENV_FILE")"
   # 정식 배포(공증)에서는 경고로 넘기지 않는다. 이 파일에는 앱 전용 암호나 API 키 위치가
@@ -78,9 +95,9 @@ if [[ -f "$ENV_FILE" ]]; then
     warn "$ENV_FILE 권한이 $perms 다. chmod 600 을 권함"
   fi
   . "$ENV_FILE"
-  info "자격증명: scripts/release.env"
+  info "자격증명: $ENV_FILE"
 else
-  info "scripts/release.env 없음 — 환경변수를 그대로 사용"
+  info "release.env 없음(워크트리·메인 양쪽) — 환경변수를 그대로 사용"
 fi
 
 # 읽은 값은 CRED_* 셸 변수로 옮기고 환경에서는 지운다. 이유 두 가지:
@@ -662,6 +679,16 @@ cat <<EOF
 EOF
 [[ $NOTARIZE -eq 1 ]] || warn "공증을 건너뛴 결과물이다. 배포하지 말 것"
 
+# GitHub 릴리스 본문. 노트 파일이 있으면 앱 업데이트 카드와 **같은 글**이 웹에도 뜨게
+# 하고, 체크섬을 아래에 붙인다. --notes 한 줄로 만들면 웹에는 sha256 밖에 안 남아서,
+# 받는 사람이 "무엇이 바뀌는지"를 설치 전에 볼 곳이 앱 안뿐이 된다.
+RELEASE_BODY="$BUNDLE_DIR/macos/release-body.md"
+{
+  if [[ -f "$NOTES_FILE" ]]; then cat "$NOTES_FILE"; echo; fi
+  echo "sha256($(basename "$DMG_PATH")): $SHA256"
+} > "$RELEASE_BODY"
+
+
 # 태그는 "방금 검증한 그 커밋"에 찍혀야 한다. 사람이 나중에 손으로 `git tag v0.1.1` 을
 # 치면 그때의 HEAD 에 붙어서, 빌드한 커밋과 조용히 어긋날 수 있다 → 커밋을 박아서 준다.
 #
@@ -712,7 +739,7 @@ else
 
     git tag $VERSION_TAG $GIT_SHA
     git push origin $VERSION_TAG
-    gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" --title "Kura $VERSION_TAG" --notes "sha256: $SHA256"
+    gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" --title "Kura $VERSION_TAG" --notes-file "$RELEASE_BODY"
 EOF
   else
     # 태그가 이미 있으면(= 위 게이트에서 태그 = HEAD 로 확인된 상태) 안내가 통째로
@@ -722,7 +749,7 @@ EOF
   태그 $VERSION_TAG 는 이미 이 커밋($GIT_SHA)에 있다. 남은 단계:
 
     git push origin $VERSION_TAG
-    gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" --title "Kura $VERSION_TAG" --notes "sha256: $SHA256"
+    gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" --title "Kura $VERSION_TAG" --notes-file "$RELEASE_BODY"
 EOF
   fi
 fi

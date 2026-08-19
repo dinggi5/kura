@@ -69,7 +69,7 @@ source=Notarized Developer ID
 Release 노트의 sha256은 **받다가 깨지지 않았는지** 확인하는 용도예요(같은 곳에서 파일과 해시를 함께 받으니, 위조까지 걸러내지는 못해요 — 그건 위의 서명 확인이 해요):
 
 ```bash
-shasum -a 256 ~/Downloads/Kura_0.1.0_aarch64.dmg
+shasum -a 256 ~/Downloads/Kura_0.1.1_aarch64.dmg
 ```
 
 ### (C) 소스에서 빌드
@@ -81,7 +81,7 @@ shasum -a 256 ~/Downloads/Kura_0.1.0_aarch64.dmg
 ```bash
 git clone https://github.com/dinggi5/kura.git
 cd kura
-git checkout v0.1.0   # 배포본과 같은 소스. 빼면 개발 중인 최신 코드가 받아져요
+git checkout v0.1.1   # 배포본과 같은 소스. 빼면 개발 중인 최신 코드가 받아져요
 npm ci                # package-lock.json 그대로 설치 (install 은 버전이 올라갈 수 있어요)
 
 # 개발 모드로 바로 실행
