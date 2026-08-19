@@ -27,7 +27,7 @@
 use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt;
 
-use crate::settings::{read_settings, save_settings};
+use crate::settings::{read_settings_for_update, save_settings};
 
 fn os_enabled(app: &AppHandle) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
@@ -49,16 +49,33 @@ pub(crate) fn get_autostart(app: AppHandle) -> Result<bool, String> {
 pub(crate) fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
     // 🔴 희망값을 **먼저** 적는다. reconcile 이 "희망=켬 + 파일 없음 → 되살린다" 로 도는데,
     // 순서가 반대면 이런 창이 생긴다: OS 를 껐는데 저장이 실패 → 희망값은 켬으로 남음 →
-    // 다음 실행에서 방금 끈 자동 시작이 되살아난다. 먼저 적으면 어긋나도 안전한 쪽으로
-    // 어긋난다(끄기가 덜 반영될지언정, 끈 것을 되켜지는 않는다).
-    let mut s = read_settings();
-    s.autostart = Some(enabled);
-    let _ = save_settings(&s);
+    // 다음 실행에서 방금 끈 자동 시작이 되살아난다.
+    //
+    // 해석 안 되는 설정 파일 위에는 안 쓴다(read_settings_for_update 주석 참고).
+    let before = read_settings_for_update();
+    if let Some(s) = &before {
+        let mut next = s.clone();
+        next.autostart = Some(enabled);
+        let _ = save_settings(&next);
+    }
 
-    // 저장 실패는 삼키고 OS 반영 결과만 올린다. 이 커맨드의 약속은 "OS 설정을 바꾼다"이고,
+    let result = os_set(&app, enabled);
+
+    // 🔴 켜기가 실패했으면 희망값을 되돌린다.
+    // 안 그러면 다음 실행에서 reconcile 이 "희망=켬 + 파일 없음"을 보고 **패키지 관리자가
+    // 지웠다**고 오해해서 켜 버린다 — 방금 화면은 사용자에게 "실패했다"고 말했는데도.
+    // 지갑이 실패했다고 알린 뒤 조용히 로그인 항목을 얻는 건, 이 복구 기능이 애초에
+    // 피하려던 바로 그 행동이다.
+    if enabled && result.is_err() {
+        if let Some(s) = before {
+            let _ = save_settings(&s);
+        }
+    }
+
+    // 저장 실패 자체는 삼키고 OS 반영 결과만 올린다. 이 커맨드의 약속은 "OS 설정을 바꾼다"고,
     // 저장이 안 됐다고 Err 를 내면 프론트가 낙관적 토글을 되돌려 **실제로 바뀐 상태를
     // 안 바뀐 것처럼** 보여준다(= 화면이 거짓말을 한다).
-    os_set(&app, enabled)
+    result
 }
 
 /// 되살릴 것인가. reconcile 의 판단만 떼어낸 순수 함수 —
@@ -84,7 +101,12 @@ pub(crate) fn reconcile(app: &AppHandle) {
         return;
     };
 
-    let mut s = read_settings();
+    // 🔴 파일이 있는데 해석이 안 되면 손대지 않는다. 여기가 **시작할 때마다** 도는
+    // 읽고-쓰기 경로라, 기본값을 덮어쓰면 사용자의 한도·RPC·chain_id 가 조용히 사라진다
+    // (메인넷 사용자가 테스트넷으로 돌아간다). 자동 시작 기록보다 그쪽이 훨씬 비싸다.
+    let Some(mut s) = read_settings_for_update() else {
+        return;
+    };
 
     if should_restore(s.autostart, cur) {
         // 여기만이 앱이 사용자 대신 OS 설정을 바꾸는 자리다.

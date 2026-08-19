@@ -128,6 +128,35 @@ pub(crate) fn read_settings() -> Settings {
         .unwrap_or_default()
 }
 
+/// **덮어쓸 목적으로** 설정을 읽는다. 파일이 있는데 해석이 안 되면 `None`.
+///
+/// `read_settings` 는 어떤 실패든 기본값으로 삼킨다. 읽기만 할 땐 그게 맞다 — 설정을 못
+/// 읽었다고 앱이 안 뜨면 더 손해다. 하지만 **읽은 값을 다시 저장하는 경로**에서는 그 관대함이
+/// 그대로 데이터 유실이 된다: 해석 못 한 파일 위에 기본값을 쓰면 사용자의 한도·커스텀 RPC·
+/// chain_id 가 한 번에 사라진다(메인넷 사용자가 조용히 테스트넷으로 돌아간다).
+///
+/// 개발 31 이전에는 settings.json 을 쓰는 곳이 `set_settings`(사용자가 저장 버튼을 누를 때)
+/// 하나뿐이라 이 문제가 없었다. autostart::reconcile 이 **시작할 때마다** 읽고 쓰게 되면서
+/// 생긴 위험이라, 저장 경로는 이쪽을 쓴다.
+pub(crate) fn read_settings_for_update() -> Option<Settings> {
+    let path = settings_path().ok()?;
+    match fs::read_to_string(&path) {
+        Ok(text) => settings_for_update(Some(&text)),
+        // 아직 파일이 없는 건 정상(첫 실행) — 기본값에서 시작해 만들면 된다.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => settings_for_update(None),
+        // 있는데 못 읽었다(권한 등) → 덮어쓰지 않는다.
+        Err(_) => None,
+    }
+}
+
+/// `read_settings_for_update` 의 판단만 떼어낸 순수 함수 (IO 없이 테스트하려고).
+fn settings_for_update(existing: Option<&str>) -> Option<Settings> {
+    match existing {
+        None => Some(Settings::default()),
+        Some(text) => serde_json::from_str(text).ok(),
+    }
+}
+
 /// 설정을 그대로 저장한다 (앱 내부용 — 사용자 입력 검증 없음).
 ///
 /// `set_settings` 는 폼에서 온 값을 검증하는 경로라, 앱이 스스로 한 필드만 갱신할 때
@@ -211,7 +240,10 @@ pub(crate) fn get_settings() -> Settings {
 /// 앱 관리 필드라 "저장하고 닫기"와 무관하게 즉시 적용된다(자동 시작 토글과 같은 결).
 #[tauri::command]
 pub(crate) fn set_auto_check_update(enabled: bool) -> Result<(), String> {
-    let mut s = read_settings();
+    // 해석 안 되는 파일 위에 기본값을 쓰지 않는다(read_settings_for_update 주석 참고).
+    // 여기서 Err 를 내면 프론트가 토글을 원복하는데, 실제로 아무것도 안 바뀌었으니 맞는 표시다.
+    let mut s = read_settings_for_update()
+        .ok_or("설정 파일을 읽지 못해서 저장하지 않았어요")?;
     s.auto_check_update = enabled;
     save_settings(&s)
 }
@@ -298,6 +330,28 @@ mod tests {
         // false 면 자동 시작을 켜 둔 기존 사용자가 "끔을 원했다"로 기록돼 복구 대상에서 빠진다.
         assert_eq!(s.autostart, None);
         assert!(s.auto_check_update); // 업데이트 확인은 기본 켜짐
+    }
+
+    // 🔴 해석 안 되는 설정 파일 위에 기본값을 쓰면 안 된다.
+    //
+    // read_settings 는 어떤 실패든 기본값으로 삼키는데, 개발 31 부터 autostart::reconcile 이
+    // **시작할 때마다** 읽고-쓰기를 한다. 그 경로가 read_settings 를 쓰면, 파일이 한 번 깨진
+    // 순간 사용자의 한도·커스텀 RPC·chain_id 가 통째로 기본값으로 덮인다 —
+    // 메인넷(8453)을 쓰던 사람이 아무 말 없이 테스트넷으로 돌아간다.
+    #[test]
+    fn corrupt_settings_are_never_overwritten() {
+        // 파일 없음 = 첫 실행 → 기본값에서 시작해도 안전하다.
+        assert!(settings_for_update(None).is_some());
+
+        // 정상 JSON → 그대로 읽힌다.
+        let ok = settings_for_update(Some(r#"{"single_usdc":"7","daily_usdc":"30",
+            "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#));
+        assert_eq!(ok.expect("정상 JSON 인데 None").chain_id, 8453);
+
+        // 🔴 깨진 JSON·타입이 어긋난 값 → None. 호출부는 여기서 손을 떼야 한다.
+        assert!(settings_for_update(Some("{ 이건 JSON 이 아니다")).is_none());
+        assert!(settings_for_update(Some(r#"{"single_usdc": 5}"#)).is_none()); // 문자열이어야 함
+        assert!(settings_for_update(Some("")).is_none());
     }
 
     // 🔴 폼 저장이 앱 관리 필드를 지우면 안 된다.
