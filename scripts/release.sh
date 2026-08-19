@@ -375,11 +375,22 @@ fi
 # 수밖에 없다 — 즉 **개발 30 보류 P1(자격증명이 빌드 전체에 상속된다)이 이 키에도 그대로
 # 적용된다.** beforeBuildCommand·Cargo build script·npm 의존성이 이 값을 읽을 수 있다.
 # 격리 세션에서 애플 자격증명과 함께 손볼 것(DEVLOG 개발 31 "다음").
+#
+# 🔴 번들러가 읽는 변수는 `TAURI_SIGNING_PRIVATE_KEY` **하나뿐**이다.
+# `TAURI_SIGNING_PRIVATE_KEY_PATH` 는 `tauri signer sign` 하위명령 전용이라 빌드에서는
+# 조용히 무시된다 — 개발 31 시험 배포에서 실물로 걸렸다(공개키는 있는데 개인키가 없다며
+# 빌드가 죽었고, 그 전까지 사전 점검은 전부 통과했다). 이름이 비슷해서 같은 것으로 착각했다.
+#
+# 그래서 파일을 읽어 **내용**을 싣는다. 경로를 넣으면 될 수도 있지만("failed to read private
+# key from file" 이라는 에러 문구가 경로 해석을 시사한다) 확실하지 않고, 내용은 어느 해석에서든
+# 동작한다(경로로 읽으려다 그런 파일이 없으면 키 문자열로 처리된다).
 if [[ -n "$CRED_UPDATER_KEY_PATH" ]]; then
-  BUILD_ENV+=("TAURI_SIGNING_PRIVATE_KEY_PATH=$CRED_UPDATER_KEY_PATH")
+  UPDATER_KEY_VALUE="$(cat "$CRED_UPDATER_KEY_PATH")" \
+    || die "업데이트 서명 키 파일을 읽지 못했다: $CRED_UPDATER_KEY_PATH"
 else
-  BUILD_ENV+=("TAURI_SIGNING_PRIVATE_KEY=$CRED_UPDATER_KEY")
+  UPDATER_KEY_VALUE="$CRED_UPDATER_KEY"
 fi
+BUILD_ENV+=("TAURI_SIGNING_PRIVATE_KEY=$UPDATER_KEY_VALUE")
 BUILD_ENV+=("TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$CRED_UPDATER_PASS")
 
 rm -rf "$BUNDLE_DIR/macos" "$BUNDLE_DIR/dmg"
