@@ -295,13 +295,20 @@ fi
 [[ -n "$CRED_UPDATER_PASS" ]] || warn \
   "TAURI_SIGNING_PRIVATE_KEY_PASSWORD 가 비어 있다. 키에 암호가 걸려 있으면 빌드가 입력을 기다리며 멈춘다"
 
-# 버전이 세 파일에서 갈리면 배포본과 업데이트 판단이 어긋난다.
+# 버전이 갈리면 배포본과 업데이트 판단이 어긋난다.
+crate_version() {
+  awk '/^\[package\]/{p=1;next}/^\[/{p=0}p&&/^version *=/{gsub(/[" ]/,"");sub(/^version=/,"");print;exit}' "$1"
+}
 VERSION_CONF="$(python3 -c 'import json;print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
 VERSION_PKG="$(python3 -c 'import json;print(json.load(open("package.json"))["version"])')"
-VERSION_CARGO="$(awk '/^\[package\]/{p=1;next}/^\[/{p=0}p&&/^version *=/{gsub(/[" ]/,"");sub(/^version=/,"");print;exit}' src-tauri/Cargo.toml)"
-[[ "$VERSION_CONF" == "$VERSION_PKG" && "$VERSION_CONF" == "$VERSION_CARGO" ]] || die \
-  "버전 불일치 — tauri.conf.json=$VERSION_CONF / package.json=$VERSION_PKG / Cargo.toml=$VERSION_CARGO"
-info "버전 $VERSION_CONF (세 파일 일치)"
+VERSION_CARGO="$(crate_version src-tauri/Cargo.toml)"
+# kura-mcp 도 같은 태그에서 나가고, `kura --version` 이 제 크레이트 버전을 그대로 찍는다
+# (kura-mcp/src/bin/kura.rs 의 CARGO_PKG_VERSION). 여기가 갈리면 사용자가 "내가 어느
+# 소스를 돌리고 있나"를 확인할 근거가 틀어진다 — 개발 32 에서 실제로 놓칠 뻔했다.
+VERSION_MCP="$(crate_version kura-mcp/Cargo.toml)"
+[[ "$VERSION_CONF" == "$VERSION_PKG" && "$VERSION_CONF" == "$VERSION_CARGO" && "$VERSION_CONF" == "$VERSION_MCP" ]] || die \
+  "버전 불일치 — tauri.conf.json=$VERSION_CONF / package.json=$VERSION_PKG / src-tauri/Cargo.toml=$VERSION_CARGO / kura-mcp/Cargo.toml=$VERSION_MCP"
+info "버전 $VERSION_CONF (네 파일 일치)"
 
 # 더러운 작업 트리에서 낸 배포본은 어떤 소스로 만든 건지 나중에 되짚을 수 없다.
 IS_DIRTY=0
