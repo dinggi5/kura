@@ -116,38 +116,58 @@ pub(crate) async fn install_update(
             .ok_or_else(|| "설치할 업데이트가 없어요. 다시 확인해 주세요.".to_string())?
     };
 
+    // 받기와 깔기를 **나눠서** 한다. `download_and_install` 한 방이면 위의 대기 검사와
+    // 재시작 사이에 다운로드(수십 초)가 통째로 들어가는데, 그 사이 MCP 가 올린 결제 요청은
+    // 검사에 안 걸린 채로 재시작에 휩쓸린다(코덱스 P1). 받아 놓고 다시 확인한 뒤 깐다.
     let progress_app = app.clone();
     let mut downloaded: u64 = 0;
-    let result = update
-        .download_and_install(
+    let bytes = match update
+        .download(
             move |chunk, total| {
                 downloaded += chunk as u64;
                 // 이벤트 전송 실패는 무시한다 — 진행률이 안 보이는 것뿐이고,
                 // 그것 때문에 설치를 중단시킬 이유는 없다.
-                let _ = progress_app.emit(
-                    PROGRESS_EVENT,
-                    UpdateProgress {
-                        downloaded,
-                        total,
-                    },
-                );
+                let _ = progress_app.emit(PROGRESS_EVENT, UpdateProgress { downloaded, total });
             },
             || {},
         )
-        .await;
+        .await
+    {
+        Ok(b) => b,
+        Err(e) => return Err(restore_slot(&state, update, format!("업데이트 내려받기 실패: {e}"))),
+    };
 
-    if let Err(e) = result {
-        // 되돌려 놓기 — 사용자가 승인한 그 버전 그대로 재시도할 수 있게.
-        if let Ok(mut slot) = state.0.lock() {
-            *slot = Some(update);
-        }
-        return Err(format!("업데이트 설치 실패: {e}"));
+    // 🔴 다시 확인한다. 여기까지가 되돌릴 수 있는 마지막 지점이다 — 아직 앱을 안 건드렸고,
+    // 받아 둔 바이트는 메모리에만 있다. 요청을 처리한 뒤 다시 누르면 된다.
+    if crate::ipc::has_pending() {
+        return Err(restore_slot(
+            &state,
+            update,
+            "내려받는 사이에 결제 승인 요청이 들어왔어요. 먼저 처리한 뒤 다시 시도하세요.".into(),
+        ));
+    }
+
+    if let Err(e) = update.install(bytes) {
+        return Err(restore_slot(&state, update, format!("업데이트 설치 실패: {e}")));
     }
 
     // 여기까지 왔으면 새 번들이 디스크에 깔렸다. 재시작해야 새 코드가 돈다 —
     // 안 하면 사용자는 "설치됐다"는 말을 보고도 옛 버전을 계속 쓴다.
+    //
+    // install() 과 restart() 사이에도 요청이 들어올 틈은 남아 있다. 다만 그건 밀리초 단위고,
+    // 무엇보다 **이미 깔린 뒤라 되돌릴 수가 없다** — 여기서 안 죽으면 구버전이 계속 도는
+    // 더 나쁜 상태가 된다. 줄일 수 있는 창(다운로드)을 줄이는 것이 이 분리의 목적이다.
     // restart() 는 돌아오지 않는다(-> !).
     app.restart()
+}
+
+/// 실패한 업데이트를 대기 슬롯에 되돌려 놓고 에러 메시지를 그대로 돌려준다.
+/// 사용자가 승인한 그 버전으로 재시도할 수 있게 — 검사부터 다시 하게 만들 이유가 없다.
+fn restore_slot(state: &State<'_, PendingUpdate>, update: Update, msg: String) -> String {
+    if let Ok(mut slot) = state.0.lock() {
+        *slot = Some(update);
+    }
+    msg
 }
 
 #[cfg(test)]

@@ -60,9 +60,9 @@ pub(crate) struct Settings {
     #[serde(default = "default_chain_id")]
     pub(crate) chain_id: u64,
 
-    // ── 아래 셋은 **앱이 관리하는 필드**다. 설정 화면 폼에서 오는 값이 아니라서
+    // ── 아래 둘은 **앱이 관리하는 필드**다. 설정 화면 폼에서 오는 값이 아니라서
     //    set_settings 가 클라이언트가 보낸 값을 무시하고 디스크 값을 지킨다(preserve_managed).
-    //    프론트 Settings 타입엔 이 셋이 없으므로, 안 지키면 "저장하고 닫기" 한 번에 전부 None 이 된다.
+    //    프론트 Settings 타입엔 이 둘이 없으므로, 안 지키면 "저장하고 닫기" 한 번에 기본값으로 덮인다.
     /// 로그인 시 자동 시작 **희망값** (개발 31).
     ///
     /// OS 로그인 아이템(LaunchAgent)만 보면 "사용자가 껐다"와 "패키지 관리자가 지웠다"를 구별할
@@ -75,12 +75,6 @@ pub(crate) struct Settings {
     /// 기록되고, 그 뒤 진짜로 꺼졌을 때 복구 대상에서 빠진다.
     #[serde(default)]
     pub(crate) autostart: Option<bool>,
-
-    /// 마지막으로 실행된 앱 버전 (개발 31). 자동 시작 복구를 **버전이 바뀐 실행에서만** 하기 위한 표식.
-    /// 매번 무조건 복구하면, 사용자가 시스템 설정 > 로그인 항목에서 끈 것을 앱이 다시 켜 버린다 —
-    /// 지갑 앱이 할 짓이 아니다. 자세한 판정은 autostart::reconcile.
-    #[serde(default)]
-    pub(crate) last_run_version: Option<String>,
 
     /// 시작할 때 업데이트가 있는지 확인 (개발 31). 기본 켜짐.
     /// 확인은 깃허브에 HTTPS GET 한 번이고, 그쪽엔 IP 와 현재 버전이 남는다.
@@ -116,7 +110,6 @@ impl Default for Settings {
             auto_trusted_only: true,
             chain_id: BASE_SEPOLIA.chain_id, // Base Sepolia(테스트넷) — 신규/옛 설정은 항상 테스트넷
             autostart: None,                 // 아직 모름 → 첫 실행에서 OS 상태를 채택
-            last_run_version: None,
             auto_check_update: true,
         }
     }
@@ -260,10 +253,9 @@ pub(crate) fn set_settings(mut settings: Settings) -> Result<(), String> {
     save_settings(&settings)
 }
 
-/// 앱이 관리하는 필드(자동 시작 희망값·마지막 실행 버전·자동 업데이트 확인)를 `from` 에서 가져온다.
+/// 앱이 관리하는 필드(자동 시작 희망값·자동 업데이트 확인)를 `from` 에서 가져온다.
 fn preserve_managed(settings: &mut Settings, from: &Settings) {
     settings.autostart = from.autostart;
-    settings.last_run_version = from.last_run_version.clone();
     settings.auto_check_update = from.auto_check_update;
 }
 
@@ -305,19 +297,17 @@ mod tests {
         // 개발 31 필드도 옛 파일에서 안전하게 온다. autostart 기본은 **None**(false 아님) —
         // false 면 자동 시작을 켜 둔 기존 사용자가 "끔을 원했다"로 기록돼 복구 대상에서 빠진다.
         assert_eq!(s.autostart, None);
-        assert_eq!(s.last_run_version, None);
         assert!(s.auto_check_update); // 업데이트 확인은 기본 켜짐
     }
 
     // 🔴 폼 저장이 앱 관리 필드를 지우면 안 된다.
-    // 프론트 Settings 타입엔 autostart·last_run_version·auto_check_update 가 없어서, 설정 화면의
+    // 프론트 Settings 타입엔 autostart·auto_check_update 가 없어서, 설정 화면의
     // "저장하고 닫기"는 항상 이 셋을 기본값(None/None/true)으로 실어 보낸다. 그대로 쓰면
     // 저장 한 번에 자동 시작 희망값이 날아가고 — 이번 세션이 고치려던 버그가 그대로 되살아난다.
     #[test]
     fn form_save_does_not_wipe_app_managed_fields() {
         let on_disk = Settings {
             autostart: Some(true),
-            last_run_version: Some("0.1.1".into()),
             auto_check_update: false,
             ..Default::default()
         };
@@ -331,7 +321,6 @@ mod tests {
         preserve_managed(&mut from_form, &on_disk);
 
         assert_eq!(from_form.autostart, Some(true)); // 희망값 보존
-        assert_eq!(from_form.last_run_version.as_deref(), Some("0.1.1"));
         assert!(!from_form.auto_check_update); // 꺼 둔 것도 보존
         assert_eq!(from_form.single_usdc, "9"); // 폼 값은 그대로 반영
     }
