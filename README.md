@@ -40,6 +40,8 @@ brew install --cask dinggi5/tap/kura
 
 [Releases](https://github.com/dinggi5/kura/releases/latest)에서 `Kura_<버전>_aarch64.dmg`를 받아 열고, Kura를 `Applications` 폴더로 끌어다 놓으세요.
 
+열쇠를 맡기는 앱이니, **받은 앱이 진짜 내가 만든 것인지 확인하는 법**은 [SECURITY.md](SECURITY.md#배포본이-진짜인지-확인)에 명령까지 적어 뒀어요.
+
 ### (C) 소스에서 빌드
 
 사전 준비: [Rust](https://rustup.rs), [Node.js](https://nodejs.org)(20.19+ 또는 22.12+ — Vite 7 요구), macOS.
