@@ -22,6 +22,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# 릴리스를 만드는 리포. latest.json 의 다운로드 URL 도, --publish 의 gh 호출도 여기서 나온다.
+# 이 둘이 갈리면 업로드는 성공하고 업데이트만 404 로 죽으므로 한 곳에서만 정한다.
+# (gh 는 기본적으로 원격에서 리포를 알아내는데, --publish 는 --repo 로 못 박고
+#  origin 이 정말 이 리포인지도 사전 점검에서 확인한다.)
+GH_REPO_SLUG="dinggi5/kura"
+
 # ── 출력 도우미 ──────────────────────────────────────────────────────────────
 step() { printf '\n\033[1;34m▸ %s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
@@ -282,7 +288,19 @@ if [[ $PUBLISH -eq 1 ]]; then
     "tap 에 커밋 안 된 변경이 있다: $TAP_DIR (정리한 뒤 다시 돌릴 것)"
   TAP_BRANCH="$(git -C "$TAP_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
   [[ "$TAP_BRANCH" == "main" ]] || die "tap 이 main 이 아니라 '$TAP_BRANCH' 다: $TAP_DIR"
-  info "배포 준비 확인됨 (gh 로그인 · tap $TAP_DIR)"
+
+  # 🔴 태그는 `origin` 에 밀고 릴리스는 `--repo dinggi5/kura` 에 만든다. 이 둘이 다른 리포면
+  # `gh release create` 는 그 리포에 없는 태그를 **기본 브랜치 HEAD 에서 새로 만들어** 버린다
+  # (gh 문서: 태그가 없으면 만든다). 그러면 릴리스가 광고하는 커밋이 방금 서명·공증한 커밋이
+  # 아니게 되는데, 업로드도 서명 검사도 전부 통과한다 — 이 스크립트가 내내 막아 온 종류의
+  # 조용한 어긋남이라 여기서 멈춘다.
+  ORIGIN_URL="$(git remote get-url origin 2>/dev/null || true)"
+  case "${ORIGIN_URL%.git}" in
+    *"github.com/$GH_REPO_SLUG"|*"github.com:$GH_REPO_SLUG") ;;
+    *) die "origin 이 $GH_REPO_SLUG 가 아니다: ${ORIGIN_URL:-(없음)}
+   태그는 origin 에, 릴리스는 $GH_REPO_SLUG 에 만들어져 둘이 갈린다." ;;
+  esac
+  info "배포 준비 확인됨 (gh 로그인 · origin $GH_REPO_SLUG · tap $TAP_DIR)"
 fi
 
 # ── 업데이트 서명 (개발 31) ─────────────────────────────────────────────────
@@ -655,11 +673,6 @@ fi
 step "latest.json"
 
 LATEST_JSON="$BUNDLE_DIR/macos/latest.json"
-# latest.json 이 가리키는 리포와 --publish 가 릴리스를 만드는 리포는 **반드시 같아야 한다**.
-# gh 는 원격에서 리포를 알아내는데(포크·다른 remote 면 딴 데로 간다), latest.json 의 URL 은
-# 여기 박힌 값이다 — 갈리면 업로드는 성공하고 업데이트만 404 로 죽는다. 그래서 한 곳에서 정하고
-# gh 호출에 --repo 로 못 박는다.
-GH_REPO_SLUG="dinggi5/kura"
 TAR_URL_BASE="https://github.com/$GH_REPO_SLUG/releases/download/$VERSION_TAG"
 
 # 릴리스 노트는 사용자가 "이 코드를 내 지갑에 넣을지" 판단하는 유일한 근거다.
@@ -887,6 +900,17 @@ EOF
   RELEASE_ASSETS=("$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON")
   if gh release view "$VERSION_TAG" --repo "$GH_REPO_SLUG" >/dev/null 2>&1; then
     warn "릴리스 $VERSION_TAG 가 이미 있다 — 빠진 자산만 올린다"
+    # 🔴 초안·프리릴리스면 여기서 멈춘다. 둘 다 **아래 검사를 전부 통과한다** —
+    # 자산 재다운로드는 로그인 상태라 초안에서도 되고, 엔드포인트 확인은 경고일 뿐이다.
+    # 그대로 캐스크를 밀면 받는 사람에게는 url 이 404 고(초안), 기존 사용자는 새 버전을
+    # 영영 못 본다(releases/latest 는 초안·프리릴리스를 건너뛴다).
+    REL_STATE="$(gh release view "$VERSION_TAG" --repo "$GH_REPO_SLUG" --json isDraft,isPrerelease \
+      --jq '[.isDraft, .isPrerelease] | @tsv' 2>/dev/null || true)"
+    [[ -n "$REL_STATE" ]] || die "릴리스 $VERSION_TAG 의 상태(초안·프리릴리스)를 확인하지 못했다"
+    [[ "$REL_STATE" != *true* ]] || die \
+      "릴리스 $VERSION_TAG 가 초안이거나 프리릴리스다 (isDraft/isPrerelease = $REL_STATE).
+     이대로 캐스크를 밀면 받는 사람에게 url 이 404 고, 기존 사용자는 업데이트를 못 받는다.
+     GitHub 에서 정식 공개로 바꾸고 다시 돌릴 것:  gh release edit $VERSION_TAG --repo $GH_REPO_SLUG --draft=false --prerelease=false"
     HAVE_ASSETS="$(gh release view "$VERSION_TAG" --repo "$GH_REPO_SLUG" --json assets --jq '.assets[].name' 2>/dev/null || true)"
     for a in "${RELEASE_ASSETS[@]}"; do
       if grep -Fxq "$(basename "$a")" <<<"$HAVE_ASSETS"; then
