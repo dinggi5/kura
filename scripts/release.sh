@@ -326,12 +326,19 @@ if [[ $PUBLISH -eq 1 ]]; then
   # `git push` 는 **전부에** 보내므로, 첫 줄만 보면 두 번째 줄로 조용히 새어 나간다.
   # get-url 은 --all 없이는 첫 줄만 준다 → 반드시 --all 로 전부 받아 한 줄씩 검사한다.
   check_remote_urls() {  # $1 = 이름, $2 = 리포 경로, $3 = 기대 슬러그
-    local u n=0
+    # ⚠️ `while read < <(…)` 로 묶으면 안 된다. process substitution 은 종료 상태를 밖으로
+    # 안 넘기므로, fetch 쪽 한 줄을 읽은 뒤 push 조회가 실패해도 "검사했다"가 돼 버린다.
+    # → 둘을 따로 받아 각각 성공을 확인한 다음에 순회한다.
+    local fetch_urls push_urls u n=0
+    fetch_urls="$(git -C "$2" remote get-url --all origin 2>/dev/null)" \
+      || die "$1 의 fetch URL 을 읽지 못했다 ($2)"
+    push_urls="$(git -C "$2" remote get-url --push --all origin 2>/dev/null)" \
+      || die "$1 의 push URL 을 읽지 못했다 ($2)"
     while read -r u; do
       [[ -n "$u" ]] || continue
       n=$((n+1)); check_remote_url "$1" "$u" "$3"
-    done < <(git -C "$2" remote get-url --all origin 2>/dev/null; git -C "$2" remote get-url --push --all origin 2>/dev/null)
-    [[ $n -gt 0 ]] || die "$1 원격 URL 을 읽지 못했다 ($2)"
+    done <<<"$fetch_urls"$'\n'"$push_urls"
+    [[ $n -gt 0 ]] || die "$1 원격 URL 이 하나도 없다 ($2)"
   }
   check_remote_urls "origin" "$REPO_ROOT" "$GH_REPO_SLUG"
   check_remote_urls "tap" "$TAP_DIR" "dinggi5/homebrew-tap"
@@ -339,7 +346,11 @@ if [[ $PUBLISH -eq 1 ]]; then
   # tap 이 origin 보다 앞서 있으면(=밀리지 않은 커밋) 이번 캐스크 커밋과 함께 딸려 나간다.
   # 반대로 앞선 커밋이 이미 있는 상태를 그냥 통과시키면, 8-4 가 "바뀐 게 없다"며 push 를
   # 안 부르고 배포 완료를 찍는다 — 지난 실행에서 push 만 실패한 경우가 정확히 이 모양이다.
-  git -C "$TAP_DIR" fetch -q origin main 2>/dev/null || warn "tap 원격을 새로 못 받아왔다"
+  # 🔴 여기서 경고로 넘기면 그 뒤 판단이 전부 **오래된 로컬 정보** 위에서 이뤄진다.
+  # 캐스크 롤백 검사가 대표적이다 — 원격이 이미 더 높은 버전인데 로컬만 낮으면, 되돌리는
+  # 배포를 릴리스까지 만든 뒤에야 발견한다. 배포는 되돌릴 수 없으니 fail-closed 로 간다.
+  git -C "$TAP_DIR" fetch -q origin main 2>/dev/null \
+    || die "tap 원격을 받아오지 못했다: $TAP_DIR (네트워크·권한 확인). 오래된 정보로 배포하지 않는다"
   TAP_AHEAD="$(git -C "$TAP_DIR" rev-list --count origin/main..main 2>/dev/null || echo "?")"
   [[ "$TAP_AHEAD" == "0" ]] || die \
     "tap 에 안 밀린 커밋이 $TAP_AHEAD 개 있다: $TAP_DIR
@@ -455,13 +466,18 @@ fi
 if [[ $PUBLISH -eq 1 ]]; then
   CASK_VERSION_REMOTE="$(git -C "$TAP_DIR" show origin/main:Casks/kura.rb 2>/dev/null \
     | sed -n 's/^ *version "\(.*\)"$/\1/p' | head -1 || true)"
-  if [[ -n "$CASK_VERSION_REMOTE" && "$CASK_VERSION_REMOTE" != "$VERSION_CONF" ]]; then
+  # 못 읽었으면 통과시키지 않는다. 이 검사가 막으려는 게 "되돌리는 배포"인데, 못 읽었을 때
+  # 그냥 지나가면 정확히 그 상황(원격이 더 높음)에서 아무것도 안 막는다.
+  [[ -n "$CASK_VERSION_REMOTE" ]] || die \
+    "원격 tap 의 캐스크 버전을 읽지 못했다 (origin/main:Casks/kura.rb).
+   버전이 내려가는 배포를 막을 수 없으므로 여기서 멈춘다: $TAP_DIR"
+  if [[ "$CASK_VERSION_REMOTE" != "$VERSION_CONF" ]]; then
     LOWER="$(printf '%s\n%s\n' "$CASK_VERSION_REMOTE" "$VERSION_CONF" | sort -V | head -1)"
     [[ "$LOWER" == "$CASK_VERSION_REMOTE" ]] || die \
       "원격 캐스크가 $CASK_VERSION_REMOTE 인데 이번 배포는 $VERSION_CONF 다 — 버전을 되돌리게 된다.
    릴리스를 만들기 전에 멈춘다. 의도한 롤백이면 캐스크를 손으로 고칠 것."
   fi
-  info "캐스크 버전 확인: 원격 ${CASK_VERSION_REMOTE:-(못 읽음)} → $VERSION_CONF"
+  info "캐스크 버전 확인: 원격 $CASK_VERSION_REMOTE → $VERSION_CONF"
 fi
 if git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
   TAG_SHA="$(git rev-parse "$VERSION_TAG^{commit}")"
@@ -989,11 +1005,22 @@ EOF
       # 빌드가 나오므로(코드서명 타임스탬프·공증 티켓) 자산을 안 갈아엎는 한 영원히
       # 재검증에서 막힌다. 그래서 이 플래그가 필요하다 — 같은 실행 안에서 네 개를 이번
       # 빌드로 통일하고 그대로 진행한다.
-      # ⚠️ --clobber 는 기존 자산을 지운 뒤 올린다. 올리다 실패하면 그 자산은 사라진다
-      #    (gh 문서에 명시). 그래서 기본 동작이 아니라 명시적으로 부를 때만 한다.
-      gh release upload "$VERSION_TAG" "${RELEASE_ASSETS[@]}" --repo "$GH_REPO_SLUG" --clobber \
-        || die "자산 덮어쓰기 실패 — 릴리스에 자산이 빠진 채 남았을 수 있다. 릴리스 페이지를 확인할 것"
-      info "자산 4종을 이번 빌드로 덮어썼다"
+      # ⚠️ --clobber 는 기존 자산을 **지운 뒤** 올린다(gh 문서). 즉 올리는 도중 끊기면 그
+      #    자산은 릴리스에서 사라진다 — 공개 중인 릴리스라면 그 순간 설치·업데이트가 끊긴다.
+      #    없앨 수 없는 창이라 대신 좁힌다: 네 개를 한 방에 넘기지 않고 하나씩, 실패하면
+      #    한 번 더 시도하고, 그래도 안 되면 **어느 파일이 비었는지 이름을 대고** 멈춘다.
+      #    (그 뒤 재검증이 네 개를 다시 받아 대조하므로, 어중간한 상태는 같은 실행에서 걸린다.)
+      for a in "${RELEASE_ASSETS[@]}"; do
+        n="$(basename "$a")"
+        if ! gh release upload "$VERSION_TAG" "$a" --repo "$GH_REPO_SLUG" --clobber 2>/dev/null; then
+          warn "$n 덮어쓰기 실패 — 한 번 더 시도한다"
+          gh release upload "$VERSION_TAG" "$a" --repo "$GH_REPO_SLUG" --clobber || die \
+            "$n 을 덮어쓰지 못했다. --clobber 는 지운 뒤 올리므로 **릴리스에 이 파일이 없을 수
+     있다** — 지금 릴리스 페이지를 열어 확인하고, 없으면 이 명령으로 곧장 올릴 것:
+       gh release upload $VERSION_TAG \"$a\" --repo $GH_REPO_SLUG --clobber"
+        fi
+        info "덮어씀: $n"
+      done
     else
       HAVE_ASSETS="$(gh release view "$VERSION_TAG" --repo "$GH_REPO_SLUG" --json assets --jq '.assets[].name' 2>/dev/null || true)"
       for a in "${RELEASE_ASSETS[@]}"; do
