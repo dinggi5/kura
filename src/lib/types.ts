@@ -89,6 +89,9 @@ export type ConnectStatus = {
   desktop_installed: boolean;
   desktop_ext_installed: boolean;
   cli_path: string | null;
+  /** kura 등록이 있고 command 가 이 빌드의 kura-mcp 경로와 일치. */
   cli_registered: boolean;
+  /** kura 등록은 있는데 다른 경로를 가리킴(옛 설치 등) — 재등록 안내 대상. */
+  cli_registered_other: boolean;
   mcp_path: string | null;
 };

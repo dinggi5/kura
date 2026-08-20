@@ -115,12 +115,19 @@ export function WalletScreen({
 
   // 입금 자동 반영(개발 35)의 배경 갱신 — 스피너·에러 없이 조용히. 실패하면 기존 값을
   // 유지한다(외부 입금 감지가 목적이라, 일시적 RPC 오류로 멀쩡한 화면을 더럽힐 이유가 없다).
+  // in-flight 가드(코덱스 개발35 1차): 느린 RPC 에서 30초 주기가 요청을 겹겹이 쌓고,
+  // 늦게 온 응답이 더 새 값을 덮는 것 방지 — 진행 중이면 이번 차례는 그냥 쉰다.
+  const silentBusy = useRef(false);
   const refreshBalancesSilent = useCallback(async () => {
+    if (silentBusy.current) return;
+    silentBusy.current = true;
     try {
       setBalances(await invoke<Balances>("get_balances", { addrHex: address }));
       setBalanceError(null);
     } catch {
       /* 다음 주기에 다시 */
+    } finally {
+      silentBusy.current = false;
     }
   }, [address]);
 

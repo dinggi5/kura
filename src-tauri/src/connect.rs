@@ -27,8 +27,13 @@ pub(crate) struct ConnectStatus {
     pub(crate) desktop_ext_installed: bool,
     /// 찾아낸 claude CLI 절대경로. 없으면 None → 프론트가 수동 명령 복사로 안내.
     pub(crate) cli_path: Option<String>,
-    /// ~/.claude.json 사용자 범위(mcpServers)에 kura 가 등록돼 있는지.
+    /// ~/.claude.json 사용자 범위(mcpServers)에 kura 가 등록돼 있고, 그 command 가
+    /// **이 빌드의 kura-mcp 경로와 일치**하는지. 이름만 있고 경로가 다르면 false 가
+    /// 아니라 cli_registered_other 로 따로 알린다 — "등록됨"이라 속이지도,
+    /// 멀쩡한 다른 등록을 없는 셈 치지도 않게.
     pub(crate) cli_registered: bool,
+    /// kura 항목은 있는데 command 가 이 빌드 경로와 다른 경우(옛 설치·다른 사본).
+    pub(crate) cli_registered_other: bool,
     /// 이 앱 번들 안 kura-mcp 절대경로 — 수동 등록 명령 조립용.
     pub(crate) mcp_path: Option<String>,
 }
@@ -94,36 +99,45 @@ fn find_claude_cli() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-/// ~/.claude.json 사용자 범위에 kura MCP 서버가 있는가 — 순수 심장부(테스트 대상).
+/// ~/.claude.json 사용자 범위에 등록된 kura 서버의 command — 순수 심장부(테스트 대상).
 /// 프로젝트 범위(.mcp.json 등)는 안 본다: 우리가 대행하는 등록이 사용자 범위고,
 /// 프로젝트 범위는 그 폴더에서만 살아서 "연결됨"이라 말하면 거짓말이 되는 경우가 많다.
-fn claude_json_has_kura(json: &str) -> bool {
+///
+/// 이름만 보고 "등록됨"이라 하지 않는 이유(코덱스 개발35 1차): 옛 설치·옮긴 앱을
+/// 가리키는 kura 항목이 있으면 화면은 "등록됨"인데 Claude 는 서버를 못 띄운다.
+/// command 까지 돌려줘서 호출부가 현재 경로와 대조하게 한다.
+fn claude_json_kura_command(json: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|v| {
-            v.get("mcpServers")
-                .and_then(|m| m.as_object())
-                .map(|m| m.contains_key("kura"))
-        })
-        .unwrap_or(false)
+        .ok()?
+        .get("mcpServers")?
+        .get("kura")?
+        .get("command")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
-fn cli_registered() -> bool {
+fn registered_cli_command() -> Option<String> {
     dirs::home_dir()
         .and_then(|h| std::fs::read_to_string(h.join(".claude.json")).ok())
-        .map(|s| claude_json_has_kura(&s))
-        .unwrap_or(false)
+        .and_then(|s| claude_json_kura_command(&s))
 }
 
 /// AI 연결 화면 상태 한 벌. 전부 로컬 파일 읽기라 폴링해도 싸다.
 #[tauri::command]
 pub(crate) fn get_connect_status() -> ConnectStatus {
+    let mcp_path = bundled_mcp_path().map(|p| p.to_string_lossy().into_owned());
+    let registered_cmd = registered_cli_command();
+    let matches = match (&registered_cmd, &mcp_path) {
+        (Some(cmd), Some(ours)) => cmd == ours,
+        _ => false,
+    };
     ConnectStatus {
         desktop_installed: desktop_installed(),
         desktop_ext_installed: desktop_ext_installed(),
         cli_path: find_claude_cli().map(|p| p.to_string_lossy().into_owned()),
-        cli_registered: cli_registered(),
-        mcp_path: bundled_mcp_path().map(|p| p.to_string_lossy().into_owned()),
+        cli_registered: matches,
+        cli_registered_other: registered_cmd.is_some() && !matches,
+        mcp_path,
     }
 }
 
@@ -170,6 +184,12 @@ pub(crate) fn connect_claude_code() -> Result<(), String> {
     let Some(mcp) = bundled_mcp_path() else {
         return Err("이 빌드에 kura-mcp 가 없어요. 앱을 다시 설치해 보세요.".into());
     };
+    // 멱등 재등록: 같은 이름이 이미 있으면 add 가 "already exists" 로 거부하는데,
+    // 그걸 성공으로 치면 옛 경로를 가리키는 등록이 영영 안 고쳐진다(코덱스 개발35 1차).
+    // 우리 이름(kura)의 사용자 범위 항목만 지우고 다시 등록한다 — 없어서 실패하는 건 정상.
+    let _ = Command::new(&cli)
+        .args(["mcp", "remove", "--scope", "user", "kura"])
+        .output();
     let out = Command::new(&cli)
         .args(["mcp", "add", "--scope", "user", "kura", "--"])
         .arg(&mcp)
@@ -178,12 +198,10 @@ pub(crate) fn connect_claude_code() -> Result<(), String> {
     if out.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    // 이미 등록돼 있으면 목적은 이뤄진 상태다 — 성공으로 친다.
-    if stderr.contains("already exists") {
-        return Ok(());
-    }
-    Err(format!("등록 실패: {}", stderr.trim()))
+    Err(format!(
+        "등록 실패: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    ))
 }
 
 #[cfg(test)]
@@ -199,16 +217,26 @@ mod tests {
         assert!(!manifest_is_kura("not json"));
     }
 
-    // CLI 등록 감지: 사용자 범위 mcpServers 만 본다.
+    // CLI 등록 감지: 사용자 범위 mcpServers 의 command 를 돌려준다(이름만 보지 않는다 —
+    // 옛 경로를 가리키는 등록을 "등록됨"으로 속이지 않기 위해. 코덱스 개발35 1차).
     #[test]
     fn claude_json_detection() {
-        assert!(claude_json_has_kura(r#"{"mcpServers":{"kura":{"command":"x"}}}"#));
-        assert!(!claude_json_has_kura(r#"{"mcpServers":{"playwright":{}}}"#));
+        assert_eq!(
+            claude_json_kura_command(r#"{"mcpServers":{"kura":{"command":"/a/kura-mcp"}}}"#),
+            Some("/a/kura-mcp".to_string())
+        );
+        assert_eq!(
+            claude_json_kura_command(r#"{"mcpServers":{"playwright":{}}}"#),
+            None
+        );
+        // command 없는 항목(HTTP 서버 등)은 경로 대조가 불가 → None.
+        assert_eq!(claude_json_kura_command(r#"{"mcpServers":{"kura":{}}}"#), None);
         // 프로젝트 범위에만 있는 건 등록으로 안 친다.
-        assert!(!claude_json_has_kura(
-            r#"{"projects":{"/a":{"mcpServers":{"kura":{}}}}}"#
-        ));
-        assert!(!claude_json_has_kura("{}"));
-        assert!(!claude_json_has_kura("broken"));
+        assert_eq!(
+            claude_json_kura_command(r#"{"projects":{"/a":{"mcpServers":{"kura":{"command":"x"}}}}}"#),
+            None
+        );
+        assert_eq!(claude_json_kura_command("{}"), None);
+        assert_eq!(claude_json_kura_command("broken"), None);
     }
 }

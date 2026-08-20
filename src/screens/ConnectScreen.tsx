@@ -234,6 +234,8 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
             status &&
             (status.cli_registered ? (
               <StateTag ok label="등록됨" />
+            ) : status.cli_registered_other ? (
+              <StateTag label="다른 경로 등록됨" />
             ) : status.cli_path ? undefined : (
               <StateTag label="CLI 못 찾음" />
             ))
@@ -246,14 +248,24 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
             </p>
           ) : status?.cli_path ? (
             <div className="space-y-2.5">
-              <p>버튼 한 번으로 등록돼요. 다음 claude 실행부터 어느 폴더에서든 연결돼요.</p>
+              <p>
+                {status.cli_registered_other
+                  ? "kura 등록이 있지만 다른 경로(옛 설치 등)를 가리키고 있어요. 다시 등록하면 이 앱으로 바로잡아요."
+                  : "버튼 한 번으로 등록돼요. 다음 claude 실행부터 어느 폴더에서든 연결돼요."}
+              </p>
               <button
                 type="button"
                 onClick={() => void connectCode()}
                 disabled={cliBusy}
                 className={cn(primaryBtn, "w-full")}
               >
-                {cliBusy ? <Loader2 size={14} className="animate-spin" /> : "Claude Code에 연결"}
+                {cliBusy ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : status.cli_registered_other ? (
+                  "이 앱으로 다시 등록"
+                ) : (
+                  "Claude Code에 연결"
+                )}
               </button>
               {cliError && (
                 <p className="text-[11px] leading-relaxed text-red-500/90">{cliError}</p>
