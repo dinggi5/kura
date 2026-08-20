@@ -428,7 +428,10 @@ VERSION_MCP="$(crate_version kura-mcp/Cargo.toml)"
 VERSION_MCPB="$(python3 -c 'import json;print(json.load(open("mcpb/manifest.json"))["version"])')"
 # 여섯째: package-lock.json 의 최상위 버전. npm 은 여길 자동으로 안 올려 줘서
 # (npm install 을 돌려야 따라온다) 실제로 0.1.2 때 한 번 어긋났다.
-VERSION_LOCK="$(python3 -c 'import json;print(json.load(open("package-lock.json"))["version"])')"
+VERSION_LOCK="$(python3 -c 'import json
+d=json.load(open("package-lock.json"))
+v1=d["version"]; v2=d.get("packages",{}).get("",{}).get("version",v1)
+print(v1 if v1==v2 else f"{v1}!={v2}")')"
 [[ "$VERSION_CONF" == "$VERSION_PKG" && "$VERSION_CONF" == "$VERSION_CARGO" && "$VERSION_CONF" == "$VERSION_MCP" && "$VERSION_CONF" == "$VERSION_MCPB" && "$VERSION_CONF" == "$VERSION_LOCK" ]] || die \
   "버전 불일치 — tauri.conf.json=$VERSION_CONF / package.json=$VERSION_PKG / src-tauri/Cargo.toml=$VERSION_CARGO / kura-mcp/Cargo.toml=$VERSION_MCP / mcpb/manifest.json=$VERSION_MCPB / package-lock.json=$VERSION_LOCK"
 info "버전 $VERSION_CONF (여섯 파일 일치)"
@@ -1121,6 +1124,12 @@ EOF
         fi
         info "덮어씀: $n"
       done
+      # 자산을 이번 빌드로 갈아엎었으면 본문의 sha256 두 줄도 이번 빌드 값이어야 한다.
+      # 안 그러면 이 플래그가 남긴 "검증 정보"가 곧바로 낡은 거짓이 된다 (2차 리뷰 P2).
+      gh release edit "$VERSION_TAG" --repo "$GH_REPO_SLUG" --notes-file "$RELEASE_BODY" || die \
+        "릴리스 본문 갱신 실패 — 페이지의 sha256 이 옛 빌드 값으로 남아 있다. 손으로 고칠 것:
+       gh release edit $VERSION_TAG --repo $GH_REPO_SLUG --notes-file \"$RELEASE_BODY\""
+      info "릴리스 본문 sha256 갱신됨"
     else
       HAVE_ASSETS="$(gh release view "$VERSION_TAG" --repo "$GH_REPO_SLUG" --json assets --jq '.assets[].name' 2>/dev/null || true)"
       for a in "${RELEASE_ASSETS[@]}"; do
