@@ -10,6 +10,8 @@
 #   ./scripts/release.sh --publish       빌드·검증이 통과하면 그대로 배포까지 (개발 33)
 #                                        태그 → 릴리스 업로드 → 업로드본 재검증 → 캐스크 갱신·푸시
 #   ./scripts/release.sh --publish --yes 배포 직전 확인 프롬프트를 생략
+#   ./scripts/release.sh --publish --replace-assets
+#                                        이미 올라간 자산을 이번 빌드로 덮어쓴다 (재실행 복구용)
 #
 # 1회 설정과 자격증명 만드는 법은 docs/RELEASE.md 를 볼 것.
 #
@@ -59,11 +61,13 @@ ALLOW_DIRTY=0
 PLAIN_DMG=0
 PUBLISH=0
 ASSUME_YES=0
+REPLACE_ASSETS=0
 for arg in "$@"; do
   case "$arg" in
     --universal)   UNIVERSAL=1 ;;
     --publish)     PUBLISH=1 ;;
     --yes|-y)      ASSUME_YES=1 ;;
+    --replace-assets) REPLACE_ASSETS=1 ;;
     --no-notarize) NOTARIZE=0 ;;
     --skip-tests)  RUN_TESTS=0 ;;
     --allow-dirty) ALLOW_DIRTY=1 ;;
@@ -72,6 +76,8 @@ for arg in "$@"; do
     *)             die "모르는 옵션: $arg  (--help 로 사용법 확인)" ;;
   esac
 done
+
+[[ $REPLACE_ASSETS -eq 0 || $PUBLISH -eq 1 ]] || die "--replace-assets 는 --publish 와 같이 쓴다"
 
 # ── 0. 자격증명 불러오기 ────────────────────────────────────────────────────
 # scripts/release.env 는 .gitignore 로 커밋에서 제외된다. 없으면 이미 export 된
@@ -273,6 +279,7 @@ CASK_FILE=""
 TAP_DIR=""
 if [[ $PUBLISH -eq 1 ]]; then
   [[ $NOTARIZE -eq 1 ]] || die "--publish 는 공증한 산출물에만 쓴다 (--no-notarize 와 같이 쓸 수 없다)"
+  [[ $REPLACE_ASSETS -eq 0 ]] || warn "--replace-assets: 이미 올라간 자산을 이번 빌드로 덮어쓴다"
   # 테스트를 건너뛴 빌드는 배포하지 않는다. docs/RELEASE.md 가 "검증이 전부 통과한 뒤에만
   # 배포로 넘어간다"고 약속하는데, --skip-tests 를 허용하면 그 문장이 거짓이 된다.
   [[ $RUN_TESTS -eq 1 ]] || die "--publish 와 --skip-tests 는 같이 못 쓴다. 배포본은 테스트를 통과한 소스에서 나와야 한다"
@@ -315,10 +322,19 @@ if [[ $PUBLISH -eq 1 ]]; then
    여기서 멈추지 않으면 밀어 넣는 곳과 릴리스를 만드는 곳이 갈린다." ;;
     esac
   }
-  check_remote_url "origin(fetch)" "$(git remote get-url origin 2>/dev/null || true)" "$GH_REPO_SLUG"
-  check_remote_url "origin(push)"  "$(git remote get-url --push origin 2>/dev/null || true)" "$GH_REPO_SLUG"
-  check_remote_url "tap(fetch)" "$(git -C "$TAP_DIR" remote get-url origin 2>/dev/null || true)" "dinggi5/homebrew-tap"
-  check_remote_url "tap(push)"  "$(git -C "$TAP_DIR" remote get-url --push origin 2>/dev/null || true)" "dinggi5/homebrew-tap"
+  # ⚠️ 원격 하나에 URL 이 여러 개 붙을 수 있다(remote.origin.pushurl 을 여러 줄로).
+  # `git push` 는 **전부에** 보내므로, 첫 줄만 보면 두 번째 줄로 조용히 새어 나간다.
+  # get-url 은 --all 없이는 첫 줄만 준다 → 반드시 --all 로 전부 받아 한 줄씩 검사한다.
+  check_remote_urls() {  # $1 = 이름, $2 = 리포 경로, $3 = 기대 슬러그
+    local u n=0
+    while read -r u; do
+      [[ -n "$u" ]] || continue
+      n=$((n+1)); check_remote_url "$1" "$u" "$3"
+    done < <(git -C "$2" remote get-url --all origin 2>/dev/null; git -C "$2" remote get-url --push --all origin 2>/dev/null)
+    [[ $n -gt 0 ]] || die "$1 원격 URL 을 읽지 못했다 ($2)"
+  }
+  check_remote_urls "origin" "$REPO_ROOT" "$GH_REPO_SLUG"
+  check_remote_urls "tap" "$TAP_DIR" "dinggi5/homebrew-tap"
 
   # tap 이 origin 보다 앞서 있으면(=밀리지 않은 커밋) 이번 캐스크 커밋과 함께 딸려 나간다.
   # 반대로 앞선 커밋이 이미 있는 상태를 그냥 통과시키면, 8-4 가 "바뀐 게 없다"며 push 를
@@ -430,6 +446,22 @@ VERSION_TAG="v$VERSION_CONF"
 if [[ $PUBLISH -eq 1 && ! -f "docs/release-notes/$VERSION_TAG.md" ]]; then
   die "릴리스 노트가 없다: docs/release-notes/$VERSION_TAG.md
    업데이트 승인 화면에 그대로 뜨는 글이라, 배포에는 필수다 (docs/RELEASE.md '릴리스 노트 파일')"
+fi
+
+# 캐스크 버전이 내려가는 배포(옛 태그를 다시 빌드한 경우)를 **빌드 전에** 막는다.
+# 8-4 에도 같은 검사가 있지만 그건 이미 릴리스를 만든 뒤다 — 그 시점엔 새 정식 릴리스가
+# latest 가 되어 업데이트 엔드포인트까지 낮은 버전을 광고할 수 있다. 되돌릴 수 없는 일을
+# 하기 전에 아는 게 낫다. 기준은 **원격 tap** 이다(로컬이 뒤처져 있어도 속지 않게).
+if [[ $PUBLISH -eq 1 ]]; then
+  CASK_VERSION_REMOTE="$(git -C "$TAP_DIR" show origin/main:Casks/kura.rb 2>/dev/null \
+    | sed -n 's/^ *version "\(.*\)"$/\1/p' | head -1 || true)"
+  if [[ -n "$CASK_VERSION_REMOTE" && "$CASK_VERSION_REMOTE" != "$VERSION_CONF" ]]; then
+    LOWER="$(printf '%s\n%s\n' "$CASK_VERSION_REMOTE" "$VERSION_CONF" | sort -V | head -1)"
+    [[ "$LOWER" == "$CASK_VERSION_REMOTE" ]] || die \
+      "원격 캐스크가 $CASK_VERSION_REMOTE 인데 이번 배포는 $VERSION_CONF 다 — 버전을 되돌리게 된다.
+   릴리스를 만들기 전에 멈춘다. 의도한 롤백이면 캐스크를 손으로 고칠 것."
+  fi
+  info "캐스크 버전 확인: 원격 ${CASK_VERSION_REMOTE:-(못 읽음)} → $VERSION_CONF"
 fi
 if git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
   TAG_SHA="$(git rev-parse "$VERSION_TAG^{commit}")"
@@ -952,15 +984,27 @@ EOF
       "릴리스 $VERSION_TAG 가 초안이거나 프리릴리스다 (isDraft/isPrerelease = $REL_STATE).
      이대로 캐스크를 밀면 받는 사람에게 url 이 404 고, 기존 사용자는 업데이트를 못 받는다.
      GitHub 에서 정식 공개로 바꾸고 다시 돌릴 것:  gh release edit $VERSION_TAG --repo $GH_REPO_SLUG --draft=false --prerelease=false"
-    HAVE_ASSETS="$(gh release view "$VERSION_TAG" --repo "$GH_REPO_SLUG" --json assets --jq '.assets[].name' 2>/dev/null || true)"
-    for a in "${RELEASE_ASSETS[@]}"; do
-      if grep -Fxq "$(basename "$a")" <<<"$HAVE_ASSETS"; then
-        info "이미 있음: $(basename "$a")"
-      else
-        gh release upload "$VERSION_TAG" "$a" --repo "$GH_REPO_SLUG" || die "자산 업로드 실패: $a"
-        info "업로드: $(basename "$a")"
-      fi
-    done
+    if [[ $REPLACE_ASSETS -eq 1 ]]; then
+      # 🔴 재실행 복구 경로. 릴리스가 만들어진 뒤에 실패하면 다시 돌려도 **바이트가 다른**
+      # 빌드가 나오므로(코드서명 타임스탬프·공증 티켓) 자산을 안 갈아엎는 한 영원히
+      # 재검증에서 막힌다. 그래서 이 플래그가 필요하다 — 같은 실행 안에서 네 개를 이번
+      # 빌드로 통일하고 그대로 진행한다.
+      # ⚠️ --clobber 는 기존 자산을 지운 뒤 올린다. 올리다 실패하면 그 자산은 사라진다
+      #    (gh 문서에 명시). 그래서 기본 동작이 아니라 명시적으로 부를 때만 한다.
+      gh release upload "$VERSION_TAG" "${RELEASE_ASSETS[@]}" --repo "$GH_REPO_SLUG" --clobber \
+        || die "자산 덮어쓰기 실패 — 릴리스에 자산이 빠진 채 남았을 수 있다. 릴리스 페이지를 확인할 것"
+      info "자산 4종을 이번 빌드로 덮어썼다"
+    else
+      HAVE_ASSETS="$(gh release view "$VERSION_TAG" --repo "$GH_REPO_SLUG" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+      for a in "${RELEASE_ASSETS[@]}"; do
+        if grep -Fxq "$(basename "$a")" <<<"$HAVE_ASSETS"; then
+          info "이미 있음: $(basename "$a")"
+        else
+          gh release upload "$VERSION_TAG" "$a" --repo "$GH_REPO_SLUG" || die "자산 업로드 실패: $a"
+          info "업로드: $(basename "$a")"
+        fi
+      done
+    fi
   else
     # --verify-tag: 그 리포에 태그가 없으면 만들지 말고 죽으라는 뜻. 없으면 gh 는 기본 브랜치
     # HEAD 에서 태그를 새로 만들어 버린다 — 릴리스가 광고하는 커밋이 빌드한 커밋과 갈린다.
@@ -998,8 +1042,9 @@ EOF
     die "릴리스에 올라간 자산이 방금 만든 것과 다르다:$MISMATCH
      (DMG 업로드 $DL_SHA ≠ 빌드 $SHA256)
      캐스크는 건드리지 않았다. 둘 중 하나를 고를 것:
-     ① 방금 빌드한 것으로 통일 — 네 개를 덮어쓴 뒤 이 명령을 다시 돌린다:
-        gh release upload $VERSION_TAG ${RELEASE_ASSETS[*]} --repo $GH_REPO_SLUG --clobber
+     ① 방금 빌드한 것으로 통일 — 아래로 다시 돌리면 자산을 덮어쓰고 그대로 진행한다:
+        ./scripts/release.sh --publish --replace-assets
+        (그냥 --publish 로 다시 돌리면 또 새로 빌드해서 또 여기서 막힌다 — 바이트가 매번 다르다)
      ② 이미 올라간 것을 그대로 둔다 — 이 스크립트로 캐스크를 갱신하지 말고,
         릴리스에서 받은 DMG 의 해시로 손수 갱신할 것"
   fi
@@ -1008,22 +1053,26 @@ EOF
   # 앱이 실제로 물어보는 주소는 이 하나다. 프리릴리스로 올라갔거나 latest.json 이 빠지면
   # 여기서 404 나 옛 버전이 나온다 — 기존 사용자가 새 버전을 영영 모르는 실패다.
   LATEST_URL="https://github.com/$GH_REPO_SLUG/releases/latest/download/latest.json"
-  LATEST_REMOTE=""
+  # 🔴 상태를 따로 들고 간다. 응답 변수 하나로 판단하면, 앞 시도에서 **틀린 버전을 봤어도**
+  # 마지막 시도가 네트워크 실패로 빈 값을 덮어써서 "못 읽었다(경고)"로 둔갑한다.
+  # 한 번이라도 제대로 읽어서 불일치를 봤다면 그 사실이 이긴다 → mismatch 를 유지한다.
+  ENDPOINT_STATE="unknown"   # unknown = 못 읽음 / ok / mismatch
   LATEST_VER=""
   for attempt in 1 2 3 4 5; do
     LATEST_REMOTE="$(curl -fsSL "$LATEST_URL" || true)"
     if [[ -n "$LATEST_REMOTE" ]]; then
       LATEST_VER="$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' <<<"$LATEST_REMOTE" 2>/dev/null || true)"
-      [[ "$LATEST_VER" != "$VERSION_CONF" ]] || break
+      if [[ "$LATEST_VER" == "$VERSION_CONF" ]]; then ENDPOINT_STATE="ok"; break; fi
+      ENDPOINT_STATE="mismatch"
     fi
     [[ $attempt -lt 5 ]] || break
     info "엔드포인트 반영 대기 중… ($attempt/5)"
     sleep 6
   done
-  if [[ -z "$LATEST_REMOTE" ]]; then
+  if [[ "$ENDPOINT_STATE" == "unknown" ]]; then
     # 못 읽은 것과 틀리게 올라간 것은 다르다. 앞은 우리 쪽에 판단 근거가 없으니 경고로 둔다.
     warn "$LATEST_URL 을 못 읽었다 (네트워크?). 캐스크는 갱신하되 반드시 직접 확인할 것"
-  elif [[ "$LATEST_VER" != "$VERSION_CONF" ]]; then
+  elif [[ "$ENDPOINT_STATE" == "mismatch" ]]; then
     # 🔴 경고로 넘기면 안 된다. 0.1.2 부터 캐스크에 auto_updates true 가 들어가면 brew 도
     # 업그레이드를 안 맡으므로, 엔드포인트가 틀린 채로 캐스크를 밀면 기존 사용자는
     # **어느 자동 경로로도** 새 버전을 못 받는다.
