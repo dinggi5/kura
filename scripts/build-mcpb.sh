@@ -53,6 +53,10 @@ needs_build() {
       [[ "$out" -nt "$src" ]] || return 0
     done
   done
+  # mtime 만으로는 부족하다: src-tauri/build.rs 가 신규 체크아웃 방어로 만드는
+  # **빈 자리표시자**는 방금 생긴 파일이라 mtime 검사를 통과한다(실측). 두 산출물이
+  # 같은 바이트일 때만 최신으로 친다 — 자리표시자든 어긋난 사본이든 여기서 걸린다.
+  cmp -s "$MCPB_FILE" "$RESOURCE_FILE" || return 0
   return 1
 }
 if [[ "${KURA_SIDECARS_STRICT:-0}" == "1" ]]; then

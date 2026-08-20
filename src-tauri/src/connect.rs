@@ -48,13 +48,21 @@ fn bundled_mcp_path() -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-/// Claude 데스크톱 설치 여부.
+/// Claude 데스크톱 설치 여부. 표준 폴더 둘을 먼저 보고(비용 0), 없을 때만 Spotlight 로
+/// 번들 ID 를 찾는다(코덱스 개발35 2차 — 다른 폴더·볼륨에 설치해도 `open -b` 는 여는데
+/// 감지만 "미설치"라 하면 연결 버튼이 사라진다). mcpb 런처와 같은 패턴: /usr/bin 절대경로.
 fn desktop_installed() -> bool {
-    let apps = PathBuf::from("/Applications/Claude.app");
-    if apps.is_dir() {
+    if PathBuf::from("/Applications/Claude.app").is_dir()
+        || dirs::home_dir().is_some_and(|h| h.join("Applications/Claude.app").is_dir())
+    {
         return true;
     }
-    dirs::home_dir().is_some_and(|h| h.join("Applications/Claude.app").is_dir())
+    Command::new("/usr/bin/mdfind")
+        .arg(format!(
+            "kMDItemCFBundleIdentifier == '{CLAUDE_DESKTOP_BUNDLE_ID}'"
+        ))
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
 }
 
 /// 확장 manifest JSON 이 우리 확장(kura)인가 — 감지 로직의 순수 심장부(테스트 대상).

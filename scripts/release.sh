@@ -511,6 +511,17 @@ fi
 # ── 2. 테스트 ───────────────────────────────────────────────────────────────
 if [[ $RUN_TESTS -eq 1 ]]; then
   step "테스트"
+  # 🔴 신규 체크아웃 방어(코덱스 개발35 2차 P1): src-tauri 의 tauri_build 는
+  # bundle 설정이 가리키는 산출물(externalBin 사이드카, resources 의 kura.mcpb)이
+  # 없으면 **컴파일 자체를** 실패시킨다. 둘 다 생성물이라(gitignore) 리포엔 없다 —
+  # cargo test 전에 만들어 둔다. 어차피 3단계 빌드 전에도 같은 스크립트가 도는데,
+  # 그때는 신선도 검사로 아무것도 안 하고 지나간다.
+  if [[ $UNIVERSAL -eq 1 ]]; then
+    ./scripts/build-sidecars.sh aarch64-apple-darwin x86_64-apple-darwin || die "사이드카 빌드 실패"
+  else
+    ./scripts/build-sidecars.sh || die "사이드카 빌드 실패"
+  fi
+  ./scripts/build-mcpb.sh || die "확장(.mcpb) 빌드 실패"
   (cd src-tauri && cargo test --quiet)
   (cd kura-mcp && cargo test --quiet)
   npx tsc --noEmit

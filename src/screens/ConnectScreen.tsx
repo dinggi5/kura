@@ -127,8 +127,11 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
   };
 
   // 수동 등록 명령. mcp_path 는 이 빌드의 실제 사이드카 경로 — dev 에서도 맞는 걸 보여준다.
+  // 셸 인용(코덱스 개발35 2차): 앱이 공백 든 경로에 있으면 인용 없는 복사 명령이 경로를
+  // 여러 인자로 쪼개 command 가 반토막 난 채 등록된다. 작은따옴표로 감싸고 안의 '는 탈출.
   const mcpPath = status?.mcp_path ?? "/Applications/Kura.app/Contents/MacOS/kura-mcp";
-  const cliCommand = `claude mcp add --scope user kura -- ${mcpPath}`;
+  const shellQuoted = `'${mcpPath.replace(/'/g, `'\\''`)}'`;
+  const cliCommand = `claude mcp add --scope user kura -- ${shellQuoted}`;
 
   return (
     <main className={shell}>

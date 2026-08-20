@@ -101,29 +101,46 @@ export function WalletScreen({
     }
   }, [locked]);
 
+  // 잔액 요청 세대 번호(코덱스 개발35 2차) — 늦게 도착한 옛 응답이 더 새 값을 덮지 않게.
+  // 체인 전환 직후가 전형: 배경 30초 요청이 옛 체인에 나가 있는 사이 전환이 새 요청을
+  // 쏘면, 옛 응답이 나중에 도착해 새 체인 화면에 옛 체인 잔액을 그린다. 수동·배경이
+  // 같은 카운터를 쓰므로 마지막으로 시작한 요청만 화면에 닿는다.
+  const balanceReq = useRef(0);
+  // 수동 새로고침 진행 카운터(ref) — 배경 갱신이 수동 진행 중에 세대를 올리면 수동 쪽
+  // finally 가 스피너를 못 끄고 영영 돈다. 배경은 수동이 하나라도 진행 중이면 쉰다.
+  // (겹친 수동끼리는 세대 번호가 정리한다: 마지막 수동만 화면·스피너를 만진다.)
+  const manualBusy = useRef(0);
   const refreshBalances = useCallback(async () => {
+    const req = ++balanceReq.current;
+    manualBusy.current += 1;
     setRefreshing(true);
     setBalanceError(null);
     try {
-      setBalances(await invoke<Balances>("get_balances", { addrHex: address }));
+      const b = await invoke<Balances>("get_balances", { addrHex: address });
+      if (balanceReq.current === req) setBalances(b);
     } catch (e) {
-      setBalanceError(String(e));
+      if (balanceReq.current === req) setBalanceError(String(e));
     } finally {
-      setRefreshing(false);
+      manualBusy.current -= 1;
+      if (balanceReq.current === req) setRefreshing(false);
     }
   }, [address]);
 
   // 입금 자동 반영(개발 35)의 배경 갱신 — 스피너·에러 없이 조용히. 실패하면 기존 값을
   // 유지한다(외부 입금 감지가 목적이라, 일시적 RPC 오류로 멀쩡한 화면을 더럽힐 이유가 없다).
-  // in-flight 가드(코덱스 개발35 1차): 느린 RPC 에서 30초 주기가 요청을 겹겹이 쌓고,
-  // 늦게 온 응답이 더 새 값을 덮는 것 방지 — 진행 중이면 이번 차례는 그냥 쉰다.
+  // in-flight 가드(코덱스 개발35 1차): 느린 RPC 에서 30초 주기가 요청을 겹겹이 쌓지 않게 —
+  // 진행 중이면 이번 차례는 그냥 쉰다. 응답 순서 꼬임은 위의 세대 번호가 막는다.
   const silentBusy = useRef(false);
   const refreshBalancesSilent = useCallback(async () => {
-    if (silentBusy.current) return;
+    if (silentBusy.current || manualBusy.current > 0) return;
     silentBusy.current = true;
+    const req = ++balanceReq.current;
     try {
-      setBalances(await invoke<Balances>("get_balances", { addrHex: address }));
-      setBalanceError(null);
+      const b = await invoke<Balances>("get_balances", { addrHex: address });
+      if (balanceReq.current === req) {
+        setBalances(b);
+        setBalanceError(null);
+      }
     } catch {
       /* 다음 주기에 다시 */
     } finally {
