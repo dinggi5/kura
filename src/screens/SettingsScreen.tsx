@@ -792,8 +792,7 @@ function UpdateBlock({
           <p className="text-[12px] tracking-tight">시작할 때 확인</p>
           {/* 무엇이 나가는지 적는다 — 로컬 전용을 내세운 앱이라 조용한 바깥 통신이 있으면 안 된다. */}
           <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-ink-300)]">
-            앱을 켤 때 깃허브에 새 버전이 있는지 물어봐요(현재 버전과 IP가 그쪽에 남아요). 설치는
-            어느 쪽이든 직접 눌러야 해요.
+            앱을 켤 때 새 버전이 있는지 깃허브에 물어봐요(현재 버전과 IP가 그쪽에 남아요).
           </p>
         </div>
         <button
