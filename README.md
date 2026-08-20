@@ -131,6 +131,15 @@ brew uninstall --cask dinggi5/tap/kura   # 또는 /Applications/Kura.app 을 휴
 
 AI 앱의 **MCP 설정**에 Kura 서버를 등록하면 연결돼요. 연결되면 메인 화면에 **"Claude 연결됨"** 배지가 떠요. 0.1.2부터는 **앱 안에 MCP 서버가 들어 있어서** 소스 클론이나 Rust 설치 없이 연결할 수 있어요.
 
+### 제일 쉬운 길 — 앱 안 "AI 연결" 화면
+
+메인 화면 위쪽의 **"AI 연결 안 됨" 배지를 누르면** 연결 화면이 열려요.
+
+- **Claude 데스크톱** — "연결" 버튼을 누르면 Claude에 확장 설치 창이 떠요. '설치'만 누르면 끝.
+- **Claude Code** — 버튼 한 번으로 등록돼요(`claude mcp add`를 앱이 대신 실행). 다음 `claude` 실행부터 어느 폴더에서든 연결돼요.
+
+아래는 같은 일을 손으로 하는 방법이에요.
+
 ### Claude 데스크톱 — 확장 파일 하나로 끝
 
 [릴리스 페이지](https://github.com/dinggi5/kura/releases/latest)에서 `kura-<버전>.mcpb`를 받아 **더블클릭**하면 Claude 데스크톱이 설치를 물어봐요. (또는 Claude 설정 → 확장 → 파일 선택.)
@@ -142,8 +151,10 @@ AI 앱의 **MCP 설정**에 Kura 서버를 등록하면 연결돼요. 연결되�
 앱 안의 바이너리를 절대경로로 등록하면 돼요:
 
 ```bash
-claude mcp add kura -- /Applications/Kura.app/Contents/MacOS/kura-mcp
+claude mcp add --scope user kura -- /Applications/Kura.app/Contents/MacOS/kura-mcp
 ```
+
+(`--scope user`는 "이 폴더만"이 아니라 어디서든 쓰이게 하는 옵션이에요. 한 프로젝트에서만 쓸 거면 빼도 돼요.)
 
 다른 MCP 앱은 설정에 아래처럼 적어요:
 

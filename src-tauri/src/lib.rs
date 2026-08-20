@@ -3,6 +3,7 @@
 // 모듈 지도 (개발 17 구조 분리 — 동작 무변경):
 //   autostart 로그인 시 자동 시작 + 희망값 보존·복구(개발 31)
 //   chain     체인 상수(Base Sepolia RPC·USDC·chainId) + 온체인 타입(sol!)
+//   connect   AI 연결(개발 35) — 동봉 확장 열기·claude CLI 등록 대행·설치 감지
 //   store     ~/.jigap 경로, 원자적 파일 쓰기, 시간 헬퍼
 //   wallet    니모닉 생성·주소 파생·비번 암호화(Argon2id + AES-256-GCM)
 //   settings  사용자 설정(한도·자율·RPC·잠금 동작)
@@ -22,6 +23,7 @@
 
 mod autostart;
 mod chain;
+mod connect;
 mod history;
 mod ipc;
 mod limits;
@@ -148,7 +150,10 @@ pub fn run() {
             autostart::set_autostart,
             settings::set_auto_check_update,
             update::check_update,
-            update::install_update
+            update::install_update,
+            connect::get_connect_status,
+            connect::connect_claude_desktop,
+            connect::connect_claude_code
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

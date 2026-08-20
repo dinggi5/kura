@@ -79,23 +79,26 @@ export const HELP_SECTIONS: HelpSection[] = [
           연결이에요.)
         </p>
         <p>
-          <b className={em}>Claude Code를 쓴다면 가장 쉬워요.</b> Kura 소스 폴더(받아서
-          빌드한 그 폴더)에서 터미널을 열고 이것만 실행하세요:
+          메인 화면 위쪽의 <b className={em}>"AI 연결 안 됨" 배지를 누르면</b> 연결 화면이
+          열려요. 거기서 버튼 한 번이면 돼요:
         </p>
-        <div className="my-1 px-3 py-2 rounded-[10px] bg-[var(--color-ivory-100)] dark:bg-[var(--color-night-900)] border border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] font-mono text-[12px] text-[var(--color-ink-900)] dark:text-[#E8E5DD] select-all">
-          claude
-        </div>
+        <ul className="space-y-1.5">
+          <li>
+            <b className={em}>Claude 데스크톱</b> — "연결" 버튼을 누르면 Claude에 확장 설치
+            창이 떠요. '설치'만 누르면 끝.
+          </li>
+          <li>
+            <b className={em}>Claude Code</b> — 버튼 한 번으로 등록돼요. 다음 claude
+            실행부터 어느 폴더에서든 연결돼요.
+          </li>
+        </ul>
         <p>
-          폴더에 들어 있는 설정 덕분에 자동으로 잡혀요. 처음엔 "이 서버를 쓸까요?" 하고
-          물어보면 <b className={em}>승인</b>해 주세요.
-        </p>
-        <p>
-          연결되면 위에 <b className={em}>"Claude 연결됨"</b> 배지가 떠요. 그때부터 AI가
+          연결되면 배지가 <b className={em}>"Claude 연결됨"</b>으로 바뀌어요. 그때부터 AI가
           결제를 요청하면 승인 팝업이 떠요.
         </p>
         <p className="text-[var(--color-ink-300)]">
-          Claude 데스크톱 등 다른 앱이거나 정확한 설정값이 필요하면 아래 GitHub 문서를
-          보세요.
+          Cursor 같은 다른 앱도 연결 화면의 서버 경로로 붙일 수 있어요. 자세한 건 GitHub
+          문서에.
         </p>
       </div>
     ),

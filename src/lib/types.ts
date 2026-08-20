@@ -83,3 +83,12 @@ export type PaymentRequest = {
 };
 
 export type AgentStatus = { connected: boolean; client: string };
+
+/** AI 연결 화면(개발 35) 감지 상태 — 전부 로컬 파일 감지, 최종 진실은 AgentStatus. */
+export type ConnectStatus = {
+  desktop_installed: boolean;
+  desktop_ext_installed: boolean;
+  cli_path: string | null;
+  cli_registered: boolean;
+  mcp_path: string | null;
+};

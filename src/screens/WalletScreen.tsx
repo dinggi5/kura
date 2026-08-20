@@ -35,6 +35,7 @@ import { BackupNag, LockBanner, UpdateBanner } from "@/components/banners";
 import { useUpdate } from "@/lib/useUpdate";
 import { SessionBar, UnlockSessionModal } from "@/components/SessionBar";
 import { BackupFlow } from "@/screens/BackupFlow";
+import { ConnectScreen } from "@/screens/ConnectScreen";
 import { HelpScreen } from "@/screens/HelpScreen";
 import { HistoryScreen } from "@/screens/HistoryScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
@@ -63,6 +64,7 @@ export function WalletScreen({
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[] | null>(null);
   const [showHelp, setShowHelp] = useState(false);
+  const [showConnect, setShowConnect] = useState(false);
   // 새 지갑 생성 직후 1회 환영 투어(주소별 localStorage). 메인 화면 위 오버레이로 띄워
   // 결제 폴링·하트비트·승인 모달이 투어 중에도 살아 있게 한다.
   const [showTour, setShowTour] = useState(() => isWelcomePending(address));
@@ -111,6 +113,17 @@ export function WalletScreen({
     }
   }, [address]);
 
+  // 입금 자동 반영(개발 35)의 배경 갱신 — 스피너·에러 없이 조용히. 실패하면 기존 값을
+  // 유지한다(외부 입금 감지가 목적이라, 일시적 RPC 오류로 멀쩡한 화면을 더럽힐 이유가 없다).
+  const refreshBalancesSilent = useCallback(async () => {
+    try {
+      setBalances(await invoke<Balances>("get_balances", { addrHex: address }));
+      setBalanceError(null);
+    } catch {
+      /* 다음 주기에 다시 */
+    }
+  }, [address]);
+
   // 한도 설정 + 오늘 사용액 (송금 후 갱신).
   const loadLimits = useCallback(() => {
     invoke<Settings>("get_settings").then(setSettings).catch(() => {});
@@ -143,6 +156,33 @@ export function WalletScreen({
     void refreshBalances();
     loadHistory();
   }, [chainId, refreshBalances, loadHistory]);
+
+  // 입금 자동 반영(개발 35): 잔액이 시작·체인 전환·결제 직후·수동 ↻에서만 갱신돼서 외부
+  // 입금은 재시작해야 보이던 문제(실사용 발견). 창이 보일 때만 30초 폴링 + 창이 다시
+  // 보이거나 포커스가 돌아오면 즉시 1회. 팝오버가 숨으면 WKWebView 가 document.hidden 을
+  // 켜므로 숨은 동안은 RPC 를 안 부른다.
+  useEffect(() => {
+    let last = 0;
+    const tick = () => {
+      if (document.hidden) return;
+      last = Date.now();
+      void refreshBalancesSilent();
+    };
+    const h = setInterval(tick, 30_000);
+    // 복귀 1회 — 직전 갱신과 겹치지 않게 5초 스로틀.
+    const onReturn = () => {
+      if (document.hidden || Date.now() - last < 5_000) return;
+      last = Date.now();
+      void refreshBalancesSilent();
+    };
+    document.addEventListener("visibilitychange", onReturn);
+    window.addEventListener("focus", onReturn);
+    return () => {
+      clearInterval(h);
+      document.removeEventListener("visibilitychange", onReturn);
+      window.removeEventListener("focus", onReturn);
+    };
+  }, [refreshBalancesSilent]);
 
   // 1초 폴링: ① AI 연결 상태 ② 세션 상태 ③ 결제 요청(=앱 생존 하트비트 갱신, 자율 승인 우선 시도).
   // 새 결제 요청 1건당 자율 승인을 먼저 시도 → 자율 불가면(NEEDS_PASSWORD·차단) 사람 승인 모달.
@@ -332,6 +372,11 @@ export function WalletScreen({
     return withModal(<HelpScreen onClose={() => setShowHelp(false)} />);
   }
 
+  // AI 연결 화면 (개발 35) — 연결 배지가 진입점.
+  if (showConnect) {
+    return withModal(<ConnectScreen agent={agent} onClose={() => setShowConnect(false)} />);
+  }
+
   return withModal(
     <main className={shell}>
       <div className="w-full max-w-md flex flex-col gap-4">
@@ -382,7 +427,11 @@ export function WalletScreen({
         </header>
 
         <div className="flex">
-          <AgentBadge connected={agent.connected} client={agent.client} />
+          <AgentBadge
+            connected={agent.connected}
+            client={agent.client}
+            onClick={() => setShowConnect(true)}
+          />
         </div>
 
         {locked && <LockBanner onUnlock={toggleLock} />}

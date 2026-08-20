@@ -548,6 +548,13 @@ else
   ./scripts/build-sidecars.sh || die "사이드카 빌드 실패"
 fi
 
+# 확장(.mcpb)도 **자격증명을 싣기 전에** 만든다 (개발 35). 앱 Resources 에 동봉되므로
+# Tauri 빌드 전에 있어야 하고(beforeBuildCommand 의 npm run mcpb 는 STRICT 게이트로
+# "이미 최신"만 확인한다), 안에 실행 파일이 없어서(런처 셸 + manifest) 앱보다 먼저
+# 만들어도 가리킬 대상이 어긋나지 않는다 — 런처는 빌드 산출물이 아니라 **설치된**
+# Kura.app 을 서명 확인 후 exec 한다.
+./scripts/build-mcpb.sh || die "확장(.mcpb) 빌드 실패"
+
 # 자격증명은 이 빌드 한 번에만 넘긴다(위 0번 주석 참고). 사전 점검에서 한 세트가
 # 온전한지 이미 확인했으므로 여기서는 있는 쪽을 그대로 싣는다.
 BUILD_ENV=("APPLE_SIGNING_IDENTITY=$CRED_IDENTITY" "KURA_SIDECARS_STRICT=1")
@@ -710,6 +717,15 @@ read -r SC_NAME SC_VERSION <<<"$SC_INFO"
 [[ "$SC_VERSION" == "$VERSION_CONF" ]] || die \
   "앱 안의 MCP 서버가 $SC_VERSION 을 찍는다 (빌드 버전 $VERSION_CONF). 사이드카가 옛 빌드다"
 info "MCP 핸드셰이크 응답: $SC_NAME $SC_VERSION"
+
+# 동봉 확장(개발 35): "AI 연결" 화면의 'Claude 데스크톱에 연결'이 여는 파일이다.
+# 없으면 그 버튼만 조용히 죽고, 원본과 다르면 릴리스 본문의 sha256 으로 검증이 안 된다.
+APP_MCPB="$APP_PATH/Contents/Resources/kura.mcpb"
+[[ -f "$APP_MCPB" ]] || die \
+  "앱 Resources 에 kura.mcpb 가 없다. tauri.conf.json 의 bundle.resources 를 확인할 것"
+cmp -s "$APP_MCPB" "src-tauri/resources/kura.mcpb" || die \
+  "앱에 동봉된 kura.mcpb 가 빌드 전 만든 원본과 다르다"
+info "동봉 확장 확인: Contents/Resources/kura.mcpb"
 
 SC_CLI_VERSION="$("$APP_PATH/Contents/MacOS/kura-cli" --version 2>/dev/null | awk '{print $2}' || true)"
 [[ "$SC_CLI_VERSION" == "$VERSION_CONF" ]] || die \
@@ -895,13 +911,15 @@ pathlib.Path(os.environ["LATEST_JSON"]).write_text(
 PY
 info "$LATEST_JSON ($(IFS=,; echo "${UPDATER_TARGETS[*]}"))"
 
-# ── 6-b. Claude 데스크톱 확장 .mcpb (개발 34) ───────────────────────────────
-# 앱 안에 사이드카가 들어간 뒤에 만든다. 확장은 그 사이드카를 가리키는 런처일 뿐이라
-# 순서가 뒤바뀌면 "가리킬 대상이 없는" 번들이 나온다.
+# ── 6-b. Claude 데스크톱 확장 .mcpb (개발 34→35) ────────────────────────────
+# 개발 35 부터 확장은 빌드 **전에** 만든다(위 사이드카 옆) — 앱 Resources 동봉 때문.
+# 여기서는 존재만 확인하고, 릴리스 자산과 앱 동봉본이 같은 바이트인지 대조한다.
+# 같아야 릴리스 본문의 sha256 하나로 받은 파일·앱 안 파일을 다 검증할 수 있다.
 step "Claude 데스크톱 확장"
-./scripts/build-mcpb.sh || die "확장(.mcpb) 을 만들지 못했다"
 MCPB_PATH="src-tauri/target/mcpb/kura-$VERSION_CONF.mcpb"
-[[ -f "$MCPB_PATH" ]] || die "확장이 안 나왔다: $MCPB_PATH"
+[[ -f "$MCPB_PATH" ]] || die "확장이 없다: $MCPB_PATH (빌드 전 단계가 만들었어야 한다)"
+cmp -s "$MCPB_PATH" "src-tauri/resources/kura.mcpb" || die \
+  "릴리스 자산과 앱 동봉본(.mcpb)이 다르다 — 빌드 중에 확장이 다시 만들어졌다는 뜻이다"
 
 # ── 7. 결과 ─────────────────────────────────────────────────────────────────
 step "완료"

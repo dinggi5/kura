@@ -260,25 +260,32 @@ function prettyClient(c: string): string {
   return c;
 }
 
-/** AI(MCP 클라이언트)가 지갑에 연결됐는지 보여주는 배지 — 제품 컨셉(AI 전용 지갑)의 시각화. */
-export function AgentBadge({ connected, client }: { connected: boolean; client: string }) {
+/** AI(MCP 클라이언트)가 지갑에 연결됐는지 보여주는 배지 — 제품 컨셉(AI 전용 지갑)의 시각화.
+ *  onClick 을 주면 버튼이 된다 — AI 연결 화면(개발 35) 진입점. */
+export function AgentBadge({
+  connected,
+  client,
+  onClick,
+}: {
+  connected: boolean;
+  client: string;
+  onClick?: () => void;
+}) {
   const name = prettyClient(client);
-  return (
-    <span
-      title={
-        connected
-          ? `${name}가 이 지갑에 연결돼 있어요. 결제를 요청하면 승인 팝업이 떠요.`
-          : "연결된 AI 에이전트가 없어요. Claude Code 등에서 Kura MCP를 켜면 표시돼요."
-      }
-      className={cn(
-        "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full",
-        "text-[11px] tracking-tight border select-none",
-        "transition-colors duration-[var(--duration-base)]",
-        connected
-          ? "border-[var(--color-accent)] bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-800)] text-[var(--color-accent)]"
-          : "border-[var(--color-ivory-400)] dark:border-[var(--color-night-700)] bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-800)] text-[var(--color-ink-300)]",
-      )}
-    >
+  const title = connected
+    ? `${name}가 이 지갑에 연결돼 있어요. 결제를 요청하면 승인 팝업이 떠요.`
+    : "연결된 AI 에이전트가 없어요. 누르면 연결 방법이 열려요.";
+  const className = cn(
+    "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full",
+    "text-[11px] tracking-tight border select-none",
+    "transition-colors duration-[var(--duration-base)]",
+    connected
+      ? "border-[var(--color-accent)] bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-800)] text-[var(--color-accent)]"
+      : "border-[var(--color-ivory-400)] dark:border-[var(--color-night-700)] bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-800)] text-[var(--color-ink-300)]",
+    onClick && "cursor-pointer hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]",
+  );
+  const inner = (
+    <>
       <Bot size={12} />
       {connected ? (
         <>
@@ -291,6 +298,15 @@ export function AgentBadge({ connected, client }: { connected: boolean; client: 
       ) : (
         <span>AI 연결 안 됨</span>
       )}
+    </>
+  );
+  return onClick ? (
+    <button type="button" onClick={onClick} title={title} className={className}>
+      {inner}
+    </button>
+  ) : (
+    <span title={title} className={className}>
+      {inner}
     </span>
   );
 }

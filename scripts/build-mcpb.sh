@@ -6,6 +6,11 @@
 # 번들에는 **실행 파일이 없다**. manifest 와 런처 스크립트(mcpb/server/kura-mcp)뿐이고,
 # 런처는 설치된 Kura.app 안의 서명·공증된 kura-mcp 를 서명 확인 후 exec 한다.
 # 그래서 이 산출물은 서명·공증 대상이 아니다 — 아래 "맥오 금지" 게이트가 그 전제를 지킨다.
+#
+# 개발 35: 같은 파일을 src-tauri/resources/kura.mcpb 로도 복사한다 — 앱 Resources 에
+# 동봉돼 "AI 연결" 화면의 'Claude 데스크톱에 연결' 버튼이 이 파일을 연다. 그래서 이
+# 스크립트는 tauri.conf.json 의 beforeBuild/DevCommand 에서도 불리고, 사이드카 스크립트와
+# 같은 신선도 검사 + STRICT 게이트를 갖는다(자격증명 실린 빌드 안에서 npx 가 새로 돌지 않게).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -30,6 +35,40 @@ VERSION_MCPB="$(python3 -c 'import json;print(json.load(open("mcpb/manifest.json
 [[ "$VERSION_CONF" == "$VERSION_MCPB" ]] || die \
   "버전 불일치 — tauri.conf.json=$VERSION_CONF / mcpb/manifest.json=$VERSION_MCPB"
 
+MCPB_FILE="$OUT_DIR/kura-$VERSION_CONF.mcpb"
+# 앱 Resources 동봉본(개발 35). tauri.conf.json bundle.resources 가 이 고정 이름을 집는다.
+RESOURCE_FILE="src-tauri/resources/kura.mcpb"
+
+# ── 신선도 검사 (사이드카 스크립트와 같은 이유) ─────────────────────────────
+# 이 스크립트는 beforeBuild/DevCommand 에서도 불린다. release.sh 는 자격증명을 싣기
+# **전에** 직접 부르고, 빌드 안쪽 호출은 여기서 아무것도 안 하고 끝나야 한다 —
+# 자격증명 실린 환경에서 npx(임의 노드 코드)가 새로 돌지 않게.
+SOURCES=("$SRC_DIR/manifest.json" "$SRC_DIR/server/kura-mcp" \
+  "src-tauri/icons/icon.png" "src-tauri/tauri.conf.json")
+needs_build() {
+  local out src
+  for out in "$MCPB_FILE" "$RESOURCE_FILE"; do
+    [[ -f "$out" ]] || return 0
+    for src in "${SOURCES[@]}"; do
+      [[ "$out" -nt "$src" ]] || return 0
+    done
+  done
+  return 1
+}
+if [[ "${KURA_SIDECARS_STRICT:-0}" == "1" ]]; then
+  if needs_build; then
+    die "확장(.mcpb)이 최신이 아닌데 STRICT 모드다.
+  자격증명이 실린 빌드 안에서 도구를 돌리지 않으려고 막아 둔 것이다.
+  release.sh 가 빌드 전에 부르는 곳에서 실패했을 가능성이 크다 — 위 로그를 확인할 것."
+  fi
+  ok "확장 최신 (STRICT: 빌드 안 함)"
+  exit 0
+fi
+if ! needs_build; then
+  ok "확장 최신  $MCPB_FILE"
+  exit 0
+fi
+
 rm -rf "$STAGE"
 mkdir -p "$STAGE/server"
 cp "$SRC_DIR/manifest.json" "$STAGE/manifest.json"
@@ -39,7 +78,6 @@ chmod +x "$STAGE/server/kura-mcp"
 # 확장 아이콘은 옛것으로 남는 드리프트가 생긴다. (512×512 PNG 요구)
 cp src-tauri/icons/icon.png "$STAGE/icon.png"
 
-MCPB_FILE="$OUT_DIR/kura-$VERSION_CONF.mcpb"
 rm -f "$MCPB_FILE"
 npx --no-install mcpb pack "$STAGE" "$MCPB_FILE" >/dev/null \
   || die "mcpb pack 실패 (자세히 보려면: npx mcpb pack $STAGE)"
@@ -81,5 +119,14 @@ assert "binaries/kura-mcp" in b, f"tauri.conf.json 의 externalBin 에 binaries/
 ' || die "앱이 kura-mcp 사이드카를 넣지 않는다 — 확장이 가리킬 바이너리가 안 생긴다"
 
 rm -rf "$VERIFY_DIR"
+
+# 앱 Resources 동봉본 — 릴리스 자산과 **같은 파일의 바이트 사본**이어야 한다.
+# 두 번 pack 하면 zip 타임스탬프 때문에 해시가 갈려서, 릴리스 본문의 sha256 으로
+# 동봉본을 검증할 수 없게 된다.
+mkdir -p "$(dirname "$RESOURCE_FILE")"
+rm -f "$RESOURCE_FILE"
+cp "$MCPB_FILE" "$RESOURCE_FILE"
+
 ok "$MCPB_FILE  $(du -h "$MCPB_FILE" | cut -f1)"
+ok "$RESOURCE_FILE (앱 Resources 동봉본)"
 info "설치: Finder 에서 더블클릭하거나 Claude 데스크톱 설정 → 확장에서 파일 선택"
