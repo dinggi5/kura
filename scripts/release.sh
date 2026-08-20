@@ -273,6 +273,15 @@ CASK_FILE=""
 TAP_DIR=""
 if [[ $PUBLISH -eq 1 ]]; then
   [[ $NOTARIZE -eq 1 ]] || die "--publish 는 공증한 산출물에만 쓴다 (--no-notarize 와 같이 쓸 수 없다)"
+  # 테스트를 건너뛴 빌드는 배포하지 않는다. docs/RELEASE.md 가 "검증이 전부 통과한 뒤에만
+  # 배포로 넘어간다"고 약속하는데, --skip-tests 를 허용하면 그 문장이 거짓이 된다.
+  [[ $RUN_TESTS -eq 1 ]] || die "--publish 와 --skip-tests 는 같이 못 쓴다. 배포본은 테스트를 통과한 소스에서 나와야 한다"
+  # 🔴 유니버설 빌드는 캐스크가 감당하지 못한다. 파일명이 _universal.dmg 인데 캐스크 URL 은
+  # _aarch64.dmg 로 박혀 있고 depends_on arch: :arm64 도 그대로다 → 404 또는 해시 불일치.
+  # 캐스크의 URL·아키텍처 정책을 같이 고치기 전에는 조합 자체를 막는다.
+  [[ $UNIVERSAL -eq 0 ]] || die \
+    "--publish 와 --universal 은 아직 같이 못 쓴다. 캐스크 URL 이 _aarch64.dmg 로 고정돼 있어
+   유니버설 산출물을 올리면 받는 쪽에서 404 가 난다 (캐스크를 먼저 고쳐야 한다)"
   command -v gh >/dev/null || die "gh 가 없다:  brew install gh"
   gh auth status >/dev/null 2>&1 || die "gh 로그인이 안 돼 있다:  gh auth login"
   command -v curl >/dev/null || die "curl 이 없다 (업로드본 재검증에 쓴다)"
@@ -293,14 +302,40 @@ if [[ $PUBLISH -eq 1 ]]; then
   # `gh release create` 는 그 리포에 없는 태그를 **기본 브랜치 HEAD 에서 새로 만들어** 버린다
   # (gh 문서: 태그가 없으면 만든다). 그러면 릴리스가 광고하는 커밋이 방금 서명·공증한 커밋이
   # 아니게 되는데, 업로드도 서명 검사도 전부 통과한다 — 이 스크립트가 내내 막아 온 종류의
-  # 조용한 어긋남이라 여기서 멈춘다.
-  ORIGIN_URL="$(git remote get-url origin 2>/dev/null || true)"
-  case "${ORIGIN_URL%.git}" in
-    *"github.com/$GH_REPO_SLUG"|*"github.com:$GH_REPO_SLUG") ;;
-    *) die "origin 이 $GH_REPO_SLUG 가 아니다: ${ORIGIN_URL:-(없음)}
-   태그는 origin 에, 릴리스는 $GH_REPO_SLUG 에 만들어져 둘이 갈린다." ;;
-  esac
-  info "배포 준비 확인됨 (gh 로그인 · origin $GH_REPO_SLUG · tap $TAP_DIR)"
+  # 조용한 어긋남이라 여기서 멈춘다. (8-2 의 --verify-tag 가 두 번째 자물쇠다.)
+  #
+  # ⚠️ fetch URL 과 push URL 은 따로 설정할 수 있다(remote.origin.pushurl). 그러면
+  # ls-remote 는 진짜 리포를 보는데 태그는 딴 데로 나간다 → 둘 다 본다.
+  # ⚠️ 매칭은 호스트 경계까지 봐야 한다. `*github.com/dinggi5/kura` 는
+  # `https://evilgithub.com/dinggi5/kura` 도 통과한다(실제로 재현했다).
+  check_remote_url() {   # $1 = 이름(메시지용), $2 = URL, $3 = 기대 슬러그
+    case "${2%.git}" in
+      "https://github.com/$3"|"http://github.com/$3"|"git@github.com:$3"|"ssh://git@github.com/$3") return 0 ;;
+      *) die "$1 이 $3 가 아니다: ${2:-(없음)}
+   여기서 멈추지 않으면 밀어 넣는 곳과 릴리스를 만드는 곳이 갈린다." ;;
+    esac
+  }
+  check_remote_url "origin(fetch)" "$(git remote get-url origin 2>/dev/null || true)" "$GH_REPO_SLUG"
+  check_remote_url "origin(push)"  "$(git remote get-url --push origin 2>/dev/null || true)" "$GH_REPO_SLUG"
+  check_remote_url "tap(fetch)" "$(git -C "$TAP_DIR" remote get-url origin 2>/dev/null || true)" "dinggi5/homebrew-tap"
+  check_remote_url "tap(push)"  "$(git -C "$TAP_DIR" remote get-url --push origin 2>/dev/null || true)" "dinggi5/homebrew-tap"
+
+  # tap 이 origin 보다 앞서 있으면(=밀리지 않은 커밋) 이번 캐스크 커밋과 함께 딸려 나간다.
+  # 반대로 앞선 커밋이 이미 있는 상태를 그냥 통과시키면, 8-4 가 "바뀐 게 없다"며 push 를
+  # 안 부르고 배포 완료를 찍는다 — 지난 실행에서 push 만 실패한 경우가 정확히 이 모양이다.
+  git -C "$TAP_DIR" fetch -q origin main 2>/dev/null || warn "tap 원격을 새로 못 받아왔다"
+  TAP_AHEAD="$(git -C "$TAP_DIR" rev-list --count origin/main..main 2>/dev/null || echo "?")"
+  [[ "$TAP_AHEAD" == "0" ]] || die \
+    "tap 에 안 밀린 커밋이 $TAP_AHEAD 개 있다: $TAP_DIR
+   먼저 확인하고 밀거나 되돌릴 것:  git -C \"$TAP_DIR\" log origin/main..main"
+
+  # 앱이 실제로 물어보는 주소는 tauri.conf.json 에 따로 박혀 있다. 그게 이 리포를 안 가리키면
+  # 릴리스는 여기에 만들어지는데 사용자 앱은 딴 곳을 본다 — 업데이트만 조용히 안 된다.
+  UPDATER_ENDPOINT="$(python3 -c 'import json;print((json.load(open("src-tauri/tauri.conf.json")).get("plugins",{}).get("updater",{}).get("endpoints") or [""])[0])')"
+  [[ "$UPDATER_ENDPOINT" == "https://github.com/$GH_REPO_SLUG/releases/latest/download/latest.json" ]] || die \
+    "tauri.conf.json 의 업데이트 엔드포인트가 $GH_REPO_SLUG 를 안 가리킨다:
+   $UPDATER_ENDPOINT"
+  info "배포 준비 확인됨 (gh 로그인 · origin/tap 원격 확인 · 엔드포인트 일치)"
 fi
 
 # ── 업데이트 서명 (개발 31) ─────────────────────────────────────────────────
@@ -390,6 +425,12 @@ info "커밋 $GIT_SHA"
 #
 # 태그가 아직 없는 건 정상이다 — 권장 순서가 빌드 → 검증 → 그 커밋에 태그다.
 VERSION_TAG="v$VERSION_CONF"
+# 릴리스 노트는 사용자가 "이 코드를 내 지갑에 넣을지" 판단하는 유일한 근거다(6절 참고).
+# 그냥 빌드할 때는 경고로 넘기지만, 배포까지 갈 거면 없는 채로 못 나간다.
+if [[ $PUBLISH -eq 1 && ! -f "docs/release-notes/$VERSION_TAG.md" ]]; then
+  die "릴리스 노트가 없다: docs/release-notes/$VERSION_TAG.md
+   업데이트 승인 화면에 그대로 뜨는 글이라, 배포에는 필수다 (docs/RELEASE.md '릴리스 노트 파일')"
+fi
 if git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
   TAG_SHA="$(git rev-parse "$VERSION_TAG^{commit}")"
   HEAD_SHA="$(git rev-parse HEAD)"
@@ -921,7 +962,9 @@ EOF
       fi
     done
   else
-    gh release create "$VERSION_TAG" "${RELEASE_ASSETS[@]}" --repo "$GH_REPO_SLUG" \
+    # --verify-tag: 그 리포에 태그가 없으면 만들지 말고 죽으라는 뜻. 없으면 gh 는 기본 브랜치
+    # HEAD 에서 태그를 새로 만들어 버린다 — 릴리스가 광고하는 커밋이 빌드한 커밋과 갈린다.
+    gh release create "$VERSION_TAG" "${RELEASE_ASSETS[@]}" --repo "$GH_REPO_SLUG" --verify-tag \
       --title "Kura $VERSION_TAG" --notes-file "$RELEASE_BODY" \
       || die "릴리스 생성 실패"
     info "릴리스 $VERSION_TAG 생성됨"
@@ -931,31 +974,64 @@ EOF
   # 캐스크 sha256 은 "이 파일을 설치해도 된다"는 우리 쪽 보증이다. 로컬 빌드본의 해시를
   # 그대로 적으면, 업로드가 깨졌을 때 아무도 못 잡는다 → 릴리스에서 다시 받아 대조한다
   # (docs/RELEASE.md "Cask 해시를 갱신하기 전에" 와 같은 이유).
+  # DMG 만 보면 안 된다. 업데이트로 실제 나가는 건 tar 고, 앱이 읽는 건 latest.json 이다.
+  # 이름만 보고 "이미 있음"으로 넘기면 지난 실행이 올린 **다른 빌드의** tar·sig 가 남아
+  # 있어도 통과한다 → 서명이 안 맞아 기존 사용자 전원의 업데이트가 실패한다.
   step "업로드본 재검증"
   DL_DIR="$(mktemp -d)"
   DMG_NAME="$(basename "$DMG_PATH")"
-  gh release download "$VERSION_TAG" --repo "$GH_REPO_SLUG" -p "$DMG_NAME" -D "$DL_DIR" --clobber \
-    || { rm -rf "$DL_DIR"; die "릴리스에서 DMG 를 다시 받지 못했다"; }
+  MISMATCH=""
+  for a in "${RELEASE_ASSETS[@]}"; do
+    n="$(basename "$a")"
+    gh release download "$VERSION_TAG" --repo "$GH_REPO_SLUG" -p "$n" -D "$DL_DIR" --clobber \
+      || { rm -rf "$DL_DIR"; die "릴리스에서 $n 을 다시 받지 못했다"; }
+    cmp -s "$DL_DIR/$n" "$a" || MISMATCH="$MISMATCH $n"
+  done
   DL_SHA="$(shasum -a 256 "$DL_DIR/$DMG_NAME" | awk '{print $1}')"
   rm -rf "$DL_DIR"
-  [[ "$DL_SHA" == "$SHA256" ]] || die \
-    "릴리스에 올라간 DMG 의 해시가 로컬 빌드본과 다르다 (업로드 $DL_SHA ≠ 빌드 $SHA256).
-     캐스크를 갱신하지 않았다. 자산을 지우고 다시 올릴 것."
-  info "업로드된 DMG 해시 일치"
+  if [[ -n "$MISMATCH" ]]; then
+    # 🔴 여기 걸리는 흔한 이유는 손상이 아니라 **다시 빌드했기 때문**이다. 같은 커밋을 다시
+    # 빌드해도 코드서명 타임스탬프·공증 티켓 때문에 바이트가 달라진다(재현 가능 빌드가
+    # 아니다 — docs/RELEASE.md "아직 안 한 것"). 그래서 릴리스가 만들어진 뒤에 실패해서
+    # 다시 돌리면 반드시 여기서 멈춘다. 그게 맞다 — 릴리스에 있는 파일과 캐스크에 적을
+    # 해시가 갈리는 것보다, 어느 쪽으로 갈지 사람이 고르는 편이 낫다.
+    die "릴리스에 올라간 자산이 방금 만든 것과 다르다:$MISMATCH
+     (DMG 업로드 $DL_SHA ≠ 빌드 $SHA256)
+     캐스크는 건드리지 않았다. 둘 중 하나를 고를 것:
+     ① 방금 빌드한 것으로 통일 — 네 개를 덮어쓴 뒤 이 명령을 다시 돌린다:
+        gh release upload $VERSION_TAG ${RELEASE_ASSETS[*]} --repo $GH_REPO_SLUG --clobber
+     ② 이미 올라간 것을 그대로 둔다 — 이 스크립트로 캐스크를 갱신하지 말고,
+        릴리스에서 받은 DMG 의 해시로 손수 갱신할 것"
+  fi
+  info "업로드된 자산 4종이 로컬 산출물과 바이트 단위로 일치"
 
   # 앱이 실제로 물어보는 주소는 이 하나다. 프리릴리스로 올라갔거나 latest.json 이 빠지면
   # 여기서 404 나 옛 버전이 나온다 — 기존 사용자가 새 버전을 영영 모르는 실패다.
   LATEST_URL="https://github.com/$GH_REPO_SLUG/releases/latest/download/latest.json"
-  LATEST_REMOTE="$(curl -fsSL "$LATEST_URL" || true)"
-  if [[ -z "$LATEST_REMOTE" ]]; then
-    warn "$LATEST_URL 을 못 읽었다 (GitHub 반영이 늦을 수 있다). 잠시 뒤 직접 확인할 것"
-  else
-    LATEST_VER="$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' <<<"$LATEST_REMOTE" 2>/dev/null || true)"
-    if [[ "$LATEST_VER" == "$VERSION_CONF" ]]; then
-      info "업데이트 엔드포인트 확인: version $LATEST_VER"
-    else
-      warn "업데이트 엔드포인트가 '$LATEST_VER' 를 광고한다 (기대 $VERSION_CONF) — 반영 지연이면 곧 바뀐다"
+  LATEST_REMOTE=""
+  LATEST_VER=""
+  for attempt in 1 2 3 4 5; do
+    LATEST_REMOTE="$(curl -fsSL "$LATEST_URL" || true)"
+    if [[ -n "$LATEST_REMOTE" ]]; then
+      LATEST_VER="$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' <<<"$LATEST_REMOTE" 2>/dev/null || true)"
+      [[ "$LATEST_VER" != "$VERSION_CONF" ]] || break
     fi
+    [[ $attempt -lt 5 ]] || break
+    info "엔드포인트 반영 대기 중… ($attempt/5)"
+    sleep 6
+  done
+  if [[ -z "$LATEST_REMOTE" ]]; then
+    # 못 읽은 것과 틀리게 올라간 것은 다르다. 앞은 우리 쪽에 판단 근거가 없으니 경고로 둔다.
+    warn "$LATEST_URL 을 못 읽었다 (네트워크?). 캐스크는 갱신하되 반드시 직접 확인할 것"
+  elif [[ "$LATEST_VER" != "$VERSION_CONF" ]]; then
+    # 🔴 경고로 넘기면 안 된다. 0.1.2 부터 캐스크에 auto_updates true 가 들어가면 brew 도
+    # 업그레이드를 안 맡으므로, 엔드포인트가 틀린 채로 캐스크를 밀면 기존 사용자는
+    # **어느 자동 경로로도** 새 버전을 못 받는다.
+    die "업데이트 엔드포인트가 '$LATEST_VER' 를 광고한다 (기대 $VERSION_CONF).
+     이 주소는 최신 **정식** 릴리스만 가리킨다 — 이 릴리스가 초안·프리릴리스이거나, 더 높은
+     버전의 릴리스가 이미 있다는 뜻이다. 캐스크는 건드리지 않았다."
+  else
+    info "업데이트 엔드포인트 확인: version $LATEST_VER"
   fi
 
   # 8-4. Homebrew 캐스크 ----------------------------------------------------
@@ -963,6 +1039,18 @@ EOF
   # 원격·브랜치를 명시한다 — 추적 정보 설정에 기대면 clone 방식에 따라 그냥 실패한다(실측).
   git -C "$TAP_DIR" pull --ff-only -q origin main || die "tap 을 최신으로 못 받았다: $TAP_DIR"
   [[ -z "$(git -C "$TAP_DIR" status --porcelain)" ]] || die "tap 에 변경이 생겼다: $TAP_DIR"
+
+  # 옛 태그를 체크아웃해 다시 빌드하면 캐스크가 그 옛 버전으로 **되돌아간다**. 그러면 새로
+  # 설치하는 사람은 낮은 버전을 받고, brew 는 "최신"이라고 말한다. 롤백이 필요하면 그건
+  # 사람이 의식하고 손으로 할 일이다.
+  CASK_VERSION_NOW="$(sed -n 's/^ *version "\(.*\)"$/\1/p' "$CASK_FILE" | head -1)"
+  if [[ -n "$CASK_VERSION_NOW" && "$CASK_VERSION_NOW" != "$VERSION_CONF" ]]; then
+    # 정렬은 sort -V (버전 정렬). 낮은 쪽이 먼저 나오면 지금 버전이 더 높다는 뜻.
+    LOWER="$(printf '%s\n%s\n' "$CASK_VERSION_NOW" "$VERSION_CONF" | sort -V | head -1)"
+    [[ "$LOWER" == "$CASK_VERSION_NOW" ]] || die \
+      "캐스크가 $CASK_VERSION_NOW 인데 이번 배포는 $VERSION_CONF 다 — 버전을 되돌리게 된다.
+     의도한 롤백이면 캐스크를 손으로 고칠 것 ($CASK_FILE)"
+  fi
 
   CASK_FILE="$CASK_FILE" CK_VERSION="$VERSION_CONF" CK_SHA="$SHA256" python3 - <<'PY' || die "캐스크를 고치지 못했다"
 import os, pathlib, re, sys
@@ -1025,6 +1113,16 @@ PY
     info "캐스크 $VERSION_CONF 푸시됨 ($TAP_DIR)"
   else
     info "캐스크는 이미 $VERSION_CONF 다 — 커밋할 것 없음"
+  fi
+
+  # 🔴 커밋은 됐는데 push 만 실패한 지난 실행이 있으면, 이번엔 "바뀐 게 없다"로 빠져나가면서
+  # push 를 한 번도 안 부르고 배포 완료를 찍게 된다. 마지막에 원격과 대조해서 확실히 민다.
+  git -C "$TAP_DIR" fetch -q origin main 2>/dev/null || warn "tap 원격을 새로 못 받아왔다"
+  TAP_AHEAD_END="$(git -C "$TAP_DIR" rev-list --count origin/main..main 2>/dev/null || echo "?")"
+  if [[ "$TAP_AHEAD_END" != "0" ]]; then
+    git -C "$TAP_DIR" push -q origin main || die \
+      "tap 에 안 밀린 커밋이 $TAP_AHEAD_END 개 남았는데 푸시하지 못했다: $TAP_DIR"
+    info "tap 의 안 밀린 커밋 $TAP_AHEAD_END 개를 밀었다"
   fi
 
   step "배포 완료"

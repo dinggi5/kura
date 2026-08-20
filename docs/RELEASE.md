@@ -177,7 +177,9 @@ TAURI_SIGNING_PRIVATE_KEY_PASSWORD="위에서 정한 암호"
 | `--universal` | 인텔 맥까지 지원. 먼저 `rustup target add x86_64-apple-darwin` 필요. 기본은 Apple Silicon 전용(주 사용자층과 일치, 용량 절반) |
 | `--no-notarize` | 자격증명 없이 서명 경로만 점검. **결과물을 배포하면 안 된다** |
 | `--plain-dmg` | Finder 제어 권한을 못 주는 환경(원격 접속·CI)에서. DMG 안 아이콘 배치를 건너뛴다 — 설치 동작은 같고 모양만 밋밋해진다 |
-| `--skip-tests` | 테스트 건너뛰기. 급할 때만 |
+| `--skip-tests` | 테스트 건너뛰기. 급할 때만 (`--publish` 와는 같이 못 쓴다) |
+| `--publish` | 빌드·검증이 통과하면 태그·릴리스·캐스크까지 (아래 "새 버전 내기"). `--universal`·`--no-notarize`·`--skip-tests`·`--allow-dirty` 와는 같이 못 쓴다 |
+| `--yes` | `--publish` 의 확인 프롬프트 생략. 사람이 안 보는 자리에서만 |
 | `--allow-dirty` | 커밋 안 된 변경이 있어도 진행. 어떤 소스로 만든 배포본인지 추적이 안 되므로 비권장 |
 
 ---
@@ -248,7 +250,8 @@ staple 부터 의심하되 단정하지는 말 것 — 스테이플이 없어도
 #    tauri.conf.json / package.json / src-tauri/Cargo.toml / kura-mcp/Cargo.toml
 # 2. 릴리스 노트를 쓴다 — docs/release-notes/v<버전>.md (아래 "릴리스 노트 파일")
 # 3. 커밋 (작업 트리가 깨끗해야 사전 점검을 통과한다)
-git commit -am "v0.1.2"
+#    ⚠️ 새 릴리스 노트는 추적 안 되는 파일이라 -am 으로는 안 들어간다. add 를 먼저.
+git add docs/release-notes/v0.1.2.md && git commit -am "v0.1.2"
 # 4. main 에 올린다 — 태그가 가리키는 커밋이 브랜치에 있어야 한다
 git checkout main && git merge --ff-only <그 커밋> && git push origin main
 # 5. 빌드·검증·배포를 한 번에 (개발 33)
@@ -262,12 +265,23 @@ git checkout main && git merge --ff-only <그 커밋> && git push origin main
 |---|---|---|
 | 태그 | `git tag v<버전> <빌드한 커밋>` → 그 태그 하나만 푸시 | 건너뛴다 (원격 태그가 **다른** 커밋이면 멈춘다) |
 | 릴리스 | `gh release create` 로 자산 4종 업로드 | 빠진 자산만 올린다 |
-| 재검증 | 올라간 DMG 를 **다시 받아** 해시를 대조하고, 업데이트 엔드포인트를 읽어 본다 | — |
-| 캐스크 | tap 의 `Casks/kura.rb` 에 version·sha256 반영, `brew audit` 통과 후 커밋·푸시 | 커밋할 것 없음 |
+| 재검증 | 올라간 자산 **네 개를 다 다시 받아** 로컬 산출물과 바이트 대조. 업데이트 엔드포인트가 이 버전을 광고할 때까지 최대 5번 확인(끝내 다르면 멈춘다) | — |
+| 캐스크 | tap 의 `Casks/kura.rb` 에 version·sha256 반영, `brew audit` 통과 후 커밋·푸시 | 커밋할 것 없음 (안 밀린 커밋이 남아 있으면 민다) |
 
-각 단계는 이미 돼 있으면 건너뛰므로, 중간에 끊겨도 같은 명령을 다시 돌리면 된다.
+배포 전에 먼저 막는 것들: `--no-notarize`/`--skip-tests`/`--allow-dirty`/`--universal` 과의 조합,
+릴리스 노트 파일 없음, gh 미로그인, origin·tap 의 fetch/push URL 이 우리 리포가 아닌 경우,
+tap 에 안 밀린 커밋, `tauri.conf.json` 의 업데이트 엔드포인트가 다른 리포를 가리키는 경우,
+캐스크 버전이 **내려가는** 배포(옛 태그를 다시 빌드했을 때).
+
 자동화해도 **사람이 계속 하는 것 셋**: 버전 올리기 · 릴리스 노트 쓰기 · 키체인
 「항상 허용」 누르기. 앞의 둘은 판단이고, 셋째는 헤드리스면 서명이 그냥 실패한다.
+
+🔴 **릴리스가 만들어진 뒤에 실패하면 "그냥 다시 돌리기"가 안 된다.** 재실행은 새로 빌드하는데,
+같은 커밋이라도 코드서명 타임스탬프·공증 티켓 때문에 **바이트가 달라진다**(재현 가능 빌드가
+아니다 — 아래 "아직 안 한 것"). 그래서 재검증 단계에서 "올라간 자산이 방금 만든 것과 다르다"로
+멈춘다. 그때 스크립트가 두 갈래를 명령까지 찍어 준다: ① `gh release upload … --clobber` 로
+네 개를 새 빌드로 통일하고 다시 돌리거나, ② 이미 올라간 것을 그대로 두고 캐스크만 손으로.
+릴리스 **전에** 끊긴 경우(태그까지만 됐다든지)는 그냥 다시 돌리면 된다.
 
 🔴 **이걸 GitHub Actions 로 옮기지 않는다.** Developer ID 인증서와 **업데이트 서명
 개인키**를 CI 시크릿에 올려야 하는데, 그 키가 새면 이미 깔린 지갑에 임의 코드를
@@ -344,6 +358,18 @@ Release 노트에는 **sha256 을 반드시 적는다.** 받는 사람이 전송
 
 `auto_updates true` 를 넣은 뒤에도 캐스크의 버전·sha256 은 계속 갱신한다 —
 새로 설치하는 사람은 캐스크로 받기 때문이다.
+
+### ⚠️ `release.env` 는 dotenv 가 아니라 셸 코드다
+
+`release.sh` 가 `source` 로 읽는다. 즉 값 안의 `$`, 백틱, `$(…)` 가 **확장된다** —
+암호 관리자가 만든 암호에 그런 문자가 있으면 조용히 다른 문자열이 되거나, 최악에는
+그 자리에서 명령이 돈다. 값은 **작은따옴표**로 감쌀 것:
+
+```bash
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD='p$w0rd`with$(weird)chars'
+```
+
+(작은따옴표 안에 작은따옴표가 있으면 `'\''` 로 끊어 넣는다.)
 
 ### 🔴 Cask 해시를 갱신하기 전에
 
