@@ -1,0 +1,62 @@
+#!/bin/sh
+# Kura MCP 런처 (개발 34) — 설치된 Kura.app 안의 서명된 kura-mcp 를 그대로 exec 한다.
+#
+# 왜 바이너리를 번들에 안 넣나:
+#   1) 남에게 주는 실행 파일은 서명·공증이 필요한데, 맨 Mach-O 바이너리에는 공증 티켓을
+#      **스테이플할 수 없다**(stapler 는 .app/.dmg/.pkg 만 받는다). 앱 안에 있으면 앱과 함께
+#      스테이플돼서 인터넷 없이도 통과한다.
+#   2) 앱과 MCP 바이너리 버전이 갈리면 파일 IPC(~/.jigap)가 조용히 어긋난다. 한 벌만 둔다.
+#   3) 어차피 결제 승인은 GUI 앱이 한다 — 앱 없는 MCP 는 반쪽이라 "앱 필수"가 정직하다.
+#
+# 🔴 찾은 앱의 서명을 확인하기 전에는 절대 실행하지 않는다. 이 스크립트는 경로로 앱을 찾는데,
+# 경로는 누구나 만들 수 있다. 지갑 바이너리를 실행하는 자리라 여기가 뚫리면 끝이다.
+set -eu
+
+BUNDLE_ID="com.dinggi5.kura"
+TEAM_ID="74ZAMXKVXN"
+# anchor apple generic = 애플이 발급한 인증서 사슬, identifier = 이 번들, leaf OU = 우리 팀.
+# 셋 다 맞아야 우리가 서명한 Kura 다. 팀 ID 는 배포된 앱 안에 이미 들어 있는 공개 값이다.
+REQUIREMENT="anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$TEAM_ID\""
+
+die() {
+  printf 'Kura MCP: %s\n' "$1" >&2
+  shift
+  for line in "$@"; do printf '  %s\n' "$line" >&2; done
+  exit 1
+}
+
+# 앱 후보를 정한다. KURA_APP 을 주면 그것만 본다(서명 검사는 똑같이 한다).
+if [ -n "${KURA_APP:-}" ]; then
+  CANDIDATES="$KURA_APP"
+else
+  CANDIDATES="/Applications/Kura.app
+$HOME/Applications/Kura.app"
+  # 둘 다 없을 때만 Spotlight 로 찾는다. 찾아도 서명을 통과해야 쓴다.
+  if [ ! -d "/Applications/Kura.app" ] && [ ! -d "$HOME/Applications/Kura.app" ]; then
+    FOUND="$(mdfind "kMDItemCFBundleIdentifier == '$BUNDLE_ID'" 2>/dev/null || true)"
+    [ -n "$FOUND" ] && CANDIDATES="$CANDIDATES
+$FOUND"
+  fi
+fi
+
+APP=""
+IFS='
+'
+for c in $CANDIDATES; do
+  [ -n "$c" ] || continue
+  if [ -x "$c/Contents/MacOS/kura-mcp" ]; then APP="$c"; break; fi
+done
+unset IFS
+
+[ -n "$APP" ] || die "Kura 앱을 찾지 못했습니다." \
+  "Kura 를 설치한 뒤 다시 시도하세요:  https://github.com/dinggi5/kura" \
+  "앱을 /Applications 밖에 두었다면 KURA_APP 환경변수로 경로를 알려 주세요." \
+  "0.1.1 이하 버전에는 MCP 바이너리가 들어 있지 않습니다 — 0.1.2 이상으로 업데이트하세요."
+
+# 🔴 fail-closed: 확인이 안 되면 실행하지 않는다.
+codesign --verify -R "=$REQUIREMENT" "$APP" >/dev/null 2>&1 || die \
+  "서명 확인에 실패했습니다: $APP" \
+  "우리가 서명한 Kura 가 아니거나 앱이 손상됐습니다. 실행하지 않았습니다." \
+  "공식 배포본을 다시 받으세요: https://github.com/dinggi5/kura/releases"
+
+exec "$APP/Contents/MacOS/kura-mcp" "$@"

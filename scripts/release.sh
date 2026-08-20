@@ -190,6 +190,10 @@ if [[ $UNIVERSAL -eq 0 && "$(uname -m)" != "arm64" ]]; then
 fi
 command -v xcrun >/dev/null || die "xcrun 이 없다. Xcode 또는 Command Line Tools 설치 필요"
 xcrun notarytool --version >/dev/null 2>&1 || die "notarytool 이 없다. Xcode 14 이상 필요"
+# 확장(.mcpb) 은 빌드 맨 끝에 만든다 — 거기서 도구가 없다고 죽으면 몇 분짜리 빌드를 날린다.
+# @anthropic-ai/mcpb 는 devDependency 라 package-lock 에 무결성 해시까지 잠겨 있다(npm ci 로 들어온다).
+npx --no-install mcpb --version >/dev/null 2>&1 || die \
+  "mcpb CLI 가 없다. 의존성을 설치할 것:  npm install"
 
 # 서명 인증서 — 이름 자체는 커밋하지 않는다(실명이 들어간다). 환경변수로만 받는다.
 [[ -n "$CRED_IDENTITY" ]] || die \
@@ -419,9 +423,12 @@ VERSION_CARGO="$(crate_version src-tauri/Cargo.toml)"
 # (kura-mcp/src/bin/kura.rs 의 CARGO_PKG_VERSION). 여기가 갈리면 사용자가 "내가 어느
 # 소스를 돌리고 있나"를 확인할 근거가 틀어진다 — 개발 32 에서 실제로 놓칠 뻔했다.
 VERSION_MCP="$(crate_version kura-mcp/Cargo.toml)"
-[[ "$VERSION_CONF" == "$VERSION_PKG" && "$VERSION_CONF" == "$VERSION_CARGO" && "$VERSION_CONF" == "$VERSION_MCP" ]] || die \
-  "버전 불일치 — tauri.conf.json=$VERSION_CONF / package.json=$VERSION_PKG / src-tauri/Cargo.toml=$VERSION_CARGO / kura-mcp/Cargo.toml=$VERSION_MCP"
-info "버전 $VERSION_CONF (네 파일 일치)"
+# 다섯째(개발 34): Claude 데스크톱 확장의 manifest. 사용자가 받은 확장이 어느 앱 버전을
+# 위한 건지 여기서만 드러난다 — 앱과 갈리면 확장 목록에 옛 번호가 그대로 남는다.
+VERSION_MCPB="$(python3 -c 'import json;print(json.load(open("mcpb/manifest.json"))["version"])')"
+[[ "$VERSION_CONF" == "$VERSION_PKG" && "$VERSION_CONF" == "$VERSION_CARGO" && "$VERSION_CONF" == "$VERSION_MCP" && "$VERSION_CONF" == "$VERSION_MCPB" ]] || die \
+  "버전 불일치 — tauri.conf.json=$VERSION_CONF / package.json=$VERSION_PKG / src-tauri/Cargo.toml=$VERSION_CARGO / kura-mcp/Cargo.toml=$VERSION_MCP / mcpb/manifest.json=$VERSION_MCPB"
+info "버전 $VERSION_CONF (다섯 파일 일치)"
 
 # 더러운 작업 트리에서 낸 배포본은 어떤 소스로 만든 건지 나중에 되짚을 수 없다.
 IS_DIRTY=0
@@ -523,9 +530,21 @@ if [[ $UNIVERSAL -eq 1 ]]; then
   BUNDLE_DIR="src-tauri/target/universal-apple-darwin/release/bundle"
 fi
 
+# 사이드카(kura-mcp · kura-cli)를 **자격증명을 싣기 전에** 만든다 (개발 34).
+# tauri.conf.json 의 beforeBuildCommand 도 같은 스크립트를 부르지만, 그때는 이미 최신이라
+# cargo 가 아예 안 돈다. 🔴 순서가 뒤집히면 업데이트 서명 개인키·애플 앱 암호가
+# kura-mcp 의존성들의 build.rs 까지 상속된다(개발 30 보류 P1 이 그만큼 넓어진다).
+# 아래 KURA_SIDECARS_STRICT=1 이 그 순서를 게이트로 굳힌다 — 빌드 안에서 만들어야 할
+# 상태가 되면 거기서 멈춘다.
+if [[ $UNIVERSAL -eq 1 ]]; then
+  ./scripts/build-sidecars.sh aarch64-apple-darwin x86_64-apple-darwin || die "사이드카 빌드 실패"
+else
+  ./scripts/build-sidecars.sh || die "사이드카 빌드 실패"
+fi
+
 # 자격증명은 이 빌드 한 번에만 넘긴다(위 0번 주석 참고). 사전 점검에서 한 세트가
 # 온전한지 이미 확인했으므로 여기서는 있는 쪽을 그대로 싣는다.
-BUILD_ENV=("APPLE_SIGNING_IDENTITY=$CRED_IDENTITY")
+BUILD_ENV=("APPLE_SIGNING_IDENTITY=$CRED_IDENTITY" "KURA_SIDECARS_STRICT=1")
 if [[ $NOTARIZE -eq 1 ]]; then
   if [[ -n "$CRED_API_KEY" ]]; then
     BUILD_ENV+=("APPLE_API_KEY=$CRED_API_KEY" "APPLE_API_ISSUER=$CRED_API_ISSUER" "APPLE_API_KEY_PATH=$CRED_API_KEY_PATH")
@@ -634,6 +653,70 @@ else
     "기본 빌드는 arm64 단일이어야 하는데 '$APP_ARCHS' 다"
 fi
 info "신원 확인: 팀 $APP_TEAM · $APP_IDENT · $APP_VERSION · $APP_ARCHS"
+
+# ── 4-a. 사이드카 검증 (개발 34) ────────────────────────────────────────────
+# 앱 안에 들어간 kura-mcp · kura-cli 는 **남에게 주는 실행 파일**이다. 앱 본체와 같은 잣대를
+# 대지 않으면, MCP 를 붙이는 순간에만 드러나는 사고가 배포까지 그대로 나간다.
+# (여기가 개발 34 의 존재 이유다 — 지금까진 앱만 받은 사람은 MCP 를 아예 못 붙였다.)
+step "사이드카 검증"
+
+for pair in "kura-mcp:MCP 서버" "kura-cli:CLI"; do
+  SC_BIN="${pair%%:*}"; SC_LABEL="${pair#*:}"
+  SC_PATH="$APP_PATH/Contents/MacOS/$SC_BIN"
+  [[ -x "$SC_PATH" ]] || die \
+    "앱 안에 $SC_BIN 이 없다 ($SC_LABEL).
+  tauri.conf.json 의 bundle.externalBin 과 scripts/build-sidecars.sh 를 확인할 것."
+
+  # 앱 본체와 같은 아키텍처 규칙. 여기만 어긋나면 앱은 뜨는데 MCP 만 안 붙는다.
+  SC_ARCHS="$(lipo -archs "$SC_PATH" 2>/dev/null || true)"
+  if [[ $UNIVERSAL -eq 1 ]]; then
+    [[ "$SC_ARCHS" == *arm64* && "$SC_ARCHS" == *x86_64* ]] || die \
+      "$SC_BIN 아키텍처가 '$SC_ARCHS' 다 (유니버설이면 둘 다 필요)"
+  else
+    [[ "$SC_ARCHS" == "arm64" ]] || die "$SC_BIN 아키텍처가 '$SC_ARCHS' 다 (arm64 여야 함)"
+  fi
+
+  codesign --verify --strict "$SC_PATH" 2>&1 | sed 's/^/  /' \
+    || die "$SC_BIN 서명 검증 실패"
+  SC_SIG="$(codesign -dvvv "$SC_PATH" 2>&1)"
+  SC_TEAM="$(sed -n 's/^TeamIdentifier=//p' <<<"$SC_SIG" | head -1)"
+  [[ "$SC_TEAM" == "$EXPECT_TEAM_ID" ]] || die \
+    "$SC_BIN 의 팀 ID 가 $SC_TEAM 다 (기대 $EXPECT_TEAM_ID)"
+  # 하드닝 런타임이 빠지면 공증 자체가 거부된다 — 몇 분 뒤 애플 서버에서 듣느니 여기서 안다.
+  grep -q 'flags=.*runtime' <<<"$SC_SIG" || die \
+    "$SC_BIN 에 하드닝 런타임이 없다. 이대로는 공증이 거부된다"
+  info "$SC_BIN · 팀 $SC_TEAM · $SC_ARCHS"
+done
+
+# 🔴 서명만 맞고 **안 도는** 바이너리를 넣는 사고가 이 계층에서 제일 흔하다(경로·이름·
+# 라이브러리 어긋남). 실제로 MCP 핸드셰이크를 한 번 시켜서 응답을 읽는다. stdin 이 닫히면
+# 서버가 스스로 끝나므로 매달릴 일이 없다.
+MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"release.sh","version":"1"}}}'
+SC_INFO="$(printf '%s\n' "$MCP_INIT" | "$APP_PATH/Contents/MacOS/kura-mcp" 2>/dev/null \
+  | python3 -c 'import json,sys
+d=json.loads(sys.stdin.readline())
+i=d["result"]["serverInfo"]
+print(i["name"], i["version"])' 2>/dev/null || true)"
+[[ -n "$SC_INFO" ]] || die \
+  "앱 안의 kura-mcp 가 MCP 핸드셰이크에 응답하지 않는다. 서명은 됐지만 서버로는 못 쓴다"
+read -r SC_NAME SC_VERSION <<<"$SC_INFO"
+[[ "$SC_NAME" == "kura" ]] || die "MCP 서버 이름이 '$SC_NAME' 다 (기대 kura)"
+[[ "$SC_VERSION" == "$VERSION_CONF" ]] || die \
+  "앱 안의 MCP 서버가 $SC_VERSION 을 찍는다 (빌드 버전 $VERSION_CONF). 사이드카가 옛 빌드다"
+info "MCP 핸드셰이크 응답: $SC_NAME $SC_VERSION"
+
+SC_CLI_VERSION="$("$APP_PATH/Contents/MacOS/kura-cli" --version 2>/dev/null | awk '{print $2}' || true)"
+[[ "$SC_CLI_VERSION" == "$VERSION_CONF" ]] || die \
+  "앱 안의 kura-cli 가 '$SC_CLI_VERSION' 을 찍는다 (기대 $VERSION_CONF)"
+info "CLI 버전: $SC_CLI_VERSION"
+
+# 확장(.mcpb)의 런처가 pin 하는 값은 이 앱의 실제 신원과 같아야 한다. 갈리면 확장은
+# "서명 확인 실패"로 fail-closed 되는데, 사용자 눈에는 앱이 멀쩡해서 원인을 못 찾는다.
+grep -q "TEAM_ID=\"$EXPECT_TEAM_ID\"" mcpb/server/kura-mcp || die \
+  "mcpb/server/kura-mcp 의 TEAM_ID 가 $EXPECT_TEAM_ID 가 아니다"
+grep -q "BUNDLE_ID=\"$EXPECT_BUNDLE_ID\"" mcpb/server/kura-mcp || die \
+  "mcpb/server/kura-mcp 의 BUNDLE_ID 가 $EXPECT_BUNDLE_ID 가 아니다"
+info "확장 런처가 pin 한 신원 = 이 앱"
 
 if [[ $NOTARIZE -eq 1 ]]; then
   # 사전 점검에서 시험 서명으로 확인했지만, 실제 산출물에서도 확인한다.
@@ -806,6 +889,14 @@ pathlib.Path(os.environ["LATEST_JSON"]).write_text(
 PY
 info "$LATEST_JSON ($(IFS=,; echo "${UPDATER_TARGETS[*]}"))"
 
+# ── 6-b. Claude 데스크톱 확장 .mcpb (개발 34) ───────────────────────────────
+# 앱 안에 사이드카가 들어간 뒤에 만든다. 확장은 그 사이드카를 가리키는 런처일 뿐이라
+# 순서가 뒤바뀌면 "가리킬 대상이 없는" 번들이 나온다.
+step "Claude 데스크톱 확장"
+./scripts/build-mcpb.sh || die "확장(.mcpb) 을 만들지 못했다"
+MCPB_PATH="src-tauri/target/mcpb/kura-$VERSION_CONF.mcpb"
+[[ -f "$MCPB_PATH" ]] || die "확장이 안 나왔다: $MCPB_PATH"
+
 # ── 7. 결과 ─────────────────────────────────────────────────────────────────
 step "완료"
 SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
@@ -887,7 +978,7 @@ else
 
     git tag $VERSION_TAG $GIT_SHA
     git push origin $VERSION_TAG
-    gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" --title "Kura $VERSION_TAG" --notes-file "$RELEASE_BODY"
+    gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" "$MCPB_PATH" --title "Kura $VERSION_TAG" --notes-file "$RELEASE_BODY"
 
   (여기부터 캐스크 갱신까지 한 번에 하려면 다음부터는 ./scripts/release.sh --publish)
 EOF
@@ -899,7 +990,7 @@ EOF
   태그 $VERSION_TAG 는 이미 이 커밋($GIT_SHA)에 있다. 남은 단계:
 
     git push origin $VERSION_TAG
-    gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" --title "Kura $VERSION_TAG" --notes-file "$RELEASE_BODY"
+    gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" "$MCPB_PATH" --title "Kura $VERSION_TAG" --notes-file "$RELEASE_BODY"
 
   (여기부터 캐스크 갱신까지 한 번에 하려면 다음부터는 ./scripts/release.sh --publish)
 EOF
@@ -946,7 +1037,7 @@ if [[ $PUBLISH -eq 1 ]]; then
   이제부터 되돌리기 어려운 단계다:
 
     태그      $VERSION_TAG → $GIT_SHA (원격에도 푸시)
-    릴리스    gh release create $VERSION_TAG  (DMG · tar · sig · latest.json)
+    릴리스    gh release create $VERSION_TAG  (DMG · tar · sig · latest.json · .mcpb)
     캐스크    $CASK_FILE
               version $CASK_VERSION_NOW → $VERSION_CONF, sha256 → $SHA256
               tap 리포에 커밋·푸시
@@ -986,7 +1077,7 @@ EOF
   fi
 
   # 8-2. 릴리스 -------------------------------------------------------------
-  RELEASE_ASSETS=("$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON")
+  RELEASE_ASSETS=("$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" "$MCPB_PATH")
   if gh release view "$VERSION_TAG" --repo "$GH_REPO_SLUG" >/dev/null 2>&1; then
     warn "릴리스 $VERSION_TAG 가 이미 있다 — 빠진 자산만 올린다"
     # 🔴 초안·프리릴리스면 여기서 멈춘다. 둘 다 **아래 검사를 전부 통과한다** —

@@ -17,7 +17,7 @@ use kura_mcp::{payment, wallet};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
@@ -204,6 +204,13 @@ impl ServerHandler for WalletServer {
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
+            // 기본값은 SDK 자신의 이름("rmcp 0.16.0")이라 MCP 앱의 서버 목록에 그렇게 뜬다.
+            // 사용자가 보는 이름이고, 확장 목록에서 어느 버전이 도는지도 여기로 드러난다.
+            server_info: Implementation {
+                name: "kura".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }

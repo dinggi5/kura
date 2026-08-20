@@ -129,27 +129,37 @@ brew uninstall --cask dinggi5/tap/kura   # 또는 /Applications/Kura.app 을 휴
 
 ## AI(Claude) 연결하기
 
-AI 앱의 **MCP 설정**에 Kura 서버를 등록하면 연결돼요. 연결되면 메인 화면에 **"Claude 연결됨"** 배지가 떠요.
+AI 앱의 **MCP 설정**에 Kura 서버를 등록하면 연결돼요. 연결되면 메인 화면에 **"Claude 연결됨"** 배지가 떠요. 0.1.2부터는 **앱 안에 MCP 서버가 들어 있어서** 소스 클론이나 Rust 설치 없이 연결할 수 있어요.
 
-### Claude Code
+### Claude 데스크톱 — 확장 파일 하나로 끝
 
-리포 루트의 [`.mcp.json`](.mcp.json)이 이미 들어 있어요. 이 폴더에서 `claude`를 실행하면 자동으로 잡혀요(처음엔 서버를 쓸지 묻는데 **승인**하면 돼요):
+[릴리스 페이지](https://github.com/dinggi5/kura/releases/latest)에서 `kura-<버전>.mcpb`를 받아 **더블클릭**하면 Claude 데스크톱이 설치를 물어봐요. (또는 Claude 설정 → 확장 → 파일 선택.)
+
+확장 안에는 실행 파일이 없어요 — 설치된 Kura.app 안의 서명·공증된 MCP 서버를 **서명 확인 후** 실행하는 런처만 들어 있어요. 그래서 Kura 앱을 먼저 설치해야 해요.
+
+### Claude Code · 다른 MCP 앱
+
+앱 안의 바이너리를 절대경로로 등록하면 돼요:
+
+```bash
+claude mcp add kura -- /Applications/Kura.app/Contents/MacOS/kura-mcp
+```
+
+다른 MCP 앱은 설정에 아래처럼 적어요:
 
 ```json
 {
   "mcpServers": {
     "kura": {
-      "command": "cargo",
-      "args": ["run", "--quiet", "--manifest-path", "./kura-mcp/Cargo.toml"]
+      "command": "/Applications/Kura.app/Contents/MacOS/kura-mcp"
     }
   }
 }
 ```
 
-### 다른 MCP 앱 (Claude 데스크톱 등)
+### 소스에서 개발 중이라면
 
-`command`/`args`를 위와 똑같이 두되, `--manifest-path`를 클론한 폴더의 절대경로로 바꿔요
-(예: `/Users/you/kura/kura-mcp/Cargo.toml`).
+리포 루트의 [`.mcp.json`](.mcp.json)이 이미 들어 있어요. 이 폴더에서 `claude`를 실행하면 자동으로 잡혀요(처음엔 서버를 쓸지 묻는데 **승인**하면 돼요). 이 경로는 `cargo run`으로 매번 새로 빌드하는 개발용이에요 — 설치해서 쓰실 거라면 위의 앱 경로 등록이 맞아요.
 
 AI가 쓸 수 있는 도구: `get_wallet_status` · `get_balances` · `get_history`(읽기 전용) · `request_payment`(결제 요청 → 앱 승인 팝업) · `x402_fetch`(402 결제가 걸린 URL 호출).
 
@@ -181,7 +191,15 @@ AI가 쓸 수 있는 도구: `get_wallet_status` · `get_balances` · `get_histo
 
 ## 개발자용
 
-CLI `kura`로도 같은 지갑을 다룰 수 있어요(MCP 서버와 코어 로직 공유):
+CLI `kura`로도 같은 지갑을 다룰 수 있어요(MCP 서버와 코어 로직 공유). 설치된 앱에 이미 들어 있어서, PATH에 한 줄 걸면 바로 써요:
+
+```bash
+sudo mkdir -p /usr/local/bin
+sudo ln -sf /Applications/Kura.app/Contents/MacOS/kura-cli /usr/local/bin/kura
+kura status
+```
+
+소스에서 돌리려면:
 
 ```bash
 cargo run --manifest-path ./kura-mcp/Cargo.toml --bin kura -- status

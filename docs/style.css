@@ -1,0 +1,46 @@
+/* Kura 문서 페이지 공통 스타일 (개발 34).
+   앱의 디자인 토큰(src/App.css)에서 아이보리·잉크·토스블루를 그대로 가져왔다.
+   외부 글꼴을 부르지 않는다 — 개인정보 처리방침 페이지가 방문자를 CDN 에 흘리면
+   그 페이지가 하는 말과 행동이 어긋난다. */
+  :root {
+    --ivory-100: #FAFAF7; --ivory-200: #F5F4EE; --ivory-400: #E8E5DC;
+    --ink-900: #1A1814; --ink-700: #4A4640; --ink-500: #8A8478;
+    --bg: var(--ivory-100); --surface: #FFFFFF; --border: var(--ivory-400);
+    --fg: var(--ink-900); --fg-dim: var(--ink-700); --fg-faint: var(--ink-500);
+    --accent: #3182F6; --code-bg: var(--ivory-200);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14130F; --surface: #1A1815; --border: #2E2B25;
+      --fg: #F2F0E9; --fg-dim: #C7C2B6; --fg-faint: #8A8478;
+      --accent: #5C9CFF; --code-bg: #23211D;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+    font-size: 17px; line-height: 1.75; letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 44rem; margin: 0 auto; padding: 5rem 1.5rem 7rem; }
+  header { margin-bottom: 3.5rem; }
+  .eyebrow { font-size: .8rem; letter-spacing: .08em; color: var(--fg-faint); text-transform: uppercase; }
+  h1 { font-size: 2.1rem; line-height: 1.3; margin: .7rem 0 .7rem; letter-spacing: -.03em; }
+  h2 { font-size: 1.28rem; margin: 3.4rem 0 .8rem; letter-spacing: -.02em; }
+  h3 { font-size: 1rem; margin: 0 0 .4rem; letter-spacing: -.01em; }
+  p, li { color: var(--fg-dim); }
+  .lede { font-size: 1.08rem; color: var(--fg); }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  ul { padding-left: 1.15rem; }
+  li { margin: .35rem 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .86em;
+         background: var(--code-bg); padding: .1em .35em; border-radius: 4px; color: var(--fg); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+          padding: 1.3rem 1.5rem; margin: 1rem 0; }
+  .card p:last-child { margin-bottom: 0; }
+  .meta { font-size: .9rem; color: var(--fg-faint); }
+  hr { border: 0; border-top: 1px solid var(--border); margin: 3.5rem 0; }
+  footer { font-size: .9rem; color: var(--fg-faint); }
+  footer a { color: var(--fg-faint); }

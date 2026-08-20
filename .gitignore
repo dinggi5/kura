@@ -6,6 +6,9 @@ dist-ssr/
 .vite/
 
 # --- Rust / Tauri ---
+# 사이드카 산출물 (scripts/build-sidecars.sh 가 kura-mcp 크레이트에서 만든다).
+# 바이너리는 커밋하지 않는다 — 소스에서 재현되고, 리포가 커진다.
+src-tauri/binaries/
 target/
 src-tauri/target/
 src-tauri/gen/schemas/

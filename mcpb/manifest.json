@@ -1,0 +1,57 @@
+{
+  "manifest_version": "0.3",
+  "name": "kura",
+  "display_name": "Kura",
+  "version": "0.1.2",
+  "description": "AI 에이전트를 위한 로컬 이더리움 지갑 — 잔액 조회와 x402 결제. 키는 이 맥을 떠나지 않습니다.",
+  "long_description": "설치된 Kura 앱과 연결해 잔액·거래 내역을 읽고, 결제를 **요청**합니다. 실제 송금은 앱이 팝업을 띄워 사람이 비밀번호로 승인해야만 실행됩니다. 비밀번호와 니모닉은 앱 입력칸에서만 다루며 대화·설정 파일 어디에도 들어가지 않습니다.\n\n이 확장은 실행 파일을 담고 있지 않습니다. 설치된 Kura.app 안의 서명·공증된 바이너리를 서명 확인 후 실행합니다. 먼저 Kura 를 설치하세요: https://github.com/dinggi5/kura",
+  "author": {
+    "name": "dinggi5",
+    "url": "https://github.com/dinggi5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dinggi5/kura"
+  },
+  "homepage": "https://github.com/dinggi5/kura",
+  "documentation": "https://github.com/dinggi5/kura#readme",
+  "support": "https://github.com/dinggi5/kura/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/kura-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/server/kura-mcp",
+      "args": [],
+      "env": {}
+    }
+  },
+  "tools": [
+    {
+      "name": "get_wallet_status",
+      "description": "지갑 상태와 주소 (읽기 전용)"
+    },
+    {
+      "name": "get_balances",
+      "description": "ETH·USDC 잔액 조회 (읽기 전용)"
+    },
+    {
+      "name": "get_history",
+      "description": "거래 시도 내역 (읽기 전용)"
+    },
+    {
+      "name": "request_payment",
+      "description": "송금 요청 — 앱 팝업에서 사람이 비밀번호로 승인해야 실행됩니다"
+    },
+    {
+      "name": "x402_fetch",
+      "description": "x402 유료 리소스 가져오기 — 결제가 필요하면 앱 팝업에서 승인받습니다"
+    }
+  ],
+  "keywords": ["wallet", "ethereum", "base", "x402", "payments", "usdc"],
+  "license": "MIT",
+  "privacy_policies": ["https://dinggi5.github.io/kura/privacy/"],
+  "compatibility": {
+    "platforms": ["darwin"]
+  }
+}
