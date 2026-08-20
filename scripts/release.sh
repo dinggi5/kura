@@ -426,9 +426,12 @@ VERSION_MCP="$(crate_version kura-mcp/Cargo.toml)"
 # 다섯째(개발 34): Claude 데스크톱 확장의 manifest. 사용자가 받은 확장이 어느 앱 버전을
 # 위한 건지 여기서만 드러난다 — 앱과 갈리면 확장 목록에 옛 번호가 그대로 남는다.
 VERSION_MCPB="$(python3 -c 'import json;print(json.load(open("mcpb/manifest.json"))["version"])')"
-[[ "$VERSION_CONF" == "$VERSION_PKG" && "$VERSION_CONF" == "$VERSION_CARGO" && "$VERSION_CONF" == "$VERSION_MCP" && "$VERSION_CONF" == "$VERSION_MCPB" ]] || die \
-  "버전 불일치 — tauri.conf.json=$VERSION_CONF / package.json=$VERSION_PKG / src-tauri/Cargo.toml=$VERSION_CARGO / kura-mcp/Cargo.toml=$VERSION_MCP / mcpb/manifest.json=$VERSION_MCPB"
-info "버전 $VERSION_CONF (다섯 파일 일치)"
+# 여섯째: package-lock.json 의 최상위 버전. npm 은 여길 자동으로 안 올려 줘서
+# (npm install 을 돌려야 따라온다) 실제로 0.1.2 때 한 번 어긋났다.
+VERSION_LOCK="$(python3 -c 'import json;print(json.load(open("package-lock.json"))["version"])')"
+[[ "$VERSION_CONF" == "$VERSION_PKG" && "$VERSION_CONF" == "$VERSION_CARGO" && "$VERSION_CONF" == "$VERSION_MCP" && "$VERSION_CONF" == "$VERSION_MCPB" && "$VERSION_CONF" == "$VERSION_LOCK" ]] || die \
+  "버전 불일치 — tauri.conf.json=$VERSION_CONF / package.json=$VERSION_PKG / src-tauri/Cargo.toml=$VERSION_CARGO / kura-mcp/Cargo.toml=$VERSION_MCP / mcpb/manifest.json=$VERSION_MCPB / package-lock.json=$VERSION_LOCK"
+info "버전 $VERSION_CONF (여섯 파일 일치)"
 
 # 더러운 작업 트리에서 낸 배포본은 어떤 소스로 만든 건지 나중에 되짚을 수 없다.
 IS_DIRTY=0
@@ -922,9 +925,15 @@ EOF
 # 하고, 체크섬을 아래에 붙인다. --notes 한 줄로 만들면 웹에는 sha256 밖에 안 남아서,
 # 받는 사람이 "무엇이 바뀌는지"를 설치 전에 볼 곳이 앱 안뿐이 된다.
 RELEASE_BODY="$BUNDLE_DIR/macos/release-body.md"
+# .mcpb 는 DMG 와 달리 서명·공증이 없다(실행 파일 없는 런처지만 셸 스크립트가 든다).
+# 릴리스 본문에 해시를 박아 두면 받은 파일을 검증할 최소한의 경로가 생긴다.
+# (mcpb sign 은 고정한 2.1.2 에 서명본을 Claude 가 거부하는 버그가 있어 아직 못 쓴다
+#  — https://github.com/modelcontextprotocol/mcpb/issues/278)
+MCPB_SHA256="$(shasum -a 256 "$MCPB_PATH" | awk '{print $1}')"
 {
   if [[ -f "$NOTES_FILE" ]]; then cat "$NOTES_FILE"; echo; fi
   echo "sha256($(basename "$DMG_PATH")): $SHA256"
+  echo "sha256($(basename "$MCPB_PATH")): $MCPB_SHA256"
 } > "$RELEASE_BODY"
 
 
@@ -1094,13 +1103,13 @@ EOF
     if [[ $REPLACE_ASSETS -eq 1 ]]; then
       # 🔴 재실행 복구 경로. 릴리스가 만들어진 뒤에 실패하면 다시 돌려도 **바이트가 다른**
       # 빌드가 나오므로(코드서명 타임스탬프·공증 티켓) 자산을 안 갈아엎는 한 영원히
-      # 재검증에서 막힌다. 그래서 이 플래그가 필요하다 — 같은 실행 안에서 네 개를 이번
+      # 재검증에서 막힌다. 그래서 이 플래그가 필요하다 — 같은 실행 안에서 자산 전부를 이번
       # 빌드로 통일하고 그대로 진행한다.
       # ⚠️ --clobber 는 기존 자산을 **지운 뒤** 올린다(gh 문서). 즉 올리는 도중 끊기면 그
       #    자산은 릴리스에서 사라진다 — 공개 중인 릴리스라면 그 순간 설치·업데이트가 끊긴다.
-      #    없앨 수 없는 창이라 대신 좁힌다: 네 개를 한 방에 넘기지 않고 하나씩, 실패하면
+      #    없앨 수 없는 창이라 대신 좁힌다: 한 방에 넘기지 않고 하나씩, 실패하면
       #    한 번 더 시도하고, 그래도 안 되면 **어느 파일이 비었는지 이름을 대고** 멈춘다.
-      #    (그 뒤 재검증이 네 개를 다시 받아 대조하므로, 어중간한 상태는 같은 실행에서 걸린다.)
+      #    (그 뒤 재검증이 자산 전부를 다시 받아 대조하므로, 어중간한 상태는 같은 실행에서 걸린다.)
       for a in "${RELEASE_ASSETS[@]}"; do
         n="$(basename "$a")"
         if ! gh release upload "$VERSION_TAG" "$a" --repo "$GH_REPO_SLUG" --clobber 2>/dev/null; then
@@ -1166,7 +1175,7 @@ EOF
      ② 이미 올라간 것을 그대로 둔다 — 이 스크립트로 캐스크를 갱신하지 말고,
         릴리스에서 받은 DMG 의 해시로 손수 갱신할 것"
   fi
-  info "업로드된 자산 4종이 로컬 산출물과 바이트 단위로 일치"
+  info "업로드된 자산 5종이 로컬 산출물과 바이트 단위로 일치"
 
   # 앱이 실제로 물어보는 주소는 이 하나다. 프리릴리스로 올라갔거나 latest.json 이 빠지면
   # 여기서 404 나 옛 버전이 나온다 — 기존 사용자가 새 버전을 영영 모르는 실패다.

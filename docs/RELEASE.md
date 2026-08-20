@@ -248,8 +248,9 @@ staple 부터 의심하되 단정하지는 말 것 — 스테이플이 없어도
 새 버전을 낼 때:
 
 ```bash
-# 1. 버전을 네 곳에서 올린다 (release.sh 사전 점검이 불일치를 잡는다)
+# 1. 버전을 여섯 곳에서 올린다 (release.sh 사전 점검이 불일치를 잡는다)
 #    tauri.conf.json / package.json / src-tauri/Cargo.toml / kura-mcp/Cargo.toml
+#    / mcpb/manifest.json / package-lock.json (lockfile 은 npm install --package-lock-only 로)
 # 2. 릴리스 노트를 쓴다 — docs/release-notes/v<버전>.md (아래 "릴리스 노트 파일")
 # 3. 커밋 (작업 트리가 깨끗해야 사전 점검을 통과한다)
 #    ⚠️ 새 릴리스 노트는 추적 안 되는 파일이라 -am 으로는 안 들어간다. add 를 먼저.

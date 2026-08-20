@@ -17,6 +17,14 @@ TEAM_ID="74ZAMXKVXN"
 # anchor apple generic = 애플이 발급한 인증서 사슬, identifier = 이 번들, leaf OU = 우리 팀.
 # 셋 다 맞아야 우리가 서명한 Kura 다. 팀 ID 는 배포된 앱 안에 이미 들어 있는 공개 값이다.
 REQUIREMENT="anchor apple generic and identifier \"$BUNDLE_ID\" and certificate leaf[subject.OU] = \"$TEAM_ID\""
+# exec 할 바이너리 자체의 requirement. 사이드카의 identifier 는 번들 ID 가 아니라
+# 바이너리 이름(kura-mcp)이다 — 릴리스 빌드에서 codesign -dvv 로 실측한 값.
+BIN_REQUIREMENT="anchor apple generic and identifier \"kura-mcp\" and certificate leaf[subject.OU] = \"$TEAM_ID\""
+# 🔴 도구는 절대경로로만 부른다. PATH 에서 찾으면 PATH 앞에 가짜 codesign 을 둔 환경이
+# 검증을 통째로 우회한다(1차 리뷰에서 실제 재현됨). /usr/bin 은 SIP 가 지킨다.
+CODESIGN=/usr/bin/codesign
+MDFIND=/usr/bin/mdfind
+[ -x "$CODESIGN" ] || { printf 'Kura MCP: %s 이 없습니다\n' "$CODESIGN" >&2; exit 1; }
 
 die() {
   printf 'Kura MCP: %s\n' "$1" >&2
@@ -33,7 +41,7 @@ else
 $HOME/Applications/Kura.app"
   # 둘 다 없을 때만 Spotlight 로 찾는다. 찾아도 서명을 통과해야 쓴다.
   if [ ! -d "/Applications/Kura.app" ] && [ ! -d "$HOME/Applications/Kura.app" ]; then
-    FOUND="$(mdfind "kMDItemCFBundleIdentifier == '$BUNDLE_ID'" 2>/dev/null || true)"
+    FOUND="$("$MDFIND" "kMDItemCFBundleIdentifier == '$BUNDLE_ID'" 2>/dev/null || true)"
     [ -n "$FOUND" ] && CANDIDATES="$CANDIDATES
 $FOUND"
   fi
@@ -54,9 +62,17 @@ unset IFS
   "0.1.1 이하 버전에는 MCP 바이너리가 들어 있지 않습니다 — 0.1.2 이상으로 업데이트하세요."
 
 # 🔴 fail-closed: 확인이 안 되면 실행하지 않는다.
-codesign --verify -R "=$REQUIREMENT" "$APP" >/dev/null 2>&1 || die \
+# --deep: 앱 최상위만 보면 안에 든 코드(사이드카 포함)의 변조를 놓친다 (TN2206).
+# --strict: 리소스 봉인 위반까지 실패로 친다.
+"$CODESIGN" --verify --deep --strict -R "=$REQUIREMENT" "$APP" >/dev/null 2>&1 || die \
   "서명 확인에 실패했습니다: $APP" \
   "우리가 서명한 Kura 가 아니거나 앱이 손상됐습니다. 실행하지 않았습니다." \
   "공식 배포본을 다시 받으세요: https://github.com/dinggi5/kura/releases"
+
+# exec 하는 파일 그 자체도 검증한다. 앱 검증과 exec 사이에 내용물이 바뀌는 창(TOCTOU)을
+# 셸에서 완전히 없앨 수는 없지만, 실행 직전에 같은 잣대를 한 번 더 대서 창을 좁힌다.
+"$CODESIGN" --verify --strict -R "=$BIN_REQUIREMENT" "$APP/Contents/MacOS/kura-mcp" >/dev/null 2>&1 || die \
+  "MCP 바이너리 서명 확인에 실패했습니다: $APP/Contents/MacOS/kura-mcp" \
+  "실행하지 않았습니다. 공식 배포본을 다시 받으세요: https://github.com/dinggi5/kura/releases"
 
 exec "$APP/Contents/MacOS/kura-mcp" "$@"

@@ -66,8 +66,9 @@
 
   <h2>Claude 데스크톱 확장(.mcpb)</h2>
   <p>확장은 설치된 Kura 앱 안의 서명된 MCP 서버를 실행하는 얇은 런처입니다. 자체적으로 무엇을
-  모으거나 보내지 않고, 위와 똑같은 규칙을 따릅니다. 결제는 언제나 앱 팝업에서 사람이
-  비밀번호로 승인해야 실행됩니다.</p>
+  모으거나 보내지 않고, 위와 똑같은 규칙을 따릅니다. 결제는 기본값으로 앱 팝업에서 사람이
+  비밀번호로 승인해야 실행됩니다. 앱 설정에서 자율 결제를 직접 켠 경우에만, 세션 잠금 해제·소액
+  한도·신뢰 주소 조건 안에서 비밀번호 없이 자동 승인됩니다.</p>
 
   <h2>데이터 삭제</h2>
   <p>앱을 지우고 <code>~/.jigap</code> 폴더를 삭제하면 이 맥에서 Kura의 데이터가 완전히
@@ -99,7 +100,10 @@
   broadcast transactions — it can see your IP and wallet address, and transactions are permanently
   public on-chain. <strong>(2) x402 resources</strong>, only URLs you or your agent ask for; that
   server sees your IP, address, and payment signature. <strong>(3) An update check</strong> to GitHub
-  at launch, which you can turn off in Settings → About. Fonts and other assets are bundled in the
+  at launch, which you can turn off in Settings → About. Payments require, by default, a human
+  approving with the password in the app's popup; only if you explicitly enable autonomous payments
+  does the app auto-approve — and only within the session-unlock, small-amount, and trusted-address
+  limits you set. Fonts and other assets are bundled in the
   app, so no CDN is contacted at runtime.</p>
   <p>Nothing is shared with third parties because there is nothing to share; the developer cannot see
   your addresses, balances, or transactions. Deleting the app and the <code>~/.jigap</code> folder
