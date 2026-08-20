@@ -7,6 +7,9 @@
 #   ./scripts/release.sh --no-notarize   서명만 (공증 자격증명 없이 파이프라인 점검용)
 #   ./scripts/release.sh --plain-dmg     DMG 안 아이콘 배치 생략 (Finder 권한 없는 환경)
 #   ./scripts/release.sh --skip-tests    테스트 건너뛰기 (권장하지 않음)
+#   ./scripts/release.sh --publish       빌드·검증이 통과하면 그대로 배포까지 (개발 33)
+#                                        태그 → 릴리스 업로드 → 업로드본 재검증 → 캐스크 갱신·푸시
+#   ./scripts/release.sh --publish --yes 배포 직전 확인 프롬프트를 생략
 #
 # 1회 설정과 자격증명 만드는 법은 docs/RELEASE.md 를 볼 것.
 #
@@ -48,14 +51,18 @@ NOTARIZE=1
 RUN_TESTS=1
 ALLOW_DIRTY=0
 PLAIN_DMG=0
+PUBLISH=0
+ASSUME_YES=0
 for arg in "$@"; do
   case "$arg" in
     --universal)   UNIVERSAL=1 ;;
+    --publish)     PUBLISH=1 ;;
+    --yes|-y)      ASSUME_YES=1 ;;
     --no-notarize) NOTARIZE=0 ;;
     --skip-tests)  RUN_TESTS=0 ;;
     --allow-dirty) ALLOW_DIRTY=1 ;;
     --plain-dmg)   PLAIN_DMG=1 ;;
-    -h|--help)     sed -n '3,15p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '3,18p' "$0"; exit 0 ;;
     *)             die "모르는 옵션: $arg  (--help 로 사용법 확인)" ;;
   esac
 done
@@ -252,6 +259,32 @@ else
   warn "--no-notarize: 서명만 한다. 이 결과물은 남에게 주면 Gatekeeper 가 막는다"
 fi
 
+# ── 배포 준비 점검 (--publish, 개발 33) ─────────────────────────────────────
+# 배포에 필요한 것들은 **빌드 전에** 다 확인한다. 빌드·공증이 10분 넘게 걸리는데,
+# 그걸 다 태운 뒤 "gh 로그인이 없다"로 멈추면 사람이 손으로 이어 붙이게 되고
+# 그 순간 이 스크립트가 지켜 주던 순서(태그=빌드한 커밋 등)가 사라진다.
+CASK_FILE=""
+TAP_DIR=""
+if [[ $PUBLISH -eq 1 ]]; then
+  [[ $NOTARIZE -eq 1 ]] || die "--publish 는 공증한 산출물에만 쓴다 (--no-notarize 와 같이 쓸 수 없다)"
+  command -v gh >/dev/null || die "gh 가 없다:  brew install gh"
+  gh auth status >/dev/null 2>&1 || die "gh 로그인이 안 돼 있다:  gh auth login"
+  command -v curl >/dev/null || die "curl 이 없다 (업로드본 재검증에 쓴다)"
+  command -v brew >/dev/null || die "brew 가 없다 — 캐스크를 갱신할 수 없다"
+  # brew 가 클론해 둔 tap 리포를 직접 고친다(개발 32 에서 손으로 하던 그대로).
+  TAP_DIR="$(brew --repository dinggi5/homebrew-tap 2>/dev/null || true)"
+  [[ -n "$TAP_DIR" && -d "$TAP_DIR/.git" ]] || die \
+    "Homebrew tap 이 안 깔려 있다:  brew tap dinggi5/tap"
+  CASK_FILE="$TAP_DIR/Casks/kura.rb"
+  [[ -f "$CASK_FILE" ]] || die "캐스크 파일이 없다: $CASK_FILE"
+  # 남의 변경 위에 우리 커밋을 얹으면 tap 에 의도 안 한 게 같이 올라간다.
+  [[ -z "$(git -C "$TAP_DIR" status --porcelain)" ]] || die \
+    "tap 에 커밋 안 된 변경이 있다: $TAP_DIR (정리한 뒤 다시 돌릴 것)"
+  TAP_BRANCH="$(git -C "$TAP_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+  [[ "$TAP_BRANCH" == "main" ]] || die "tap 이 main 이 아니라 '$TAP_BRANCH' 다: $TAP_DIR"
+  info "배포 준비 확인됨 (gh 로그인 · tap $TAP_DIR)"
+fi
+
 # ── 업데이트 서명 (개발 31) ─────────────────────────────────────────────────
 # 인앱 업데이트는 minisign 서명이 맞아야만 설치된다(플러그인이 강제, 끌 수 없음).
 #
@@ -315,6 +348,7 @@ IS_DIRTY=0
 if [[ -n "$(git status --porcelain)" ]]; then
   if [[ $ALLOW_DIRTY -eq 1 ]]; then
     IS_DIRTY=1
+    [[ $PUBLISH -eq 0 ]] || die "--publish 와 --allow-dirty 는 같이 못 쓴다. 이 DMG 에는 어느 커밋에도 없는 코드가 들어간다"
     warn "커밋 안 된 변경이 있는 채로 빌드한다 (--allow-dirty)"
   else
     git status --short
@@ -621,7 +655,12 @@ fi
 step "latest.json"
 
 LATEST_JSON="$BUNDLE_DIR/macos/latest.json"
-TAR_URL_BASE="https://github.com/dinggi5/kura/releases/download/$VERSION_TAG"
+# latest.json 이 가리키는 리포와 --publish 가 릴리스를 만드는 리포는 **반드시 같아야 한다**.
+# gh 는 원격에서 리포를 알아내는데(포크·다른 remote 면 딴 데로 간다), latest.json 의 URL 은
+# 여기 박힌 값이다 — 갈리면 업로드는 성공하고 업데이트만 404 로 죽는다. 그래서 한 곳에서 정하고
+# gh 호출에 --repo 로 못 박는다.
+GH_REPO_SLUG="dinggi5/kura"
+TAR_URL_BASE="https://github.com/$GH_REPO_SLUG/releases/download/$VERSION_TAG"
 
 # 릴리스 노트는 사용자가 "이 코드를 내 지갑에 넣을지" 판단하는 유일한 근거다.
 # 파일이 있으면 그대로 싣고, 없으면 앱에 일반적인 안내만 뜬다는 걸 분명히 알린다.
@@ -747,6 +786,8 @@ else
     git tag $VERSION_TAG $GIT_SHA
     git push origin $VERSION_TAG
     gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" --title "Kura $VERSION_TAG" --notes-file "$RELEASE_BODY"
+
+  (여기부터 캐스크 갱신까지 한 번에 하려면 다음부터는 ./scripts/release.sh --publish)
 EOF
   else
     # 태그가 이미 있으면(= 위 게이트에서 태그 = HEAD 로 확인된 상태) 안내가 통째로
@@ -757,8 +798,218 @@ EOF
 
     git push origin $VERSION_TAG
     gh release create $VERSION_TAG "$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON" --title "Kura $VERSION_TAG" --notes-file "$RELEASE_BODY"
+
+  (여기부터 캐스크 갱신까지 한 번에 하려면 다음부터는 ./scripts/release.sh --publish)
 EOF
   fi
 fi
 
 RELEASE_OK=1   # 여기까지 왔으면 산출물을 남긴다 (cleanup 이 이름을 안 바꾼다)
+
+# ── 8. 배포 (--publish, 개발 33) ────────────────────────────────────────────
+# 개발 32 까지는 여기서 찍어 준 명령을 사람이 붙여넣었다. **스크립트가 정확한 명령을
+# 이미 알고 있다는 것 자체가** 자동화해도 된다는 근거다(그 명령들이 그대로 성공했다).
+#
+# 자동화해도 사람이 계속 하는 것 셋: (1) 버전 올리기 (2) 릴리스 노트 쓰기
+# (3) 키체인 「항상 허용」. 앞의 둘은 판단이고, 셋째는 헤드리스면 서명이 그냥 실패한다.
+#
+# 🔴 이 단계를 GitHub Actions 로 옮기지 않는다. Developer ID 인증서와 **업데이트 서명
+# 개인키**를 CI 시크릿에 올려야 하는데, 그 키가 새면 이미 깔린 지갑에 임의 코드를
+# 밀어넣을 수 있다. 키는 이 맥을 안 떠난다 (DEVLOG 개발 33).
+#
+# 되돌릴 수 없는 단계(태그 푸시·릴리스 생성·tap 푸시) 앞에 확인을 한 번 받고, 각 단계는
+# 이미 돼 있으면 건너뛴다 — 중간에 실패해도 같은 명령을 다시 돌릴 수 있어야 한다.
+if [[ $PUBLISH -eq 1 ]]; then
+  step "배포"
+
+  HEAD_FULL="$(git rev-parse HEAD)"
+  # 빌드한 커밋이 origin/main 에 없으면 태그가 가리키는 커밋을 브랜치 어디서도 볼 수 없다.
+  # 여기서 main 을 대신 밀어 주지 않는다 — 머지는 사람이 보고 하는 일이다.
+  git fetch -q origin main 2>/dev/null || warn "origin/main 을 새로 못 받아왔다 — 아래 판단은 마지막 정보 기준이다"
+  ORIGIN_MAIN="$(git rev-parse -q --verify origin/main || true)"
+  if [[ -z "$ORIGIN_MAIN" ]]; then
+    die "origin/main 을 확인할 수 없어 배포를 멈춘다"
+  elif ! git merge-base --is-ancestor "$HEAD_FULL" "$ORIGIN_MAIN"; then
+    CUR_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+    die "빌드한 커밋($GIT_SHA)이 아직 origin/main 에 없다. 먼저 올릴 것:
+     git -C \"\$(git rev-parse --show-toplevel)\" checkout main && git merge --ff-only $GIT_SHA && git push origin main
+   (지금 브랜치: $CUR_BRANCH)"
+  fi
+  info "커밋 $GIT_SHA 는 origin/main 에 있다"
+
+  CASK_VERSION_NOW="$(sed -n 's/^ *version "\(.*\)"$/\1/p' "$CASK_FILE" | head -1)"
+
+  cat <<EOF
+
+  이제부터 되돌리기 어려운 단계다:
+
+    태그      $VERSION_TAG → $GIT_SHA (원격에도 푸시)
+    릴리스    gh release create $VERSION_TAG  (DMG · tar · sig · latest.json)
+    캐스크    $CASK_FILE
+              version $CASK_VERSION_NOW → $VERSION_CONF, sha256 → $SHA256
+              tap 리포에 커밋·푸시
+
+EOF
+  if [[ $ASSUME_YES -eq 0 ]]; then
+    printf '  계속하려면 yes 를 입력: '
+    read -r REPLY_PUBLISH </dev/tty || die "확인 입력을 받지 못했다 (자동 실행이면 --yes)"
+    [[ "$REPLY_PUBLISH" == "yes" ]] || die "배포를 취소했다. 산출물은 그대로 남아 있다"
+  else
+    warn "--yes: 확인 없이 진행한다"
+  fi
+
+  # 8-1. 태그 ---------------------------------------------------------------
+  # 로컬 태그는 위 사전 점검에서 "있으면 HEAD 여야 한다"를 이미 통과했다.
+  if git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
+    info "로컬 태그 $VERSION_TAG 이미 있음"
+  else
+    git tag "$VERSION_TAG" "$GIT_SHA" || die "태그를 못 만들었다"
+    info "태그 $VERSION_TAG → $GIT_SHA"
+  fi
+  # 원격 태그가 **다른 커밋**을 가리키면 덮어쓰지 않는다. 이미 나간 릴리스의 소스를
+  # 바꾸는 짓이고, README 의 "git checkout <태그> = 배포본 소스" 약속을 깬다.
+  REMOTE_TAG_LINE="$(git ls-remote --tags origin "refs/tags/$VERSION_TAG" "refs/tags/$VERSION_TAG^{}" || die "원격 태그를 확인하지 못했다")"
+  # 애노테이트 태그면 ^{} 줄이 실제 커밋이다. 우리는 가벼운 태그를 쓰지만, 원격에 어떤
+  # 종류가 있든 커밋으로 비교해야 "다른 커밋을 가리킨다"를 제대로 잡는다.
+  REMOTE_TAG_SHA="$(grep '\^{}$' <<<"$REMOTE_TAG_LINE" | awk 'NR==1{print $1}' || true)"
+  [[ -n "$REMOTE_TAG_SHA" ]] || REMOTE_TAG_SHA="$(awk 'NR==1{print $1}' <<<"$REMOTE_TAG_LINE")"
+  if [[ -n "$REMOTE_TAG_SHA" ]]; then
+    [[ "$REMOTE_TAG_SHA" == "$HEAD_FULL" ]] || die \
+      "원격 태그 $VERSION_TAG 가 다른 커밋($REMOTE_TAG_SHA)을 가리킨다. 덮어쓰지 않는다 — 버전을 올려서 새로 낼 것"
+    info "원격 태그 $VERSION_TAG 이미 있음 (같은 커밋)"
+  else
+    # 🔴 --tags 를 쓰지 않는다(개발 30 사고). 태그 하나만 이름으로 민다.
+    git push origin "$VERSION_TAG" || die "태그 푸시 실패"
+    info "태그 푸시됨"
+  fi
+
+  # 8-2. 릴리스 -------------------------------------------------------------
+  RELEASE_ASSETS=("$DMG_PATH" "$UPDATER_TAR" "$UPDATER_SIG" "$LATEST_JSON")
+  if gh release view "$VERSION_TAG" --repo "$GH_REPO_SLUG" >/dev/null 2>&1; then
+    warn "릴리스 $VERSION_TAG 가 이미 있다 — 빠진 자산만 올린다"
+    HAVE_ASSETS="$(gh release view "$VERSION_TAG" --repo "$GH_REPO_SLUG" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+    for a in "${RELEASE_ASSETS[@]}"; do
+      if grep -Fxq "$(basename "$a")" <<<"$HAVE_ASSETS"; then
+        info "이미 있음: $(basename "$a")"
+      else
+        gh release upload "$VERSION_TAG" "$a" --repo "$GH_REPO_SLUG" || die "자산 업로드 실패: $a"
+        info "업로드: $(basename "$a")"
+      fi
+    done
+  else
+    gh release create "$VERSION_TAG" "${RELEASE_ASSETS[@]}" --repo "$GH_REPO_SLUG" \
+      --title "Kura $VERSION_TAG" --notes-file "$RELEASE_BODY" \
+      || die "릴리스 생성 실패"
+    info "릴리스 $VERSION_TAG 생성됨"
+  fi
+
+  # 8-3. 올라간 것을 다시 받아 확인 -----------------------------------------
+  # 캐스크 sha256 은 "이 파일을 설치해도 된다"는 우리 쪽 보증이다. 로컬 빌드본의 해시를
+  # 그대로 적으면, 업로드가 깨졌을 때 아무도 못 잡는다 → 릴리스에서 다시 받아 대조한다
+  # (docs/RELEASE.md "Cask 해시를 갱신하기 전에" 와 같은 이유).
+  step "업로드본 재검증"
+  DL_DIR="$(mktemp -d)"
+  DMG_NAME="$(basename "$DMG_PATH")"
+  gh release download "$VERSION_TAG" --repo "$GH_REPO_SLUG" -p "$DMG_NAME" -D "$DL_DIR" --clobber \
+    || { rm -rf "$DL_DIR"; die "릴리스에서 DMG 를 다시 받지 못했다"; }
+  DL_SHA="$(shasum -a 256 "$DL_DIR/$DMG_NAME" | awk '{print $1}')"
+  rm -rf "$DL_DIR"
+  [[ "$DL_SHA" == "$SHA256" ]] || die \
+    "릴리스에 올라간 DMG 의 해시가 로컬 빌드본과 다르다 (업로드 $DL_SHA ≠ 빌드 $SHA256).
+     캐스크를 갱신하지 않았다. 자산을 지우고 다시 올릴 것."
+  info "업로드된 DMG 해시 일치"
+
+  # 앱이 실제로 물어보는 주소는 이 하나다. 프리릴리스로 올라갔거나 latest.json 이 빠지면
+  # 여기서 404 나 옛 버전이 나온다 — 기존 사용자가 새 버전을 영영 모르는 실패다.
+  LATEST_URL="https://github.com/$GH_REPO_SLUG/releases/latest/download/latest.json"
+  LATEST_REMOTE="$(curl -fsSL "$LATEST_URL" || true)"
+  if [[ -z "$LATEST_REMOTE" ]]; then
+    warn "$LATEST_URL 을 못 읽었다 (GitHub 반영이 늦을 수 있다). 잠시 뒤 직접 확인할 것"
+  else
+    LATEST_VER="$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' <<<"$LATEST_REMOTE" 2>/dev/null || true)"
+    if [[ "$LATEST_VER" == "$VERSION_CONF" ]]; then
+      info "업데이트 엔드포인트 확인: version $LATEST_VER"
+    else
+      warn "업데이트 엔드포인트가 '$LATEST_VER' 를 광고한다 (기대 $VERSION_CONF) — 반영 지연이면 곧 바뀐다"
+    fi
+  fi
+
+  # 8-4. Homebrew 캐스크 ----------------------------------------------------
+  step "Homebrew 캐스크"
+  # 원격·브랜치를 명시한다 — 추적 정보 설정에 기대면 clone 방식에 따라 그냥 실패한다(실측).
+  git -C "$TAP_DIR" pull --ff-only -q origin main || die "tap 을 최신으로 못 받았다: $TAP_DIR"
+  [[ -z "$(git -C "$TAP_DIR" status --porcelain)" ]] || die "tap 에 변경이 생겼다: $TAP_DIR"
+
+  CASK_FILE="$CASK_FILE" CK_VERSION="$VERSION_CONF" CK_SHA="$SHA256" python3 - <<'PY' || die "캐스크를 고치지 못했다"
+import os, pathlib, re, sys
+
+path = pathlib.Path(os.environ["CASK_FILE"])
+src = text = path.read_text()
+version, sha = os.environ["CK_VERSION"], os.environ["CK_SHA"]
+
+def one(pattern, repl, what):
+    global text
+    text, n = re.subn(pattern, repl, text, count=1, flags=re.M)
+    if n != 1:
+        sys.exit(f"캐스크에서 {what} 줄을 찾지 못했다: {path}")
+
+one(r'^(\s*version\s+")[^"]*(")$', lambda m: m.group(1) + version + m.group(2), "version")
+one(r'^(\s*sha256\s+")[^"]*(")$', lambda m: m.group(1) + sha + m.group(2), "sha256")
+
+# auto_updates 는 0.1.2 부터 넣는다 (개발 31 결정, docs/RELEASE.md).
+# 0.1.1 캐스크에 같이 넣으면 brew 가 0.1.0 → 0.1.1 업그레이드를 건너뛰는데, 0.1.0 에는
+# 인앱 업데이트가 없어서 그 사용자들은 어느 경로로도 새 버전을 못 받는다.
+# 손으로 넣기로 하면 "다음 배포 때 넣자"가 그대로 잊힌다 → 게이트로 둔다.
+def parse(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+
+has_auto = re.search(r'^\s*auto_updates\s+true\s*$', text, re.M) is not None
+if parse(version) <= (0, 1, 1):
+    if has_auto:
+        sys.exit("이 버전 캐스크에는 auto_updates 가 있으면 안 된다 (0.1.2 부터)")
+elif not has_auto:
+    anchor = re.search(r'^(\s*)depends_on macos:.*$', text, re.M)
+    if not anchor:
+        sys.exit("auto_updates 를 넣을 자리(depends_on macos:)를 못 찾았다")
+    indent = anchor.group(1)
+    block = (
+        f"\n\n{indent}# 앱이 스스로 업데이트한다(0.1.2~). 이게 있어야 brew 가 Kura 를 건드리지 않고,\n"
+        f"{indent}# 그래야 위 uninstall launchctl: 이 안 돌아서 자동 시작 설정이 안 지워진다.\n"
+        f"{indent}# 새로 설치하는 사람은 캐스크로 받으므로 version·sha256 은 계속 갱신한다.\n"
+        f"{indent}auto_updates true"
+    )
+    text = text[:anchor.end()] + block + text[anchor.end():]
+    print("  auto_updates true 추가됨")
+
+if text == src:
+    print("  캐스크에 바뀐 게 없다 (이미 이 버전)")
+else:
+    path.write_text(text)
+PY
+
+  if [[ -n "$(git -C "$TAP_DIR" status --porcelain)" ]]; then
+    git -C "$TAP_DIR" diff -- Casks/kura.rb | sed 's/^/  /'
+    # 우리 손으로 고친 루비 파일이라 문법이 깨질 수 있다. 깨진 채로 밀면 `brew` 를 쓰는
+    # 모든 명령이 이 tap 에서 죽는다 — 설치할 사람만이 아니라 이미 깐 사람까지.
+    # ⚠️ `brew audit <경로>` 는 비활성화됐다(실측) — 토큰 이름으로 불러야 하고, 그러면
+    # brew 는 tap 에 있는 **방금 고친 그 파일**을 읽는다(깨뜨려서 확인함).
+    brew audit --cask dinggi5/tap/kura 2>&1 | sed 's/^/  /' || die \
+      "brew audit 가 캐스크를 거부했다. tap 은 아직 안 밀었다:  git -C \"$TAP_DIR\" checkout Casks/kura.rb"
+    git -C "$TAP_DIR" add Casks/kura.rb || die "tap add 실패"
+    git -C "$TAP_DIR" commit -q -m "kura $VERSION_CONF" || die "tap 커밋 실패"
+    git -C "$TAP_DIR" push -q origin main || die "tap 푸시 실패 (커밋은 로컬에 남아 있다: $TAP_DIR)"
+    info "캐스크 $VERSION_CONF 푸시됨 ($TAP_DIR)"
+  else
+    info "캐스크는 이미 $VERSION_CONF 다 — 커밋할 것 없음"
+  fi
+
+  step "배포 완료"
+  cat <<EOF
+  릴리스   https://github.com/$GH_REPO_SLUG/releases/tag/$VERSION_TAG
+  캐스크   brew upgrade --cask kura   (새로 깔 사람은 brew install --cask dinggi5/tap/kura)
+
+  남은 확인은 사람이 하는 게 낫다:
+    - 릴리스 페이지에서 노트가 제대로 보이는지
+    - 이미 깔린 앱에서 업데이트 카드가 이 버전을 잡는지
+EOF
+fi
