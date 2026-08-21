@@ -19,8 +19,15 @@ ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
 die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# 발행은 취소 불가능한 원격 부작용이다 — 오타난 플래그가 조용히 무시된 채 발행으로
+# 흘러가지 않게, 모르는 인자는 전부 거부한다 (코덱스 1차 P1).
 DRY_RUN=0
-[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    *) die "모르는 인자: $arg  (지원: --dry-run)" ;;
+  esac
+done
 
 REGISTRY_NAME="io.github.dinggi5/kura"
 REPO="dinggi5/kura"
@@ -82,18 +89,36 @@ if [[ "$DRY_RUN" == "1" ]]; then
   exit 0
 fi
 
+# 같은 이름+버전은 레지스트리가 재발행을 거부한다. 지난 실행이 발행까지 하고 확인만
+# 실패했으면, 무조건 다시 발행하려는 스크립트는 자기 검증 경로에 영영 못 간다
+# (코덱스 1차 P2) — 그래서 발행 전에 원격을 먼저 본다.
+LOOKUP="https://registry.modelcontextprotocol.io/v0.1/servers/${REGISTRY_NAME/\//%2F}/versions/$VERSION"
+fetch_remote_sha() {
+  # 미발행(404)이든 일시 장애든 빈 문자열 — 어느 쪽이어도 발행 시도로 진행하면 된다.
+  curl -fsSL "$LOOKUP" 2>/dev/null | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+srv = doc.get("server", doc)
+print(srv["packages"][0]["fileSha256"])' 2>/dev/null
+}
+
+REMOTE_SHA="$(fetch_remote_sha || true)"
+if [[ -n "$REMOTE_SHA" ]]; then
+  [[ "$REMOTE_SHA" == "$SHA256" ]] || die \
+    "v$VERSION 은 이미 발행돼 있는데 sha256 이 다르다 — 원격 $REMOTE_SHA / 로컬 $SHA256
+  릴리스 자산이 발행 후에 바뀌었다는 뜻이다. 버전을 올려 다시 릴리스할 것."
+  ok "이미 발행돼 있다: $REGISTRY_NAME v$VERSION (sha256 일치) — 발행 건너뜀"
+  exit 0
+fi
+
 [[ -f "$HOME/.config/mcp-publisher/token.json" ]] || die \
   "레지스트리 로그인이 없다. 먼저:  mcp-publisher login github  (브라우저에서 dinggi5 로 인증)"
 mcp-publisher publish server.json || die \
   "발행 실패. 토큰이 만료됐으면:  mcp-publisher login github"
 
 # ── 사후 검증: 레지스트리가 실제로 이 버전을 광고하는지 (우리 손 밖 API 기준) ──
-LOOKUP="https://registry.modelcontextprotocol.io/v0.1/servers/io.github.dinggi5%2Fkura/versions/$VERSION"
-REMOTE_SHA="$(curl -fsSL "$LOOKUP" | python3 -c '
-import json, sys
-doc = json.load(sys.stdin)
-srv = doc.get("server", doc)
-print(srv["packages"][0]["fileSha256"])')" || die "발행 확인 실패: $LOOKUP"
+REMOTE_SHA="$(fetch_remote_sha || true)"
+[[ -n "$REMOTE_SHA" ]] || die "발행 확인 실패: $LOOKUP  (다시 돌리면 확인만 재시도한다)"
 [[ "$REMOTE_SHA" == "$SHA256" ]] || die \
   "레지스트리의 sha256 이 우리가 잰 값과 다르다 — 원격 $REMOTE_SHA / 로컬 $SHA256"
 ok "레지스트리 발행 확인: $REGISTRY_NAME v$VERSION (sha256 일치)"
