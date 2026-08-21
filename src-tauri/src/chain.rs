@@ -74,9 +74,10 @@ pub(crate) async fn with_pinned_chain<F: std::future::Future>(chain_id: u64, fut
 ///
 /// 폴백은 settings::read_settings 와 같은 결로 갈라진다(개발 39 — 신규 기본이 메인넷이
 /// 되면서 "없음"과 "못 읽음"이 다른 답이 됐다):
-/// - 파일 **없음** = 첫 실행 → 메인넷(신규 기본, `Settings::default()` 와 일치)
-/// - 파일이 있는데 깨짐/못 읽음/홈 못 정함 → 테스트넷(보수적 — 기존 사용자를 조용히
-///   실돈 체인으로 옮기지 않는다)
+/// - 파일 없음 + **지갑도 없음** = 진짜 신규 → 메인넷(신규 기본, `Settings::default()`)
+/// - 파일 없음 + 지갑 있음 = 개발 31 이전 설치(저장을 눌러야만 settings.json 이 생겼다)
+///   → 테스트넷(그 시절 사용자를 조용히 실돈 체인으로 옮기지 않는다 — 코덱스 개발 39 P1)
+/// - 파일이 있는데 깨짐/못 읽음/홈 못 정함 → 테스트넷(보수적)
 /// - 정상 JSON 인데 chain_id 없음(개발 20 이전 옛 파일) → 테스트넷(그 시절 사용자 보존)
 fn selected_chain_id() -> u64 {
     if let Ok(id) = PINNED_CHAIN.try_with(|id| *id) {
@@ -86,7 +87,15 @@ fn selected_chain_id() -> u64 {
         return BASE_SEPOLIA.chain_id;
     };
     match std::fs::read_to_string(dir.join("settings.json")) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BASE_MAINNET.chain_id,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let wallet_exists =
+                dir.join("wallet.enc").exists() || dir.join("wallet.json").exists();
+            if wallet_exists {
+                BASE_SEPOLIA.chain_id
+            } else {
+                BASE_MAINNET.chain_id
+            }
+        }
         Err(_) => BASE_SEPOLIA.chain_id,
         Ok(text) => chain_id_in(&text),
     }

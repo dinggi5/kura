@@ -50,11 +50,14 @@ export const BASE_MAINNET: ChainConfig = {
 /** 선택 가능한 체인 목록 (설정 토글 순서 — 메인넷이 왼쪽/기본, 개발 39). */
 export const CHAINS: ChainConfig[] = [BASE_MAINNET, BASE_SEPOLIA];
 
-/** chain_id → ChainConfig. 미정(설정 로드 전)이거나 알 수 없으면 메인넷 —
- *  신규 기본과 일치시켜 로드 전후 화면이 흔들리지 않게 한다. 돈 축의 보수적 폴백
- *  (깨진 파일=테스트넷)은 백엔드 read_settings 가 맡고, 여기엔 그 결과 id 만 온다. */
+/** chain_id → ChainConfig. 두 폴백이 다르다(코덱스 개발 39 P2):
+ *  - undefined(설정 로드 전) → 메인넷 — 신규 기본과 일치시켜 로드 전후 화면이 안 흔들리게.
+ *  - **모르는 id**(미래 체인에서 내려온 설정 등) → 테스트넷 — 백엔드 active_chain()·MCP 가
+ *    같은 id 를 테스트넷으로 정규화하므로, 여기서 메인넷을 그리면 잔액은 테스트넷인데
+ *    라벨·익스플로러만 메인넷인 어긋남이 생긴다. */
 export function chainFromId(id: number | undefined): ChainConfig {
-  return CHAINS.find((c) => c.id === id) ?? BASE_MAINNET;
+  if (id === undefined) return BASE_MAINNET;
+  return CHAINS.find((c) => c.id === id) ?? BASE_SEPOLIA;
 }
 
 // 활성 체인 컨텍스트 — WalletScreen 이 settings.chain_id 로 파생해 Provider 로 내려준다.

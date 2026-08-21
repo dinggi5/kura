@@ -122,8 +122,9 @@ impl Default for Settings {
             // 신규 기본 = 메인넷 (개발 39, 사장 지시). 이 지갑의 용도가 "AI 가 실제 결제를
             // 하는 지갑"이라 첫 화면부터 진짜 지갑이어야 한다. 실돈 안전은 체인이 아니라
             // 한도(위 5/20)·자율 결제 기본 꺼짐·비번 승인 기본이 맡는다.
-            // 옛 파일(필드 없음)은 default_chain_id(테스트넷)가, 깨진 파일은
-            // conservative()(테스트넷)가 따로 맡는다 — 여기는 "파일이 없는 첫 실행"만.
+            // 옛 파일(필드 없음)은 default_chain_id(테스트넷)가, 깨진 파일과 "설정 파일만
+            // 없는 기존 지갑"은 conservative()(테스트넷)가 따로 맡는다 — 여기는
+            // **진짜 신규**(지갑도 설정도 없는 첫 실행)만.
             chain_id: BASE_MAINNET.chain_id,
             autostart: None, // 아직 모름 → 첫 실행에서 OS 상태를 채택
             auto_check_update: false, // 신규 기본 꺼짐 (개발 39) — 필드 doc 참고
@@ -132,19 +133,31 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// **깨진 설정 파일**을 읽기 전용으로 대신할 보수적 기본값 — 체인만 테스트넷.
+    /// 기존 사용자를 대신할 보수적 기본값 — 체인만 테스트넷.
     ///
-    /// `Settings::default()` 가 메인넷이 되면서(개발 39) "파일이 깨졌다 → 기본값" 경로가
-    /// 테스트넷 사용자를 조용히 실돈 체인으로 옮길 수 있게 됐다. 파일이 **없는** 건 새
-    /// 사용자라 메인넷 기본이 맞지만, 파일이 **있는데 못 읽는** 건 기존 사용자의 설정을
-    /// 잃어버린 상황이라 돈 축은 안전한 쪽(테스트넷)으로 접는다. 저장은 어차피
-    /// read_settings_for_update 가 막는다 — 이건 표시·동작용 폴백일 뿐이다.
+    /// `Settings::default()` 가 메인넷이 되면서(개발 39) "기본값으로 접는" 경로가 기존
+    /// 테스트넷 사용자를 조용히 실돈 체인으로 옮길 수 있게 됐다. 그래서 기본값 폴백은
+    /// 둘로 갈린다: **진짜 신규**(지갑도 설정도 없음)만 메인넷 default() 를 받고,
+    /// 아래 두 경우는 이걸 받는다 —
+    /// ① 설정 파일이 **있는데 못 읽는** 경우(깨짐·권한): 표시·동작용 폴백. 저장은
+    ///    read_settings_for_update 가 막는다.
+    /// ② 설정 파일은 없는데 **지갑 파일이 있는** 경우(개발 31 이전 설치는 저장 버튼을
+    ///    눌러야만 settings.json 이 생겼다): 테스트넷 시절 사용자다 — 이 경우는
+    ///    reconcile 이 이 값을 저장해 테스트넷을 명시적으로 못박는다(코덱스 개발 39 P1).
     fn conservative() -> Self {
         Settings {
             chain_id: BASE_SEPOLIA.chain_id,
             ..Settings::default()
         }
     }
+}
+
+/// 지갑 파일이 이미 있는가 — settings.json 이 없을 때 "진짜 신규 설치"와 "설정 파일만
+/// 없는 기존 사용자"를 가른다. 암호화본(wallet.enc)과 옛 평문(wallet.json) 둘 다 본다.
+fn wallet_exists() -> bool {
+    jigap_dir()
+        .map(|d| d.join("wallet.enc").exists() || d.join("wallet.json").exists())
+        .unwrap_or(false)
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -156,18 +169,22 @@ fn settings_path() -> Result<PathBuf, String> {
 /// 판단만 떼어낸 `settings_for_read` 에 이유와 테스트가 있다.
 pub(crate) fn read_settings() -> Settings {
     match settings_path().map(fs::read_to_string) {
-        Ok(Ok(text)) => settings_for_read(Some(&text)),
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => settings_for_read(None),
+        Ok(Ok(text)) => settings_for_read(Some(&text), wallet_exists()),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            settings_for_read(None, wallet_exists())
+        }
         // 경로를 못 정했거나(홈 없음) 있는 파일을 못 읽었다(권한 등) — 깨진 파일과 같이 취급.
         _ => Settings::conservative(),
     }
 }
 
 /// `read_settings` 의 판단만 떼어낸 순수 함수 (IO 없이 테스트하려고).
-/// None = 파일 없음(첫 실행) → 신규 기본(메인넷). Some(깨진 JSON) → 보수적 기본(테스트넷).
-fn settings_for_read(existing: Option<&str>) -> Settings {
+/// None + 지갑 없음 = 진짜 신규 → 메인넷 기본. None + 지갑 있음 = 설정 파일이 없던
+/// 시절의 기존 사용자 → 테스트넷 보수. Some(깨진 JSON) → 테스트넷 보수.
+fn settings_for_read(existing: Option<&str>, wallet_exists: bool) -> Settings {
     match existing {
-        None => Settings::default(),
+        None if !wallet_exists => Settings::default(),
+        None => Settings::conservative(),
         Some(text) => serde_json::from_str(text).unwrap_or_else(|_| Settings::conservative()),
     }
 }
@@ -185,18 +202,24 @@ fn settings_for_read(existing: Option<&str>) -> Settings {
 pub(crate) fn read_settings_for_update() -> Option<Settings> {
     let path = settings_path().ok()?;
     match fs::read_to_string(&path) {
-        Ok(text) => settings_for_update(Some(&text)),
-        // 아직 파일이 없는 건 정상(첫 실행) — 기본값에서 시작해 만들면 된다.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => settings_for_update(None),
+        Ok(text) => settings_for_update(Some(&text), wallet_exists()),
+        // 아직 파일이 없는 건 정상 — 신규/기존(지갑 유무)에 맞는 기본값에서 시작해 만든다.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            settings_for_update(None, wallet_exists())
+        }
         // 있는데 못 읽었다(권한 등) → 덮어쓰지 않는다.
         Err(_) => None,
     }
 }
 
 /// `read_settings_for_update` 의 판단만 떼어낸 순수 함수 (IO 없이 테스트하려고).
-fn settings_for_update(existing: Option<&str>) -> Option<Settings> {
+/// 파일이 없을 때 지갑이 이미 있으면(설정 파일이 없던 시절의 기존 사용자) 보수적
+/// 기본(테스트넷)을 돌려준다 — reconcile 이 이걸 저장해 테스트넷을 명시적으로 못박는다.
+/// 진짜 신규(지갑도 없음)만 메인넷 기본을 받는다(코덱스 개발 39 P1).
+fn settings_for_update(existing: Option<&str>, wallet_exists: bool) -> Option<Settings> {
     match existing {
-        None => Some(Settings::default()),
+        None if !wallet_exists => Some(Settings::default()),
+        None => Some(Settings::conservative()),
         Some(text) => serde_json::from_str(text).ok(),
     }
 }
@@ -361,16 +384,23 @@ mod tests {
     // 실돈 체인으로 옮기는 문이 된다 — 깨진 파일은 돈 축을 테스트넷으로 접는다.
     #[test]
     fn read_fallbacks_split_new_vs_corrupt() {
-        // 파일 없음 = 첫 실행 → 신규 기본(메인넷).
-        assert_eq!(settings_for_read(None).chain_id, BASE_MAINNET.chain_id);
+        // 파일 없음 + 지갑 없음 = 진짜 신규 → 메인넷 기본.
+        assert_eq!(settings_for_read(None, false).chain_id, BASE_MAINNET.chain_id);
+        // 🔴 파일 없음 + 지갑 있음 = 개발 31 이전 설치(저장을 눌러야만 settings.json 이
+        // 생겼다) → 테스트넷 보수. 여기가 메인넷이면 기존 지갑이 조용히 실돈 체인으로
+        // 옮겨진다(코덱스 개발 39 P1).
+        assert_eq!(settings_for_read(None, true).chain_id, BASE_SEPOLIA.chain_id);
         // 깨진 JSON → 보수적(테스트넷). 나머지 값은 기본과 동일.
-        let c = settings_for_read(Some("{ 이건 JSON 이 아니다"));
+        let c = settings_for_read(Some("{ 이건 JSON 이 아니다"), true);
         assert_eq!(c.chain_id, BASE_SEPOLIA.chain_id);
         assert_eq!(c.single_usdc, "5");
         assert!(!c.auto_check_update);
         // 정상 JSON 은 그대로.
-        let ok = settings_for_read(Some(r#"{"single_usdc":"7","daily_usdc":"30",
-            "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#));
+        let ok = settings_for_read(
+            Some(r#"{"single_usdc":"7","daily_usdc":"30",
+            "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#),
+            true,
+        );
         assert_eq!(ok.chain_id, 8453);
         assert_eq!(ok.single_usdc, "7");
     }
@@ -406,18 +436,31 @@ mod tests {
     // 메인넷(8453)을 쓰던 사람이 아무 말 없이 테스트넷으로 돌아간다.
     #[test]
     fn corrupt_settings_are_never_overwritten() {
-        // 파일 없음 = 첫 실행 → 기본값에서 시작해도 안전하다.
-        assert!(settings_for_update(None).is_some());
+        // 파일 없음 + 지갑 없음 = 진짜 신규 → 메인넷 기본에서 시작해 만들어도 안전.
+        assert_eq!(
+            settings_for_update(None, false).expect("신규인데 None").chain_id,
+            BASE_MAINNET.chain_id
+        );
+        // 🔴 파일 없음 + 지갑 있음 = 설정 파일이 없던 시절의 기존 사용자 → 테스트넷
+        // 보수 기본을 저장해 못박는다. 메인넷을 저장하면 기존 지갑이 조용히 실돈
+        // 체인으로 옮겨진다(코덱스 개발 39 P1).
+        assert_eq!(
+            settings_for_update(None, true).expect("레거시인데 None").chain_id,
+            BASE_SEPOLIA.chain_id
+        );
 
         // 정상 JSON → 그대로 읽힌다.
-        let ok = settings_for_update(Some(r#"{"single_usdc":"7","daily_usdc":"30",
-            "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#));
+        let ok = settings_for_update(
+            Some(r#"{"single_usdc":"7","daily_usdc":"30",
+            "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#),
+            true,
+        );
         assert_eq!(ok.expect("정상 JSON 인데 None").chain_id, 8453);
 
         // 🔴 깨진 JSON·타입이 어긋난 값 → None. 호출부는 여기서 손을 떼야 한다.
-        assert!(settings_for_update(Some("{ 이건 JSON 이 아니다")).is_none());
-        assert!(settings_for_update(Some(r#"{"single_usdc": 5}"#)).is_none()); // 문자열이어야 함
-        assert!(settings_for_update(Some("")).is_none());
+        assert!(settings_for_update(Some("{ 이건 JSON 이 아니다"), true).is_none());
+        assert!(settings_for_update(Some(r#"{"single_usdc": 5}"#), true).is_none()); // 문자열이어야 함
+        assert!(settings_for_update(Some(""), true).is_none());
     }
 
     // 🔴 폼 저장이 앱 관리 필드를 지우면 안 된다.
