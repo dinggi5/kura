@@ -42,6 +42,8 @@ base64 = "0.22"
 zeroize = "1"
 # 잔액 조회 등에서 여러 RPC 호출을 동시에 (try_join! 매크로) + 일일 한도 장부 직렬화(sync::Mutex)
 tokio = { version = "1.52.3", features = ["macros", "sync"] }
+# statfs 로 볼륨이 읽기 전용(DMG 마운트)인지 판별 (connect — 코덱스 개발38 1차)
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }

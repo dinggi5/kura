@@ -43,15 +43,39 @@ pub(crate) struct ConnectStatus {
     pub(crate) temp_location: bool,
 }
 
-/// 임시 실행 위치인가 — App Translocation(/private/var/folders/…)과 DMG 마운트
-/// (/Volumes/…). 이 경로를 등록하면 마운트 해제·재실행 순간 죽는 등록이 남는다
-/// (코덱스 개발35 3차). 순수 심장부(테스트 대상).
-fn path_is_temp_location(p: &std::path::Path) -> bool {
+/// 임시 실행 위치인가 — App Translocation(/private/var/folders/…)과 DMG 마운트.
+/// 이 경로를 등록하면 마운트 해제·재실행 순간 죽는 등록이 남는다(코덱스 개발35 3차).
+///
+/// /Volumes 프리픽스만으로 자르면 외장 SSD·2차 볼륨에 설치한 정상 사용자까지
+/// 거부한다(코덱스 개발38 1차) — DMG 는 읽기 전용으로 마운트되고 외장 디스크는
+/// 쓰기 가능하니, /Volumes 는 볼륨이 읽기 전용일 때만 임시로 본다.
+/// 판정 로직은 순수 심장부(closure 주입, 테스트 대상)로 분리.
+fn classify_temp_location(
+    p: &std::path::Path,
+    volume_is_read_only: impl Fn(&std::path::Path) -> bool,
+) -> bool {
     // /var 는 /private/var 의 심링크라 current_exe 가 어느 쪽으로 줄지 몰라 둘 다 본다.
     let s = p.to_string_lossy();
-    ["/private/var/folders/", "/var/folders/", "/Volumes/"]
-        .iter()
-        .any(|prefix| s.starts_with(prefix))
+    if s.starts_with("/private/var/folders/") || s.starts_with("/var/folders/") {
+        return true;
+    }
+    s.starts_with("/Volumes/") && volume_is_read_only(p)
+}
+
+/// 이 경로가 놓인 파일시스템이 읽기 전용으로 마운트돼 있는가 (statfs MNT_RDONLY).
+/// 경로가 없거나 statfs 가 실패하면 false — 판별 불가로 사용자를 막지 않는다.
+fn volume_is_read_only(p: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statfs(c.as_ptr(), &mut fs) };
+    rc == 0 && (fs.f_flags & libc::MNT_RDONLY as u32) != 0
+}
+
+fn path_is_temp_location(p: &std::path::Path) -> bool {
+    classify_temp_location(p, volume_is_read_only)
 }
 
 /// 설치된 Kura.app 의 kura-mcp — mcpb 런처와 같은 후보 순서(/Applications → ~/Applications).
@@ -167,16 +191,27 @@ fn claude_json_kura_command(json: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// claude CLI 가 실제로 읽는 .claude.json 경로 — CLAUDE_CONFIG_DIR 이 잡혀 있으면
+/// 그 아래(코덱스 개발38 1차: 우리만 ~/.claude.json 을 보면 감지·스냅숏이 헛것을 본다).
+fn claude_json_path() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        if !dir.trim().is_empty() {
+            return Some(PathBuf::from(dir).join(".claude.json"));
+        }
+    }
+    dirs::home_dir().map(|h| h.join(".claude.json"))
+}
+
+fn read_claude_json() -> Option<String> {
+    std::fs::read_to_string(claude_json_path()?).ok()
+}
+
 fn registered_cli_command() -> Option<String> {
-    dirs::home_dir()
-        .and_then(|h| std::fs::read_to_string(h.join(".claude.json")).ok())
-        .and_then(|s| claude_json_kura_command(&s))
+    read_claude_json().and_then(|s| claude_json_kura_command(&s))
 }
 
 fn registered_cli_entry() -> Option<serde_json::Value> {
-    dirs::home_dir()
-        .and_then(|h| std::fs::read_to_string(h.join(".claude.json")).ok())
-        .and_then(|s| claude_json_kura_entry(&s))
+    read_claude_json().and_then(|s| claude_json_kura_entry(&s))
 }
 
 /// AI 연결 화면 상태 한 벌. 전부 로컬 파일 읽기라 폴링해도 싸다.
@@ -257,12 +292,13 @@ pub(crate) fn connect_claude_code() -> Result<(), String> {
     // 그걸 성공으로 치면 옛 경로를 가리키는 등록이 영영 안 고쳐진다(코덱스 개발35 1차).
     // 지우기 전에 옛 항목을 통째로 떠 둔다 — remove 만 성공하고 add 가 실패하면 멀쩡하던
     // 등록마저 사라지므로(코덱스 개발35 3차), 그때 add-json 으로 원복한다.
+    // remove 는 스냅숏 유무와 무관하게 **무조건** 돌린다(코덱스 개발38 1차): 우리가
+    // .claude.json 을 못 읽는 환경에서도 CLI 는 항목을 볼 수 있고, 그때 remove 를
+    // 건너뛰면 add 가 "already exists" 로 죽는다. 없어서 실패하는 remove 는 정상.
     let old_entry = registered_cli_entry();
-    if old_entry.is_some() {
-        let _ = Command::new(&cli)
-            .args(["mcp", "remove", "--scope", "user", "kura"])
-            .output();
-    }
+    let _ = Command::new(&cli)
+        .args(["mcp", "remove", "--scope", "user", "kura"])
+        .output();
     let failure = match Command::new(&cli)
         .args(["mcp", "add", "--scope", "user", "kura", "--"])
         .arg(&mcp)
@@ -343,28 +379,51 @@ mod tests {
         assert_eq!(claude_json_kura_entry("{}"), None);
     }
 
-    // 임시 실행 위치 감지: Translocation(/private/var/folders, /var/folders)과 DMG
-    // 마운트(/Volumes)는 임시, 설치·dev 경로는 아님 (코덱스 개발35 3차).
+    // 임시 실행 위치 감지 (코덱스 개발35 3차 + 개발38 1차): Translocation 은 무조건 임시,
+    // /Volumes 는 읽기 전용(DMG)일 때만 임시 — 외장 SSD 설치(쓰기 가능)는 정상 취급.
     #[test]
     fn temp_location_detection() {
         use std::path::Path;
-        assert!(path_is_temp_location(Path::new(
-            "/private/var/folders/ab/xyz/T/AppTranslocation/UUID/d/Kura.app/Contents/MacOS/kura"
-        )));
-        assert!(path_is_temp_location(Path::new(
-            "/var/folders/ab/xyz/T/AppTranslocation/UUID/d/Kura.app/Contents/MacOS/kura"
-        )));
-        assert!(path_is_temp_location(Path::new(
-            "/Volumes/Kura 0.1.2/Kura.app/Contents/MacOS/kura"
-        )));
-        assert!(!path_is_temp_location(Path::new(
-            "/Applications/Kura.app/Contents/MacOS/kura"
-        )));
-        assert!(!path_is_temp_location(Path::new(
-            "/Users/a/Applications/Kura.app/Contents/MacOS/kura"
-        )));
-        assert!(!path_is_temp_location(Path::new(
-            "/Users/a/프로젝트/지갑지갑/src-tauri/target/debug/kura"
-        )));
+        let ro = |_: &Path| true; // DMG 처럼 읽기 전용 볼륨
+        let rw = |_: &Path| false; // 외장 SSD 처럼 쓰기 가능 볼륨
+        assert!(classify_temp_location(
+            Path::new(
+                "/private/var/folders/ab/xyz/T/AppTranslocation/UUID/d/Kura.app/Contents/MacOS/kura"
+            ),
+            rw, // Translocation 은 볼륨 상태와 무관하게 임시
+        ));
+        assert!(classify_temp_location(
+            Path::new("/var/folders/ab/xyz/T/AppTranslocation/UUID/d/Kura.app/Contents/MacOS/kura"),
+            rw,
+        ));
+        assert!(classify_temp_location(
+            Path::new("/Volumes/Kura 0.1.2/Kura.app/Contents/MacOS/kura"),
+            ro,
+        ));
+        assert!(!classify_temp_location(
+            Path::new("/Volumes/외장SSD/Applications/Kura.app/Contents/MacOS/kura"),
+            rw,
+        ));
+        assert!(!classify_temp_location(
+            Path::new("/Applications/Kura.app/Contents/MacOS/kura"),
+            ro, // 프리픽스가 아니면 볼륨 상태는 보지도 않는다
+        ));
+        assert!(!classify_temp_location(
+            Path::new("/Users/a/Applications/Kura.app/Contents/MacOS/kura"),
+            rw,
+        ));
+        assert!(!classify_temp_location(
+            Path::new("/Users/a/프로젝트/지갑지갑/src-tauri/target/debug/kura"),
+            rw,
+        ));
+    }
+
+    // 실물 statfs 스모크: 루트 볼륨(쓰기 가능한 데이터 볼륨에 병합 마운트)은 이 판정에서
+    // 읽기 전용이 아니어야 하고, 없는 경로는 판별 불가 → false(사용자를 막지 않는다).
+    #[test]
+    fn volume_read_only_smoke() {
+        use std::path::Path;
+        assert!(!volume_is_read_only(Path::new("/Applications")));
+        assert!(!volume_is_read_only(Path::new("/no/such/path/anywhere")));
     }
 }

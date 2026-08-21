@@ -132,6 +132,13 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
   const mcpPath = status?.mcp_path ?? "/Applications/Kura.app/Contents/MacOS/kura-mcp";
   const shellQuoted = `'${mcpPath.replace(/'/g, `'\\''`)}'`;
   const cliCommand = `claude mcp add --scope user kura -- ${shellQuoted}`;
+  // 등록 대행이 실패했을 때의 수동 명령. 실패 시 옛 등록을 원복해 두므로(백엔드) kura
+  // 항목이 남아 있을 수 있고, bare add 는 "already exists" 로 거부된다(코덱스 개발38 1차)
+  // — 지우고 다시 등록하는 시퀀스로 안내한다(항목이 없으면 remove 만 실패하고 add 는 된다).
+  const reRegisterCommand = `claude mcp remove --scope user kura; ${cliCommand}`;
+  // 임시 위치(디스크 이미지·Translocation) 실행 + 설치본 없음 — 등록할 유효 경로 자체가
+  // 없다. 이 상태에선 모든 클라이언트 카드가 경로 대신 "옮기기" 안내를 보여준다.
+  const tempNoPath = !!status?.temp_location && !status.mcp_path;
 
   return (
     <main className={shell}>
@@ -249,9 +256,8 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
               등록돼 있어요. 아무 폴더에서나 <b className={em}>claude</b>를 실행하면 자동으로
               연결돼요.
             </p>
-          ) : status?.temp_location && !status.mcp_path ? (
-            // 임시 위치(디스크 이미지·Translocation) 실행 + 설치본 없음 — 등록할 경로가
-            // 없다. 임시 경로를 등록해 주면 마운트 해제 순간 죽는 등록이 남는다.
+          ) : tempNoPath ? (
+            // 임시 경로를 등록해 주면 마운트 해제 순간 죽는 등록이 남는다.
             <p>
               앱이 임시 위치(디스크 이미지 등)에서 실행 중이에요. Kura를{" "}
               <b className={em}>응용 프로그램</b> 폴더로 옮겨서 실행한 뒤 다시 연결하세요.
@@ -282,10 +288,10 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                   <p className="text-[11px] leading-relaxed text-red-500/90">{cliError}</p>
                   {/* 대행이 실패한 사람에게 남은 길 = 수동 등록. 에러 문구가 "아래 명령"을
                       가리키므로 여기서 실제로 보여준다. */}
-                  <CodeBox text={cliCommand} />
+                  <CodeBox text={reRegisterCommand} />
                   <button
                     type="button"
-                    onClick={() => copy(cliCommand)}
+                    onClick={() => copy(reRegisterCommand)}
                     className={cn(secondaryBtn, "w-full")}
                   >
                     {copied ? <Check size={13} /> : <Copy size={13} />} 명령 복사
@@ -313,6 +319,15 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
 
         {/* 그 외 MCP 클라이언트 — 경로만 있으면 어디든 */}
         <ClientCard icon={<Bot size={14} />} title="다른 AI 앱 (Cursor 등)">
+          {tempNoPath ? (
+            // 이 상태의 mcpPath 폴백(/Applications/…)은 아직 없는 파일이다 — 복사하게
+            // 두면 죽은 경로를 등록한다(코덱스 개발38 1차). 같은 "옮기기" 안내로 대체.
+            <p>
+              앱이 임시 위치(디스크 이미지 등)에서 실행 중이에요. Kura를{" "}
+              <b className={em}>응용 프로그램</b> 폴더로 옮겨서 실행하면 등록할 경로가
+              생겨요.
+            </p>
+          ) : (
           <div className="space-y-2.5">
             <p>
               MCP를 지원하는 앱이면 어디든 붙어요. 서버로 이 경로를 등록하면 돼요:
@@ -335,6 +350,7 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
               </button>
             </div>
           </div>
+          )}
         </ClientCard>
       </motion.div>
 
