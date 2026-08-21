@@ -4,13 +4,16 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::chain::{active_chain, chain_by_id, BASE_SEPOLIA};
+use crate::chain::{active_chain, chain_by_id, BASE_MAINNET, BASE_SEPOLIA};
 use crate::limits::{parse_eth_nonneg, parse_usdc_nonneg};
 use crate::store::{jigap_dir, write_json};
 
 /// 한도 기본값 (사용자가 설정 화면에서 조정 가능). 권한 모델의 가드레일.
-const DEFAULT_SINGLE_ETH: &str = "0.05";
-const DEFAULT_DAILY_ETH: &str = "0.2";
+/// 개발 39: 신규 기본 체인이 메인넷이 되면서 이 값이 곧 **실돈 한도**다.
+/// USDC 5/20 은 실돈으로도 "AI 소액 결제 가드레일"로 적정해 유지. ETH 는 가스·소액
+/// 이체용인데 0.05/0.2 는 달러 환산이 USDC 축의 수십 배라 축을 맞춰 0.01/0.05 로 내림.
+const DEFAULT_SINGLE_ETH: &str = "0.01";
+const DEFAULT_DAILY_ETH: &str = "0.05";
 const DEFAULT_SINGLE_USDC: &str = "5";
 const DEFAULT_DAILY_USDC: &str = "20";
 
@@ -20,6 +23,12 @@ const DEFAULT_AUTO_APPROVE_USDC: &str = "0";
 /// 세션 자동 잠금까지 유휴 시간(분). 0 = 유휴 잠금 안 함(앱 종료·긴급 잠금 시엔 항상 잠김).
 const DEFAULT_AUTO_LOCK_MINS: &str = "30";
 
+/// **옛 설정 파일**(chain_id 필드가 없던 개발 20 이전)의 serde 기본값 — 테스트넷.
+///
+/// 개발 39에서 신규 기본이 메인넷으로 바뀌었지만, 이건 "새 사용자"의 기본이지
+/// "필드가 없는 옛 파일"의 해석이 아니다. 옛 파일의 주인은 테스트넷 시절 사용자라,
+/// 여기를 메인넷으로 바꾸면 앱 업데이트 한 번에 조용히 실돈 체인으로 옮겨진다.
+/// 신규 기본(파일 자체가 없음)은 `Settings::default()` 가 맡는다.
 fn default_chain_id() -> u64 {
     BASE_SEPOLIA.chain_id
 }
@@ -76,9 +85,11 @@ pub(crate) struct Settings {
     #[serde(default)]
     pub(crate) autostart: Option<bool>,
 
-    /// 시작할 때 업데이트가 있는지 확인 (개발 31). 기본 켜짐.
-    /// 확인은 깃허브에 HTTPS GET 한 번이고, 그쪽엔 IP 와 현재 버전이 남는다.
-    /// 끄면 업데이트는 사용자가 설정에서 직접 눌러야만 확인된다(설치는 어느 쪽이든 수동).
+    /// 시작할 때 업데이트가 있는지 확인 (개발 31). **신규 기본 꺼짐 (개발 39)** —
+    /// 확인은 깃허브에 HTTPS GET 한 번이고, 그쪽엔 IP 와 현재 버전이 남는다. 로컬 전용을
+    /// 내세운 앱의 첫인상이 "말없이 바깥에 안 묻는다"여야 해서 기본을 껐다(켜는 게 선택).
+    /// serde 기본은 켜짐 유지 — 이 필드가 없는 옛 파일의 주인은 지금까지 켜진 채 써 온
+    /// 사용자라, 그 동작을 보존한다(신규 기본만 바꾼다). 신규는 `Settings::default()`.
     #[serde(default = "default_true")]
     pub(crate) auto_check_update: bool,
 }
@@ -108,9 +119,30 @@ impl Default for Settings {
             lock_on_blur: false,
             notify_auto: true,
             auto_trusted_only: true,
-            chain_id: BASE_SEPOLIA.chain_id, // Base Sepolia(테스트넷) — 신규/옛 설정은 항상 테스트넷
-            autostart: None,                 // 아직 모름 → 첫 실행에서 OS 상태를 채택
-            auto_check_update: true,
+            // 신규 기본 = 메인넷 (개발 39, 사장 지시). 이 지갑의 용도가 "AI 가 실제 결제를
+            // 하는 지갑"이라 첫 화면부터 진짜 지갑이어야 한다. 실돈 안전은 체인이 아니라
+            // 한도(위 5/20)·자율 결제 기본 꺼짐·비번 승인 기본이 맡는다.
+            // 옛 파일(필드 없음)은 default_chain_id(테스트넷)가, 깨진 파일은
+            // conservative()(테스트넷)가 따로 맡는다 — 여기는 "파일이 없는 첫 실행"만.
+            chain_id: BASE_MAINNET.chain_id,
+            autostart: None, // 아직 모름 → 첫 실행에서 OS 상태를 채택
+            auto_check_update: false, // 신규 기본 꺼짐 (개발 39) — 필드 doc 참고
+        }
+    }
+}
+
+impl Settings {
+    /// **깨진 설정 파일**을 읽기 전용으로 대신할 보수적 기본값 — 체인만 테스트넷.
+    ///
+    /// `Settings::default()` 가 메인넷이 되면서(개발 39) "파일이 깨졌다 → 기본값" 경로가
+    /// 테스트넷 사용자를 조용히 실돈 체인으로 옮길 수 있게 됐다. 파일이 **없는** 건 새
+    /// 사용자라 메인넷 기본이 맞지만, 파일이 **있는데 못 읽는** 건 기존 사용자의 설정을
+    /// 잃어버린 상황이라 돈 축은 안전한 쪽(테스트넷)으로 접는다. 저장은 어차피
+    /// read_settings_for_update 가 막는다 — 이건 표시·동작용 폴백일 뿐이다.
+    fn conservative() -> Self {
+        Settings {
+            chain_id: BASE_SEPOLIA.chain_id,
+            ..Settings::default()
         }
     }
 }
@@ -119,13 +151,25 @@ fn settings_path() -> Result<PathBuf, String> {
     Ok(jigap_dir()?.join("settings.json"))
 }
 
-/// 설정을 읽는다. 파일이 없거나 깨졌으면 기본값.
+/// 설정을 읽는다. 파일이 **없으면** 기본값(신규 = 메인넷), 있는데 **못 읽으면** 보수적
+/// 기본값(테스트넷). 이 구분은 개발 39에서 기본 체인이 메인넷이 된 순간 생긴 것 —
+/// 판단만 떼어낸 `settings_for_read` 에 이유와 테스트가 있다.
 pub(crate) fn read_settings() -> Settings {
-    settings_path()
-        .ok()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    match settings_path().map(fs::read_to_string) {
+        Ok(Ok(text)) => settings_for_read(Some(&text)),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => settings_for_read(None),
+        // 경로를 못 정했거나(홈 없음) 있는 파일을 못 읽었다(권한 등) — 깨진 파일과 같이 취급.
+        _ => Settings::conservative(),
+    }
+}
+
+/// `read_settings` 의 판단만 떼어낸 순수 함수 (IO 없이 테스트하려고).
+/// None = 파일 없음(첫 실행) → 신규 기본(메인넷). Some(깨진 JSON) → 보수적 기본(테스트넷).
+fn settings_for_read(existing: Option<&str>) -> Settings {
+    match existing {
+        None => Settings::default(),
+        Some(text) => serde_json::from_str(text).unwrap_or_else(|_| Settings::conservative()),
+    }
 }
 
 /// **덮어쓸 목적으로** 설정을 읽는다. 파일이 있는데 해석이 안 되면 `None`.
@@ -295,20 +339,40 @@ fn preserve_managed(settings: &mut Settings, from: &Settings) {
 mod tests {
     use super::*;
 
-    // 기본 설정값이 메모리 기준(단일 5 / 일일 20 USDC)과 일치해야 한다.
+    // 기본 설정값 — 신규 기본은 메인넷(개발 39), 한도는 실돈 가드레일 축(USDC 5/20, ETH 0.01/0.05).
     #[test]
     fn default_settings_values() {
         let s = Settings::default();
         assert_eq!(s.single_usdc, "5");
         assert_eq!(s.daily_usdc, "20");
-        assert_eq!(s.single_eth, "0.05");
-        assert_eq!(s.daily_eth, "0.2");
+        assert_eq!(s.single_eth, "0.01");
+        assert_eq!(s.daily_eth, "0.05");
         // Session 14: 자율 결제는 기본 꺼짐(0), 유휴 잠금 30분, RPC=공식, 자리비움잠금 꺼짐.
         assert_eq!(s.auto_approve_usdc, "0");
         assert_eq!(s.auto_lock_mins, "30");
         assert!(s.rpc_url.is_empty()); // 빈 값 = 활성 체인 공식 RPC 따라감
         assert!(!s.lock_on_blur);
-        assert_eq!(s.chain_id, BASE_SEPOLIA.chain_id); // 기본 = 테스트넷(실돈 안전)
+        assert_eq!(s.chain_id, BASE_MAINNET.chain_id); // 신규 기본 = 메인넷 (개발 39)
+        assert!(!s.auto_check_update); // 신규 기본 꺼짐 (개발 39, 프라이버시)
+    }
+
+    // 🔴 신규(파일 없음)와 깨진 파일(있는데 못 읽음)은 다른 답이어야 한다 (개발 39).
+    // 신규 기본이 메인넷이 된 순간, "깨졌으면 기본값" 경로가 테스트넷 사용자를 조용히
+    // 실돈 체인으로 옮기는 문이 된다 — 깨진 파일은 돈 축을 테스트넷으로 접는다.
+    #[test]
+    fn read_fallbacks_split_new_vs_corrupt() {
+        // 파일 없음 = 첫 실행 → 신규 기본(메인넷).
+        assert_eq!(settings_for_read(None).chain_id, BASE_MAINNET.chain_id);
+        // 깨진 JSON → 보수적(테스트넷). 나머지 값은 기본과 동일.
+        let c = settings_for_read(Some("{ 이건 JSON 이 아니다"));
+        assert_eq!(c.chain_id, BASE_SEPOLIA.chain_id);
+        assert_eq!(c.single_usdc, "5");
+        assert!(!c.auto_check_update);
+        // 정상 JSON 은 그대로.
+        let ok = settings_for_read(Some(r#"{"single_usdc":"7","daily_usdc":"30",
+            "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#));
+        assert_eq!(ok.chain_id, 8453);
+        assert_eq!(ok.single_usdc, "7");
     }
 
     // 옛 settings.json(자율 결제 필드 없음)도 손실 없이 로드되고 새 필드는 기본값이 된다.
@@ -329,7 +393,9 @@ mod tests {
         // 개발 31 필드도 옛 파일에서 안전하게 온다. autostart 기본은 **None**(false 아님) —
         // false 면 자동 시작을 켜 둔 기존 사용자가 "끔을 원했다"로 기록돼 복구 대상에서 빠진다.
         assert_eq!(s.autostart, None);
-        assert!(s.auto_check_update); // 업데이트 확인은 기본 켜짐
+        // 필드 없는 옛 파일은 켜짐 유지 — 그 사용자는 지금까지 켜진 채 써 왔다(동작 보존).
+        // 신규(파일 없음)만 꺼짐이 기본이다(개발 39, default_settings_values 참고).
+        assert!(s.auto_check_update);
     }
 
     // 🔴 해석 안 되는 설정 파일 위에 기본값을 쓰면 안 된다.

@@ -46,7 +46,7 @@ pub const BASE_MAINNET: ChainConfig = ChainConfig {
     explorer_tx_prefix: "https://basescan.org/tx/",
 };
 
-/// 사용자가 선택한 체인 ID. 없거나 chain_id 없는 옛 설정이면 Base Sepolia(84532).
+/// 사용자가 선택한 체인 ID. 파일 없음(첫 실행)=메인넷, 깨짐/옛 설정=테스트넷 — 본문 주석 참고.
 fn selected_chain_id() -> u64 {
     // 환경변수 우선 — 테스트·스크립트가 사용자의 라이브 settings.json 에 의존하지 않게 체인을 고정한다.
     // GUI 와 다른 (정상) 체인을 가리키더라도, 결제 요청에 각인된 chain_id 를 GUI 가 승인 시 대조해
@@ -84,13 +84,21 @@ fn selected_chain_id() -> u64 {
         struct ChainSel {
             chain_id: u64,
         }
-        crate::wallet::jigap_dir()
-            .ok()
-            .map(|d| d.join("settings.json"))
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str::<ChainSel>(&s).ok())
-            .map(|c| c.chain_id)
-            .unwrap_or(BASE_SEPOLIA.chain_id)
+        // 폴백은 GUI(src-tauri chain.rs selected_chain_id)와 같은 결로 갈라진다(개발 39 —
+        // 신규 기본이 메인넷이 되면서 "없음"과 "못 읽음"이 다른 답이 됐다). 두 프로세스가
+        // 여기서 어긋나면 잔액·결제가 서로 다른 체인을 본다:
+        // 파일 없음(첫 실행) = 메인넷(신규 기본) / 깨짐·못 읽음·홈 못 정함·옛 파일(필드
+        // 없음) = 테스트넷(보수적 — 기존 사용자를 조용히 실돈 체인으로 옮기지 않는다).
+        let Ok(dir) = crate::wallet::jigap_dir() else {
+            return BASE_SEPOLIA.chain_id;
+        };
+        match std::fs::read_to_string(dir.join("settings.json")) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BASE_MAINNET.chain_id,
+            Err(_) => BASE_SEPOLIA.chain_id,
+            Ok(text) => serde_json::from_str::<ChainSel>(&text)
+                .map(|c| c.chain_id)
+                .unwrap_or(BASE_SEPOLIA.chain_id),
+        }
     }
 }
 

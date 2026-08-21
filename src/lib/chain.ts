@@ -25,7 +25,7 @@ export interface ChainConfig {
   testnet: boolean;
 }
 
-/** Base Sepolia (테스트넷). 기본 체인. */
+/** Base Sepolia (테스트넷). 연습용 — 옛 파일·깨진 설정의 보수적 폴백 체인(백엔드 기준). */
 export const BASE_SEPOLIA: ChainConfig = {
   id: 84532,
   name: "Base Sepolia",
@@ -36,7 +36,7 @@ export const BASE_SEPOLIA: ChainConfig = {
   testnet: true,
 };
 
-/** Base 메인넷 (실제 자금). */
+/** Base 메인넷 (실제 자금). 신규 기본 체인 (개발 39). */
 export const BASE_MAINNET: ChainConfig = {
   id: 8453,
   name: "Base 메인넷",
@@ -47,16 +47,18 @@ export const BASE_MAINNET: ChainConfig = {
   testnet: false,
 };
 
-/** 선택 가능한 체인 목록 (설정 토글 순서). */
-export const CHAINS: ChainConfig[] = [BASE_SEPOLIA, BASE_MAINNET];
+/** 선택 가능한 체인 목록 (설정 토글 순서 — 메인넷이 왼쪽/기본, 개발 39). */
+export const CHAINS: ChainConfig[] = [BASE_MAINNET, BASE_SEPOLIA];
 
-/** chain_id → ChainConfig. 알 수 없거나 미정이면 테스트넷으로 폴백(안전 쪽). */
+/** chain_id → ChainConfig. 미정(설정 로드 전)이거나 알 수 없으면 메인넷 —
+ *  신규 기본과 일치시켜 로드 전후 화면이 흔들리지 않게 한다. 돈 축의 보수적 폴백
+ *  (깨진 파일=테스트넷)은 백엔드 read_settings 가 맡고, 여기엔 그 결과 id 만 온다. */
 export function chainFromId(id: number | undefined): ChainConfig {
-  return CHAINS.find((c) => c.id === id) ?? BASE_SEPOLIA;
+  return CHAINS.find((c) => c.id === id) ?? BASE_MAINNET;
 }
 
 // 활성 체인 컨텍스트 — WalletScreen 이 settings.chain_id 로 파생해 Provider 로 내려준다.
-const ChainContext = createContext<ChainConfig>(BASE_SEPOLIA);
+const ChainContext = createContext<ChainConfig>(BASE_MAINNET);
 export const ChainProvider = ChainContext.Provider;
 export function useChain(): ChainConfig {
   return useContext(ChainContext);

@@ -82,7 +82,7 @@ export function WalletScreen({
   const autoTried = useRef<Set<string>>(new Set());
   const autoBusy = useRef<string | null>(null);
 
-  // 활성 체인 — settings.chain_id 로 파생(미로드 시 테스트넷). 화면들엔 ChainProvider 로 내려준다.
+  // 활성 체인 — settings.chain_id 로 파생(미로드 시 메인넷 = 신규 기본, 개발 39). ChainProvider 로 내려준다.
   const chain = chainFromId(settings?.chain_id);
 
   const loadHistory = useCallback(() => {

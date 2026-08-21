@@ -70,17 +70,32 @@ pub(crate) async fn with_pinned_chain<F: std::future::Future>(chain_id: u64, fut
     PINNED_CHAIN.scope(chain_id, fut).await
 }
 
-/// 사용자가 선택한 체인 ID. 작업이 체인을 고정했으면 그 값, 아니면 settings.json(없거나 chain_id 없는
-/// 옛 설정이면 Base Sepolia 84532).
+/// 사용자가 선택한 체인 ID. 작업이 체인을 고정했으면 그 값, 아니면 settings.json.
+///
+/// 폴백은 settings::read_settings 와 같은 결로 갈라진다(개발 39 — 신규 기본이 메인넷이
+/// 되면서 "없음"과 "못 읽음"이 다른 답이 됐다):
+/// - 파일 **없음** = 첫 실행 → 메인넷(신규 기본, `Settings::default()` 와 일치)
+/// - 파일이 있는데 깨짐/못 읽음/홈 못 정함 → 테스트넷(보수적 — 기존 사용자를 조용히
+///   실돈 체인으로 옮기지 않는다)
+/// - 정상 JSON 인데 chain_id 없음(개발 20 이전 옛 파일) → 테스트넷(그 시절 사용자 보존)
 fn selected_chain_id() -> u64 {
     if let Ok(id) = PINNED_CHAIN.try_with(|id| *id) {
         return id; // 작업이 고정한 체인 — 도중에 settings 가 바뀌어도 불변
     }
-    jigap_dir()
-        .ok()
-        .map(|d| d.join("settings.json"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<ChainSel>(&s).ok())
+    let Ok(dir) = jigap_dir() else {
+        return BASE_SEPOLIA.chain_id;
+    };
+    match std::fs::read_to_string(dir.join("settings.json")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BASE_MAINNET.chain_id,
+        Err(_) => BASE_SEPOLIA.chain_id,
+        Ok(text) => chain_id_in(&text),
+    }
+}
+
+/// settings.json 본문에서 chain_id 를 뽑는다(깨졌거나 필드가 없으면 테스트넷).
+/// selected_chain_id 의 파싱 판단만 떼어낸 순수 함수 (IO 없이 테스트하려고).
+fn chain_id_in(text: &str) -> u64 {
+    serde_json::from_str::<ChainSel>(text)
         .map(|c| c.chain_id)
         .unwrap_or(BASE_SEPOLIA.chain_id)
 }
@@ -157,5 +172,15 @@ mod tests {
         assert!(chain_by_id(1).is_none());
         assert_eq!(chain_by_id(8453).unwrap().chain_id, 8453);
         assert_eq!(chain_by_id(84_532).unwrap().chain_id, 84_532);
+    }
+
+    // settings.json 본문 → chain_id 해석 (개발 39). 깨진 JSON·필드 없는 옛 파일은
+    // 테스트넷으로 접는다 — "파일 없음 = 메인넷"은 selected_chain_id 의 IO 분기가 맡는다.
+    #[test]
+    fn chain_id_in_falls_back_conservatively() {
+        assert_eq!(chain_id_in(r#"{"chain_id":8453}"#), BASE_MAINNET.chain_id);
+        assert_eq!(chain_id_in(r#"{"chain_id":84532}"#), BASE_SEPOLIA.chain_id);
+        assert_eq!(chain_id_in(r#"{"single_usdc":"5"}"#), BASE_SEPOLIA.chain_id); // 옛 파일
+        assert_eq!(chain_id_in("{ 깨진 JSON"), BASE_SEPOLIA.chain_id);
     }
 }

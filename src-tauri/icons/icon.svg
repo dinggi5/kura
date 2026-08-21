@@ -1,0 +1,24 @@
+<!-- 앱 아이콘 정본 (개발 39) — 쿠라(蔵) 곳간: 맞배지붕(へ) + 곳간 문 + 자물쇠 점.
+     트레이 아이콘(tray-normal.svg = 문+점)과 같은 모티프의 확장이다.
+     아이보리 바탕(디자인 토큰 ivory 계열) + 잉크 획 + 토스블루 1점 — 채운 변형(F안)은
+     64px 에서 점이 죽고 카메라처럼 읽혀 윤곽선 안(E안)으로 확정(개발 39 실측 비교).
+     수정 시: rsvg-convert -w 1024 -h 1024 로 PNG 뽑아 `npx tauri icon` → docs/icon.png 동기화. -->
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FCFBF6"/>
+      <stop offset="1" stop-color="#EFEDE4"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS Big Sur 규격: 1024 캔버스에 824 스퀘어클, 여백 100 -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <rect x="102" y="102" width="820" height="820" rx="183" fill="none" stroke="#1A1814" stroke-opacity="0.06" stroke-width="4"/>
+  <!-- 지붕 (へ) -->
+  <path d="M 296 356 L 512 262 L 728 356" fill="none" stroke="#1A1814" stroke-width="48"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 곳간 문 -->
+  <rect x="356" y="446" width="312" height="312" rx="88" fill="none" stroke="#1A1814"
+        stroke-width="48" stroke-linejoin="round"/>
+  <!-- 자물쇠 점 — 토스블루 1점 (accent) -->
+  <circle cx="512" cy="602" r="48" fill="#3182F6"/>
+</svg>

@@ -269,86 +269,83 @@ export function SettingsScreen({
 
               <div className="mt-5 rounded-[var(--radius-card)] border border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] px-4 py-4">
                 <div className="grid grid-cols-2 gap-3">
-                  <label className="block">
-                    <span className="text-[11px] text-[var(--color-ink-500)]">자율 한도 (USDC)</span>
-                    <input
-                      value={s.auto_approve_usdc}
-                      onChange={(e) => field("auto_approve_usdc", e.target.value)}
-                      inputMode="decimal"
-                      className={cn(inputBase, "mt-1.5 num text-[14px]")}
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="text-[11px] text-[var(--color-ink-500)]">자동 잠금 (분)</span>
-                    <input
-                      value={s.auto_lock_mins}
-                      onChange={(e) => field("auto_lock_mins", e.target.value)}
-                      inputMode="numeric"
-                      className={cn(inputBase, "mt-1.5 num text-[14px]")}
-                    />
-                  </label>
+                  <UnitInput
+                    label="자율 한도"
+                    unit="USDC"
+                    value={s.auto_approve_usdc}
+                    onChange={(v) => field("auto_approve_usdc", v)}
+                  />
+                  <UnitInput
+                    label="자동 잠금"
+                    unit="분"
+                    intOnly
+                    value={s.auto_lock_mins}
+                    onChange={(v) => field("auto_lock_mins", v)}
+                  />
                 </div>
                 <p className="mt-2.5 text-[11px] text-[var(--color-ink-300)]">
                   유휴 시간이 지나면 자동으로 다시 잠겨요. 0이면 유휴 잠금 안 함(앱 종료·긴급 잠금 시엔 항상 잠김).
                 </p>
               </div>
 
-              {/* 자리비움 자동 잠금 (Session 14) */}
-              <ToggleRow
-                title="자리 비우면 자동 잠금"
-                desc="다른 앱으로 전환하거나 화면이 잠기면 세션을 즉시 잠가요."
-                checked={s.lock_on_blur}
-                onToggle={() => toggle("lock_on_blur")}
-              />
-
-              {/* 자율 결제 알림 (Session 15) — 비번 없이 나간 돈을 보호자가 사후 인지 */}
-              <ToggleRow
-                title="자율 결제 알림"
-                desc="비번 없이 자동 승인된 결제를 macOS 알림으로 알려줘요."
-                checked={s.notify_auto}
-                onToggle={() => toggle("notify_auto")}
-              />
-
-              {/* 자율 결제 화이트리스트 (Session 16) — 처음 보는 주소는 자율 대상에서 제외 */}
-              <ToggleRow
-                title="자율 결제 화이트리스트"
-                desc="비번으로 승인한 적 있는 주소에만 자율 결제를 허용해요. 새 주소는 첫 결제만 비번이 필요해요."
-                checked={s.auto_trusted_only}
-                onToggle={() => toggle("auto_trusted_only")}
-              />
-
-              {/* 화이트리스트 주소 (Session 17) — 목록은 모달로 (많아지면 설정이 길어지니) */}
-              <div className="mt-4 flex items-center justify-between rounded-[var(--radius-card)] border border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] px-4 py-3.5">
-                <div className="min-w-0 pr-3">
-                  <p className="text-[13px] tracking-tight">화이트리스트 주소</p>
-                  <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-ink-300)]">
-                    {trusted === null
-                      ? "불러오는 중…"
-                      : trusted.length === 0
-                        ? "아직 없어요 — 비번으로 승인하면 자동으로 학습돼요."
-                        : `${trusted.length}개 학습됨`}
-                  </p>
+              {/* 자율 결제 부속 토글·목록 — 낱개 카드 대신 구분선 리스트 하나로(개발 39 정리).
+                  상자 안 상자가 다섯 겹 쌓이던 걸 한 컨테이너로 접어 시각 소음을 줄인다. */}
+              <RowGroup>
+                {/* 자리비움 자동 잠금 (Session 14) */}
+                <ToggleRow
+                  title="자리 비우면 자동 잠금"
+                  desc="다른 앱으로 전환하거나 화면이 잠기면 세션을 즉시 잠가요."
+                  checked={s.lock_on_blur}
+                  onToggle={() => toggle("lock_on_blur")}
+                />
+                {/* 자율 결제 알림 (Session 15) — 비번 없이 나간 돈을 보호자가 사후 인지 */}
+                <ToggleRow
+                  title="자율 결제 알림"
+                  desc="비번 없이 자동 승인된 결제를 macOS 알림으로 알려줘요."
+                  checked={s.notify_auto}
+                  onToggle={() => toggle("notify_auto")}
+                />
+                {/* 자율 결제 화이트리스트 (Session 16) — 처음 보는 주소는 자율 대상에서 제외 */}
+                <ToggleRow
+                  title="자율 결제 화이트리스트"
+                  desc="비번으로 승인한 적 있는 주소에만 자율 결제를 허용해요. 새 주소는 첫 결제만 비번이 필요해요."
+                  checked={s.auto_trusted_only}
+                  onToggle={() => toggle("auto_trusted_only")}
+                />
+                {/* 화이트리스트 주소 (Session 17) — 목록은 모달로 (많아지면 설정이 길어지니) */}
+                <div className="flex items-center justify-between px-4 py-3.5">
+                  <div className="min-w-0 pr-3">
+                    <p className="text-[13px] tracking-tight">화이트리스트 주소</p>
+                    <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-ink-300)]">
+                      {trusted === null
+                        ? "불러오는 중…"
+                        : trusted.length === 0
+                          ? "아직 없어요 — 비번으로 승인하면 자동으로 학습돼요."
+                          : `${trusted.length}개 학습됨`}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowTrusted(true)}
+                    disabled={!trusted || trusted.length === 0}
+                    className="shrink-0 text-[12px] text-[var(--color-accent)] disabled:text-[var(--color-ink-300)] hover:underline transition-colors"
+                  >
+                    주소 보기
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setShowTrusted(true)}
-                  disabled={!trusted || trusted.length === 0}
-                  className="shrink-0 text-[12px] text-[var(--color-accent)] disabled:text-[var(--color-ink-300)] hover:underline transition-colors"
-                >
-                  주소 보기
-                </button>
-              </div>
+              </RowGroup>
             </Section>
 
-            {/* 네트워크 (개발 20) — 테스트넷 ↔ 메인넷 런타임 전환. 메인넷은 실제 자금. */}
+            {/* 네트워크 (개발 20) — 메인넷 ↔ 테스트넷 런타임 전환. 개발 39부터 메인넷이
+                왼쪽·기본(CHAINS 순서). 메인넷 선택 시엔 실돈 경고를 콜아웃으로 올려 위계를 준다. */}
             <Section
               icon={<Network size={13} className="text-[var(--color-accent)]" />}
               title="네트워크"
               delay={0.08}
             >
               <p className="text-[13px] leading-relaxed text-[var(--color-ink-500)]">
-                잔액·결제가 이뤄지는 블록체인이에요. 테스트넷은 가짜 코인으로 연습하고, 메인넷은 실제
-                자금이 오가요. 체인별로 한도·사용액·내역·화이트리스트가 따로 관리돼요.
+                잔액·결제가 이뤄지는 블록체인이에요. 메인넷은 실제 자금이 오가고, 테스트넷은 가짜
+                코인으로 연습해요. 체인별로 한도·사용액·내역·화이트리스트가 따로 관리돼요.
               </p>
               <div className="mt-4 grid grid-cols-2 gap-2">
                 {CHAINS.map((c) => {
@@ -367,7 +364,7 @@ export function SettingsScreen({
                     >
                       {c.name}
                       <span className="block mt-0.5 text-[10px] text-[var(--color-ink-300)]">
-                        {c.testnet ? "테스트넷" : "실제 자금"}
+                        {c.testnet ? "연습용 · 가짜 코인" : "실제 자금"}
                       </span>
                     </button>
                   );
@@ -378,9 +375,13 @@ export function SettingsScreen({
                   바꾼 뒤 저장을 누르면 적용돼요.
                 </p>
               ) : (
-                <p className="mt-2.5 text-[11px] leading-relaxed text-amber-600 dark:text-amber-500">
-                  메인넷은 실제 USDC가 오가요. 운영 예산만 소액 충전하고 한도를 꼭 확인하세요. 저장을 눌러야 적용돼요.
-                </p>
+                // 실돈 경고는 문장 한 줄이 아니라 콜아웃 — 일상 설정과 위험 설정의 시각 위계 분리(개발 39).
+                <div className="mt-2.5 rounded-[var(--radius-card)] border border-amber-500/30 bg-amber-500/5 px-3.5 py-2.5">
+                  <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-500">
+                    메인넷은 실제 USDC·ETH가 오가요. 운영 예산만 소액 충전하고, 위의 한도를 확인해
+                    두세요. 바꾼 뒤 저장을 누르면 적용돼요.
+                  </p>
+                </div>
               )}
             </Section>
 
@@ -436,12 +437,14 @@ export function SettingsScreen({
                 창을 닫아도 앱은 종료되지 않고 백그라운드에서 결제 요청을 받아요. 완전히 끄려면
                 ⌘Q를 누르세요.
               </p>
-              <ToggleRow
-                title="로그인 시 자동 시작"
-                desc="Mac에 로그인하면 지갑이 자동으로 켜져요. 끄고 켜는 즉시 적용돼요."
-                checked={autostart ?? false}
-                onToggle={toggleAutostart}
-              />
+              <RowGroup>
+                <ToggleRow
+                  title="로그인 시 자동 시작"
+                  desc="Mac에 로그인하면 지갑이 자동으로 켜져요. 끄고 켜는 즉시 적용돼요."
+                  checked={autostart ?? false}
+                  onToggle={toggleAutostart}
+                />
+              </RowGroup>
             </Section>
 
             {error && <p className="text-[12px] text-red-500 font-mono break-all">{error}</p>}
@@ -460,7 +463,8 @@ export function SettingsScreen({
         {/* 정보 — 읽기 전용이라 fieldset(저장 중 잠금) 밖에 두고, 설정 로드가 실패해도 보이게
             조건 분기 바깥에 둔다. 버전·소스 링크는 "이 앱이 뭘 하는지 직접 확인할 통로"라
             설정이 안 열리는 상황일수록 오히려 더 필요하다. */}
-        <AboutSection update={update} autoCheck={current?.auto_check_update ?? true} />
+        {/* 폴백 false = 신규 기본(개발 39). 실제 값은 백엔드 설정이 로드되면 그걸 따른다. */}
+        <AboutSection update={update} autoCheck={current?.auto_check_update ?? false} />
       </div>
 
       <AnimatePresence>
@@ -688,7 +692,6 @@ function TrustedAddrsModal({
   );
 }
 
-/** 설정 화면 공용 on/off 토글 행 (자리비움 잠금·자율 결제 알림 등). */
 /** 업데이트 블록 (개발 31) — 정보 카드 안.
  *
  *  여기가 **설치 승인 화면**이다. 지갑에 새 코드를 넣는 일이라, 버전과 릴리스 노트를
@@ -795,25 +798,7 @@ function UpdateBlock({
             앱을 켤 때 새 버전이 있는지 깃허브에 물어봐요(현재 버전과 IP가 그쪽에 남아요).
           </p>
         </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={autoCheckOn}
-          onClick={onToggleAutoCheck}
-          className={cn(
-            "shrink-0 relative w-10 h-6 rounded-full transition-colors duration-[var(--duration-base)]",
-            autoCheckOn
-              ? "bg-[var(--color-accent)]"
-              : "bg-[var(--color-ivory-400)] dark:bg-[var(--color-night-700)]",
-          )}
-        >
-          <span
-            className={cn(
-              "absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all duration-[var(--duration-base)]",
-              autoCheckOn ? "left-5" : "left-1",
-            )}
-          />
-        </button>
+        <Switch checked={autoCheckOn} onToggle={onToggleAutoCheck} label="시작할 때 확인" />
       </div>
     </div>
   );
@@ -826,6 +811,57 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** 관련 행들을 하나의 카드로 묶는 구분선 리스트 (개발 39 정리 — 토스/Apple 설정 관용구).
+ *  행마다 테두리 상자를 두르지 않고, 컨테이너 하나 + 헤어라인 구분선으로 접는다. */
+function RowGroup({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className={cn(
+        "mt-4 rounded-[var(--radius-card)] border border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)]",
+        "divide-y divide-[var(--color-ivory-300)] dark:divide-[var(--color-night-700)]",
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** 공용 on/off 스위치 — ToggleRow 와 업데이트 블록이 같은 스위치를 쓴다(개발 39 정리 전엔
+ *  같은 마크업이 두 벌 복사돼 있었다). 접근성 라벨은 행 제목을 그대로 받는다. */
+function Switch({
+  checked,
+  onToggle,
+  label,
+}: {
+  checked: boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={onToggle}
+      className={cn(
+        "shrink-0 relative w-10 h-6 rounded-full transition-colors duration-[var(--duration-base)]",
+        checked
+          ? "bg-[var(--color-accent)]"
+          : "bg-[var(--color-ivory-400)] dark:bg-[var(--color-night-700)]",
+      )}
+    >
+      <span
+        className={cn(
+          "absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all duration-[var(--duration-base)]",
+          checked ? "left-5" : "left-1",
+        )}
+      />
+    </button>
+  );
+}
+
+/** 설정 화면 공용 on/off 토글 행 — RowGroup 안에서 쓴다(테두리는 그룹이 두른다). */
 function ToggleRow({
   title,
   desc,
@@ -838,31 +874,49 @@ function ToggleRow({
   onToggle: () => void;
 }) {
   return (
-    <div className="mt-4 flex items-center justify-between rounded-[var(--radius-card)] border border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] px-4 py-3.5">
+    <div className="flex items-center justify-between px-4 py-3.5">
       <div className="min-w-0 pr-3">
         <p className="text-[13px] tracking-tight">{title}</p>
         <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-ink-300)]">{desc}</p>
       </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        onClick={onToggle}
-        className={cn(
-          "shrink-0 relative w-10 h-6 rounded-full transition-colors duration-[var(--duration-base)]",
-          checked
-            ? "bg-[var(--color-accent)]"
-            : "bg-[var(--color-ivory-400)] dark:bg-[var(--color-night-700)]",
-        )}
-      >
-        <span
-          className={cn(
-            "absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all duration-[var(--duration-base)]",
-            checked ? "left-5" : "left-1",
-          )}
-        />
-      </button>
+      <Switch checked={checked} onToggle={onToggle} label={title} />
     </div>
+  );
+}
+
+/** 단위가 붙는 숫자 입력 — 단위를 필드 안 오른쪽에 고정해 표기·정렬을 통일한다(개발 39 정리).
+ *  전엔 라벨에 "(USDC)" "(분)" 처럼 괄호로 섞여 붙어 있었다. */
+function UnitInput({
+  label,
+  unit,
+  value,
+  onChange,
+  intOnly = false,
+}: {
+  label: string;
+  unit: string;
+  value: string;
+  onChange: (v: string) => void;
+  intOnly?: boolean;
+}) {
+  return (
+    <label className="block">
+      <span className="text-[11px] text-[var(--color-ink-500)]">{label}</span>
+      <span className="relative block mt-1.5">
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          inputMode={intOnly ? "numeric" : "decimal"}
+          className={cn(inputBase, "num text-[14px] pr-14")}
+        />
+        <span
+          aria-hidden
+          className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-[11px] text-[var(--color-ink-300)]"
+        >
+          {unit}
+        </span>
+      </span>
+    </label>
   );
 }
 
@@ -892,24 +946,8 @@ function LimitGroup({
         </span>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-3">
-        <label className="block">
-          <span className="text-[11px] text-[var(--color-ink-500)]">단일 거래 한도</span>
-          <input
-            value={single}
-            onChange={(e) => onSingle(e.target.value)}
-            inputMode="decimal"
-            className={cn(inputBase, "mt-1.5 num text-[14px]")}
-          />
-        </label>
-        <label className="block">
-          <span className="text-[11px] text-[var(--color-ink-500)]">하루 누적 한도</span>
-          <input
-            value={daily}
-            onChange={(e) => onDaily(e.target.value)}
-            inputMode="decimal"
-            className={cn(inputBase, "mt-1.5 num text-[14px]")}
-          />
-        </label>
+        <UnitInput label="단일 거래 한도" unit={token} value={single} onChange={onSingle} />
+        <UnitInput label="하루 누적 한도" unit={token} value={daily} onChange={onDaily} />
       </div>
     </div>
   );
