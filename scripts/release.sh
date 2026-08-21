@@ -1344,6 +1344,9 @@ PY
   릴리스   https://github.com/$GH_REPO_SLUG/releases/tag/$VERSION_TAG
   캐스크   brew upgrade --cask kura   (새로 깔 사람은 brew install --cask dinggi5/tap/kura)
 
+  다음 단계 (개발 37): MCP 공식 레지스트리에 이 버전을 발행할 것
+    ./scripts/publish-registry.sh    (server.json 갱신분은 커밋)
+
   남은 확인은 사람이 하는 게 낫다:
     - 릴리스 페이지에서 노트가 제대로 보이는지
     - 이미 깔린 앱에서 업데이트 카드가 이 버전을 잡는지

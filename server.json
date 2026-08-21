@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.dinggi5/kura",
+  "title": "Kura",
+  "description": "Local Ethereum wallet for AI agents - balances, history, x402 payments on Base. Keys stay local.",
+  "version": "0.1.2",
+  "websiteUrl": "https://dinggi5.github.io/kura/",
+  "repository": {
+    "url": "https://github.com/dinggi5/kura",
+    "source": "github"
+  },
+  "icons": [
+    {
+      "src": "https://dinggi5.github.io/kura/icon.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/dinggi5/kura/releases/download/v0.1.2/kura-0.1.2.mcpb",
+      "version": "0.1.2",
+      "fileSha256": "587a57dd3eabf4a3f806cbfd66718ea7fbfdb05899b4f712c2bbd321befac1e4",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
