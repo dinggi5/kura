@@ -16,6 +16,12 @@ const DEFAULT_SINGLE_ETH: &str = "0.01";
 const DEFAULT_DAILY_ETH: &str = "0.05";
 const DEFAULT_SINGLE_USDC: &str = "5";
 const DEFAULT_DAILY_USDC: &str = "20";
+/// 0.2.0 이전의 ETH 기본 한도 — 기존 사용자를 대신하는 `conservative()` 가 쓴다.
+/// 설정 파일이 없던 시절의 지갑이 그때 실제로 적용받던 값이라, 새 기본(0.01/0.05)을
+/// 못박으면 되던 송금이 말없이 막힌다(코덱스 개발 39 2차 P2 — 릴리스 노트의
+/// "기존 한도 안 건드림" 약속과도 어긋난다).
+const LEGACY_SINGLE_ETH: &str = "0.05";
+const LEGACY_DAILY_ETH: &str = "0.2";
 
 /// 자율 결제 기본값 (Session 14). 자율 한도 0 = 자율 결제 꺼짐 = 항상 사람 비번 승인(=기존 동작).
 /// 보호자가 설정에서 켜야만 작동한다 → 디폴트는 보안 우선.
@@ -147,6 +153,9 @@ impl Settings {
     fn conservative() -> Self {
         Settings {
             chain_id: BASE_SEPOLIA.chain_id,
+            // 한도도 그 시절 값 그대로 — 낮아진 새 기본은 진짜 신규만 받는다(2차 P2).
+            single_eth: LEGACY_SINGLE_ETH.into(),
+            daily_eth: LEGACY_DAILY_ETH.into(),
             ..Settings::default()
         }
     }
@@ -390,6 +399,10 @@ mod tests {
         // 생겼다) → 테스트넷 보수. 여기가 메인넷이면 기존 지갑이 조용히 실돈 체인으로
         // 옮겨진다(코덱스 개발 39 P1).
         assert_eq!(settings_for_read(None, true).chain_id, BASE_SEPOLIA.chain_id);
+        // 🔴 그 시절 ETH 한도(0.05/0.2)도 그대로 — 낮아진 새 기본을 못박으면 되던 송금이
+        // 말없이 막힌다(코덱스 2차 P2). USDC 는 변경 없음(5/20).
+        assert_eq!(settings_for_read(None, true).single_eth, "0.05");
+        assert_eq!(settings_for_read(None, true).daily_eth, "0.2");
         // 깨진 JSON → 보수적(테스트넷). 나머지 값은 기본과 동일.
         let c = settings_for_read(Some("{ 이건 JSON 이 아니다"), true);
         assert_eq!(c.chain_id, BASE_SEPOLIA.chain_id);
