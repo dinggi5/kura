@@ -93,5 +93,8 @@ export type ConnectStatus = {
   cli_registered: boolean;
   /** kura 등록은 있는데 다른 경로를 가리킴(옛 설치 등) — 재등록 안내 대상. */
   cli_registered_other: boolean;
+  /** 등록·안내용 kura-mcp 경로. 임시 위치 실행 중이면 설치본으로 해석된 값. */
   mcp_path: string | null;
+  /** 임시 위치(App Translocation·DMG)에서 실행 중 — mcp_path 까지 없으면 이전 안내. */
+  temp_location: boolean;
 };

@@ -43,8 +43,11 @@ RESOURCE_FILE="src-tauri/resources/kura.mcpb"
 # 이 스크립트는 beforeBuild/DevCommand 에서도 불린다. release.sh 는 자격증명을 싣기
 # **전에** 직접 부르고, 빌드 안쪽 호출은 여기서 아무것도 안 하고 끝나야 한다 —
 # 자격증명 실린 환경에서 npx(임의 노드 코드)가 새로 돌지 않게.
+# 이 스크립트 자신과 package-lock.json 도 소스다(코덱스 개발35 3차): 패킹 방식이나
+# mcpb 패커 버전이 바뀌어도 입력 파일들 mtime 은 그대로라 옛 산출물이 "최신"으로 통과한다.
 SOURCES=("$SRC_DIR/manifest.json" "$SRC_DIR/server/kura-mcp" \
-  "src-tauri/icons/icon.png" "src-tauri/tauri.conf.json")
+  "src-tauri/icons/icon.png" "src-tauri/tauri.conf.json" \
+  "scripts/build-mcpb.sh" "package-lock.json")
 needs_build() {
   local out src
   for out in "$MCPB_FILE" "$RESOURCE_FILE"; do

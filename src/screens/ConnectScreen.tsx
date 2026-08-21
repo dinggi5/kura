@@ -249,6 +249,13 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
               등록돼 있어요. 아무 폴더에서나 <b className={em}>claude</b>를 실행하면 자동으로
               연결돼요.
             </p>
+          ) : status?.temp_location && !status.mcp_path ? (
+            // 임시 위치(디스크 이미지·Translocation) 실행 + 설치본 없음 — 등록할 경로가
+            // 없다. 임시 경로를 등록해 주면 마운트 해제 순간 죽는 등록이 남는다.
+            <p>
+              앱이 임시 위치(디스크 이미지 등)에서 실행 중이에요. Kura를{" "}
+              <b className={em}>응용 프로그램</b> 폴더로 옮겨서 실행한 뒤 다시 연결하세요.
+            </p>
           ) : status?.cli_path ? (
             <div className="space-y-2.5">
               <p>
@@ -271,7 +278,19 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                 )}
               </button>
               {cliError && (
-                <p className="text-[11px] leading-relaxed text-red-500/90">{cliError}</p>
+                <div className="space-y-2">
+                  <p className="text-[11px] leading-relaxed text-red-500/90">{cliError}</p>
+                  {/* 대행이 실패한 사람에게 남은 길 = 수동 등록. 에러 문구가 "아래 명령"을
+                      가리키므로 여기서 실제로 보여준다. */}
+                  <CodeBox text={cliCommand} />
+                  <button
+                    type="button"
+                    onClick={() => copy(cliCommand)}
+                    className={cn(secondaryBtn, "w-full")}
+                  >
+                    {copied ? <Check size={13} /> : <Copy size={13} />} 명령 복사
+                  </button>
+                </div>
               )}
             </div>
           ) : (

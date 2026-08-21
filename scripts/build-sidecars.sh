@@ -48,7 +48,9 @@ fi
 SRC_NEWEST=""
 while IFS= read -r f; do
   [[ -z "$SRC_NEWEST" || "$f" -nt "$SRC_NEWEST" ]] && SRC_NEWEST="$f"
-done < <(find kura-mcp/src kura-mcp/Cargo.toml kura-mcp/Cargo.lock -type f)
+# 스크립트 자신도 소스다(코덱스 개발35 3차와 같은 급): 빌드 방식(BINS·플래그)이 바뀌어도
+# 크레이트 소스 mtime 은 그대로라 옛 산출물이 "최신"으로 통과한다.
+done < <(find kura-mcp/src kura-mcp/Cargo.toml kura-mcp/Cargo.lock scripts/build-sidecars.sh -type f)
 [[ -n "$SRC_NEWEST" ]] || die "kura-mcp 소스를 찾지 못했다 (리포 루트에서 도는 게 맞는지 확인)"
 
 needs_build() {

@@ -34,18 +34,52 @@ pub(crate) struct ConnectStatus {
     pub(crate) cli_registered: bool,
     /// kura 항목은 있는데 command 가 이 빌드 경로와 다른 경우(옛 설치·다른 사본).
     pub(crate) cli_registered_other: bool,
-    /// 이 앱 번들 안 kura-mcp 절대경로 — 수동 등록 명령 조립용.
+    /// 등록·안내에 쓸 kura-mcp 절대경로 — 수동 등록 명령 조립용. 임시 위치에서 실행
+    /// 중이면 설치본(/Applications 등)으로 해석된 경로다.
     pub(crate) mcp_path: Option<String>,
+    /// 실행 파일이 임시 위치(App Translocation·DMG 마운트)에서 돌고 있는지.
+    /// 이때 설치본마저 없으면 mcp_path 가 None — 프론트가 "응용 프로그램 폴더로
+    /// 옮겨 실행" 안내를 띄운다(임시 경로를 등록해 주는 것보다 낫다).
+    pub(crate) temp_location: bool,
 }
 
-/// 이 앱 번들 안의 kura-mcp 사이드카 절대경로. 실행 파일 옆에 있다
-/// (릴리스 = Kura.app/Contents/MacOS/, dev = target/debug/).
-/// /Applications 를 하드코딩하지 않는 이유: 앱을 ~/Applications 등에 둔 사용자도
-/// 자기 번들의 바이너리를 정확히 등록하게.
-fn bundled_mcp_path() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let p = exe.parent()?.join("kura-mcp");
-    p.is_file().then_some(p)
+/// 임시 실행 위치인가 — App Translocation(/private/var/folders/…)과 DMG 마운트
+/// (/Volumes/…). 이 경로를 등록하면 마운트 해제·재실행 순간 죽는 등록이 남는다
+/// (코덱스 개발35 3차). 순수 심장부(테스트 대상).
+fn path_is_temp_location(p: &std::path::Path) -> bool {
+    // /var 는 /private/var 의 심링크라 current_exe 가 어느 쪽으로 줄지 몰라 둘 다 본다.
+    let s = p.to_string_lossy();
+    ["/private/var/folders/", "/var/folders/", "/Volumes/"]
+        .iter()
+        .any(|prefix| s.starts_with(prefix))
+}
+
+/// 설치된 Kura.app 의 kura-mcp — mcpb 런처와 같은 후보 순서(/Applications → ~/Applications).
+fn installed_mcp_path() -> Option<PathBuf> {
+    let mut apps = vec![PathBuf::from("/Applications/Kura.app")];
+    if let Some(h) = dirs::home_dir() {
+        apps.push(h.join("Applications/Kura.app"));
+    }
+    apps.into_iter()
+        .map(|a| a.join("Contents/MacOS/kura-mcp"))
+        .find(|p| p.is_file())
+}
+
+/// 등록·안내에 쓸 kura-mcp 절대경로 + 임시 위치 여부.
+///
+/// 평소엔 실행 파일 옆의 사이드카다(릴리스 = Kura.app/Contents/MacOS/, dev =
+/// target/debug/ — /Applications 하드코딩이 아니라서 ~/Applications 설치도 정확).
+/// 임시 위치(Translocation·DMG)에서 실행 중이면 그 옆 경로는 곧 사라지므로
+/// 설치본으로 해석하고, 설치본도 없으면 None 을 준다.
+fn registerable_mcp_path() -> (Option<PathBuf>, bool) {
+    let Ok(exe) = std::env::current_exe() else {
+        return (None, false);
+    };
+    if path_is_temp_location(&exe) {
+        return (installed_mcp_path(), true);
+    }
+    let p = exe.parent().map(|d| d.join("kura-mcp"));
+    (p.filter(|p| p.is_file()), false)
 }
 
 /// Claude 데스크톱 설치 여부. 표준 폴더 둘을 먼저 보고(비용 0), 없을 때만 Spotlight 로
@@ -114,11 +148,20 @@ fn find_claude_cli() -> Option<PathBuf> {
 /// 이름만 보고 "등록됨"이라 하지 않는 이유(코덱스 개발35 1차): 옛 설치·옮긴 앱을
 /// 가리키는 kura 항목이 있으면 화면은 "등록됨"인데 Claude 는 서버를 못 띄운다.
 /// command 까지 돌려줘서 호출부가 현재 경로와 대조하게 한다.
-fn claude_json_kura_command(json: &str) -> Option<String> {
+/// ~/.claude.json 사용자 범위의 kura 항목 **전체** — 재등록이 실패했을 때 원복
+/// (`claude mcp add-json`)에 쓴다. command 유무와 무관하게 항목이 있으면 준다
+/// (command 없는 HTTP 서버 등록도 지웠으면 되돌려야 한다).
+fn claude_json_kura_entry(json: &str) -> Option<serde_json::Value> {
     serde_json::from_str::<serde_json::Value>(json)
         .ok()?
         .get("mcpServers")?
-        .get("kura")?
+        .get("kura")
+        .cloned()
+        .filter(|v| !v.is_null())
+}
+
+fn claude_json_kura_command(json: &str) -> Option<String> {
+    claude_json_kura_entry(json)?
         .get("command")?
         .as_str()
         .map(|s| s.to_string())
@@ -130,10 +173,17 @@ fn registered_cli_command() -> Option<String> {
         .and_then(|s| claude_json_kura_command(&s))
 }
 
+fn registered_cli_entry() -> Option<serde_json::Value> {
+    dirs::home_dir()
+        .and_then(|h| std::fs::read_to_string(h.join(".claude.json")).ok())
+        .and_then(|s| claude_json_kura_entry(&s))
+}
+
 /// AI 연결 화면 상태 한 벌. 전부 로컬 파일 읽기라 폴링해도 싸다.
 #[tauri::command]
 pub(crate) fn get_connect_status() -> ConnectStatus {
-    let mcp_path = bundled_mcp_path().map(|p| p.to_string_lossy().into_owned());
+    let (mcp, temp_location) = registerable_mcp_path();
+    let mcp_path = mcp.map(|p| p.to_string_lossy().into_owned());
     let registered_cmd = registered_cli_command();
     let matches = match (&registered_cmd, &mcp_path) {
         (Some(cmd), Some(ours)) => cmd == ours,
@@ -146,6 +196,7 @@ pub(crate) fn get_connect_status() -> ConnectStatus {
         cli_registered: matches,
         cli_registered_other: registered_cmd.is_some() && !matches,
         mcp_path,
+        temp_location,
     }
 }
 
@@ -189,27 +240,57 @@ pub(crate) fn connect_claude_code() -> Result<(), String> {
     let Some(cli) = find_claude_cli() else {
         return Err("claude 명령을 찾지 못했어요. 아래 수동 등록 명령을 터미널에서 실행하세요.".into());
     };
-    let Some(mcp) = bundled_mcp_path() else {
+    let (mcp, temp) = registerable_mcp_path();
+    let Some(mcp) = mcp else {
+        if temp {
+            // 임시 경로(Translocation·DMG)를 등록하면 마운트 해제·재실행 순간 Claude 가
+            // 서버를 못 띄우는 등록이 남는다(코덱스 개발35 3차) — 등록하느니 거부가 낫다.
+            return Err(
+                "앱이 임시 위치(디스크 이미지 등)에서 실행 중이라 등록할 경로가 없어요. \
+                 Kura 를 응용 프로그램 폴더로 옮겨서 실행한 뒤 다시 연결하세요."
+                    .into(),
+            );
+        }
         return Err("이 빌드에 kura-mcp 가 없어요. 앱을 다시 설치해 보세요.".into());
     };
     // 멱등 재등록: 같은 이름이 이미 있으면 add 가 "already exists" 로 거부하는데,
     // 그걸 성공으로 치면 옛 경로를 가리키는 등록이 영영 안 고쳐진다(코덱스 개발35 1차).
-    // 우리 이름(kura)의 사용자 범위 항목만 지우고 다시 등록한다 — 없어서 실패하는 건 정상.
-    let _ = Command::new(&cli)
-        .args(["mcp", "remove", "--scope", "user", "kura"])
-        .output();
-    let out = Command::new(&cli)
+    // 지우기 전에 옛 항목을 통째로 떠 둔다 — remove 만 성공하고 add 가 실패하면 멀쩡하던
+    // 등록마저 사라지므로(코덱스 개발35 3차), 그때 add-json 으로 원복한다.
+    let old_entry = registered_cli_entry();
+    if old_entry.is_some() {
+        let _ = Command::new(&cli)
+            .args(["mcp", "remove", "--scope", "user", "kura"])
+            .output();
+    }
+    let failure = match Command::new(&cli)
         .args(["mcp", "add", "--scope", "user", "kura", "--"])
         .arg(&mcp)
         .output()
-        .map_err(|e| format!("claude 실행 실패: {e}"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    Err(format!(
-        "등록 실패: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    ))
+    {
+        Ok(out) if out.status.success() => return Ok(()),
+        Ok(out) => format!(
+            "등록 실패: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => format!("claude 실행 실패: {e}"),
+    };
+    let restore_note = match old_entry {
+        Some(old) => {
+            let restored = Command::new(&cli)
+                .args(["mcp", "add-json", "--scope", "user", "kura"])
+                .arg(old.to_string())
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if restored {
+                " 기존 등록은 그대로 되돌려 놨어요."
+            } else {
+                " 기존 kura 등록을 복원하지 못했어요 — 아래 명령으로 직접 등록하세요."
+            }
+        }
+        None => "",
+    };
+    Err(format!("{failure}{restore_note}"))
 }
 
 #[cfg(test)]
@@ -246,5 +327,44 @@ mod tests {
         );
         assert_eq!(claude_json_kura_command("{}"), None);
         assert_eq!(claude_json_kura_command("broken"), None);
+    }
+
+    // 원복용 항목 스냅숏: command 가 없어도 항목이 있으면 통째로 돌려준다(HTTP 서버
+    // 등록도 지웠으면 되돌려야 한다). null·부재는 "항목 없음".
+    #[test]
+    fn claude_json_entry_snapshot() {
+        let json = r#"{"mcpServers":{"kura":{"type":"stdio","command":"/a/kura-mcp","args":[]}}}"#;
+        let entry = claude_json_kura_entry(json).expect("항목이 있어야 한다");
+        assert_eq!(entry["command"], "/a/kura-mcp");
+        assert_eq!(entry["type"], "stdio");
+        assert!(claude_json_kura_entry(r#"{"mcpServers":{"kura":{}}}"#).is_some());
+        assert_eq!(claude_json_kura_entry(r#"{"mcpServers":{"kura":null}}"#), None);
+        assert_eq!(claude_json_kura_entry(r#"{"mcpServers":{}}"#), None);
+        assert_eq!(claude_json_kura_entry("{}"), None);
+    }
+
+    // 임시 실행 위치 감지: Translocation(/private/var/folders, /var/folders)과 DMG
+    // 마운트(/Volumes)는 임시, 설치·dev 경로는 아님 (코덱스 개발35 3차).
+    #[test]
+    fn temp_location_detection() {
+        use std::path::Path;
+        assert!(path_is_temp_location(Path::new(
+            "/private/var/folders/ab/xyz/T/AppTranslocation/UUID/d/Kura.app/Contents/MacOS/kura"
+        )));
+        assert!(path_is_temp_location(Path::new(
+            "/var/folders/ab/xyz/T/AppTranslocation/UUID/d/Kura.app/Contents/MacOS/kura"
+        )));
+        assert!(path_is_temp_location(Path::new(
+            "/Volumes/Kura 0.1.2/Kura.app/Contents/MacOS/kura"
+        )));
+        assert!(!path_is_temp_location(Path::new(
+            "/Applications/Kura.app/Contents/MacOS/kura"
+        )));
+        assert!(!path_is_temp_location(Path::new(
+            "/Users/a/Applications/Kura.app/Contents/MacOS/kura"
+        )));
+        assert!(!path_is_temp_location(Path::new(
+            "/Users/a/프로젝트/지갑지갑/src-tauri/target/debug/kura"
+        )));
     }
 }
