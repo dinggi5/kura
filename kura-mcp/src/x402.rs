@@ -22,6 +22,7 @@
 // 자산(USDC 0x036C…)·서명(EIP-3009)·payload{signature,authorization} 구조는 양쪽 동일.
 // V2 제출은 서버가 준 resource/accepted 를 raw 그대로 에코한다(extra·maxTimeoutSeconds 등 미지 필드 무손실).
 
+use crate::tf;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -92,15 +93,25 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 pub fn parse_required(header: Option<&str>, body: &str) -> Result<PaymentRequired, String> {
     let raw: Value = match header.map(str::trim).filter(|s| !s.is_empty()) {
         Some(h) => {
-            let bytes = B64
-                .decode(h)
-                .map_err(|e| format!("Couldn't base64-decode the payment-required header: {e}"))?;
-            serde_json::from_slice(&bytes)
-                .map_err(|e| format!("Couldn't parse the payment-required header as JSON: {e}"))?
+            let bytes = B64.decode(h).map_err(|e| {
+                tf!(
+                    "payment-required 헤더 base64 디코드 실패: {e}",
+                    "Couldn't base64-decode the payment-required header: {e}"
+                )
+            })?;
+            serde_json::from_slice(&bytes).map_err(|e| {
+                tf!(
+                    "payment-required 헤더 JSON 파싱 실패: {e}",
+                    "Couldn't parse the payment-required header as JSON: {e}"
+                )
+            })?
         }
-        None => {
-            serde_json::from_str(body).map_err(|e| format!("Couldn't parse the 402 body: {e}"))?
-        }
+        None => serde_json::from_str(body).map_err(|e| {
+            tf!(
+                "402 본문 파싱 실패: {e}",
+                "Couldn't parse the 402 body: {e}"
+            )
+        })?,
     };
     let version = raw.get("x402Version").and_then(Value::as_u64).unwrap_or(1) as u8;
     Ok(PaymentRequired { raw, version })
@@ -215,8 +226,12 @@ impl PaymentRequired {
             });
             (body, "X-PAYMENT", "X-PAYMENT-RESPONSE")
         };
-        let bytes = serde_json::to_vec(&json)
-            .map_err(|e| format!("Couldn't serialize the payload: {e}"))?;
+        let bytes = serde_json::to_vec(&json).map_err(|e| {
+            tf!(
+                "payload 직렬화 실패: {e}",
+                "Couldn't serialize the payload: {e}"
+            )
+        })?;
         Ok(Submission {
             header_name,
             value: B64.encode(bytes),
@@ -229,10 +244,12 @@ impl PaymentRequired {
 pub fn base_units_to_usdc(base: &str) -> Result<String, String> {
     let dec = active_chain().usdc_decimals as usize;
     let scale = 10u128.pow(dec as u32);
-    let n: u128 = base
-        .trim()
-        .parse()
-        .map_err(|_| format!("That amount isn't a valid number: {base}"))?;
+    let n: u128 = base.trim().parse().map_err(|_| {
+        tf!(
+            "금액 형식 오류: {base}",
+            "That amount isn't a valid number: {base}"
+        )
+    })?;
     let whole = n / scale;
     let frac = n % scale;
     if frac == 0 {

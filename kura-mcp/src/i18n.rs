@@ -44,15 +44,30 @@ fn resolve() -> Lang {
         #[serde(default)]
         lang: Option<String>,
     }
-    let chosen = crate::wallet::jigap_dir()
+    // 🔴 여기서는 **i18n 을 쓰는 함수를 부르면 안 된다.** `wallet::jigap_dir()` 은 에러 문구에
+    // ts! 를 쓰는데, 그게 다시 lang() 을 부른다 → OnceLock 초기화 중 재진입 = 영구 정지.
+    // (실제로 그렇게 짰다가 테스트가 멈춰서 알았다. KURA_LANG 없이 돌리면 CLI 가 통째로 멈춘다.)
+    // 그래서 경로만 여기서 직접 만든다 — jigap_dir 과 같은 정의(`$HOME/.jigap`).
+    let Some(dir) = dirs::home_dir().map(|h| h.join(".jigap")) else {
+        return Lang::Ko;
+    };
+    let chosen = std::fs::read_to_string(dir.join("settings.json"))
         .ok()
-        .and_then(|d| std::fs::read_to_string(d.join("settings.json")).ok())
         .and_then(|t| serde_json::from_str::<LangSel>(&t).ok())
         .and_then(|s| s.lang);
     match chosen.as_deref() {
         Some(c) if !c.trim().is_empty() => parse(c),
-        // 아직 안 고른 사용자 — GUI(i18n::detect_system)와 같은 곳을 본다.
-        _ => detect_system(),
+        // 아직 안 고름 — GUI(i18n::init)와 **같은 규칙**으로 가른다: 지갑이 이미 있으면
+        // 이 패치 전부터 쓰던 사람이라 한국어, 지갑도 없으면 진짜 첫 실행이라 시스템 언어.
+        // (GUI 가 한 번이라도 뜨면 그쪽이 값을 못박으므로, 여기 폴백은 그 전 짧은 구간용이다.)
+        _ => {
+            let wallet_exists = dir.join("wallet.enc").exists() || dir.join("wallet.json").exists();
+            if wallet_exists {
+                Lang::Ko
+            } else {
+                detect_system()
+            }
+        }
     }
 }
 
@@ -98,6 +113,14 @@ macro_rules! tf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 🔴 회귀 방지: `resolve()` 가 i18n 을 쓰는 함수를 부르면 lang() 이 자기 초기화 중에
+    // 자신을 다시 불러 **영구 정지**한다(OnceLock 재진입). 이 테스트는 그때 멈춘다 —
+    // 값이 뭔지는 환경마다 달라 검사하지 않고, "돌아온다"만 본다.
+    #[test]
+    fn resolve_does_not_reenter_i18n() {
+        let _ = resolve();
+    }
 
     #[test]
     fn parse_codes() {

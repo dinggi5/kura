@@ -95,14 +95,32 @@ fn spawn_mock(mode: Mode) -> (String, std::sync::mpsc::Receiver<Result<Address, 
                 Some((header, is_v2)) => {
                     match verify_payment(&header) {
                         Ok(signer) => {
-                            let settle_hdr = if is_v2 { "PAYMENT-RESPONSE" } else { "X-PAYMENT-RESPONSE" };
+                            let settle_hdr = if is_v2 {
+                                "PAYMENT-RESPONSE"
+                            } else {
+                                "X-PAYMENT-RESPONSE"
+                            };
                             // base64({"settled":true})
-                            write_response(&mut s, 200, "OK", PAID_BODY, settle_hdr, "eyJzZXR0bGVkIjp0cnVlfQ==");
+                            write_response(
+                                &mut s,
+                                200,
+                                "OK",
+                                PAID_BODY,
+                                settle_hdr,
+                                "eyJzZXR0bGVkIjp0cnVlfQ==",
+                            );
                             let _ = tx.send(Ok(signer));
                             break;
                         }
                         Err(e) => {
-                            write_response(&mut s, 402, "Payment Required", "{\"error\":\"invalid\"}", "", "");
+                            write_response(
+                                &mut s,
+                                402,
+                                "Payment Required",
+                                "{\"error\":\"invalid\"}",
+                                "",
+                                "",
+                            );
                             let _ = tx.send(Err(e));
                             break;
                         }
@@ -154,7 +172,14 @@ fn write_402(s: &mut TcpStream, body: &str, pr_header: Option<&str>) {
 }
 
 /// 일반 응답. settle_hdr/settle 이 비어있지 않으면 정산 증빙 헤더를 붙인다(헤더 이름은 버전별로 다름).
-fn write_response(s: &mut TcpStream, code: u16, reason: &str, body: &str, settle_hdr: &str, settle: &str) {
+fn write_response(
+    s: &mut TcpStream,
+    code: u16,
+    reason: &str,
+    body: &str,
+    settle_hdr: &str,
+    settle: &str,
+) {
     let extra = if settle.is_empty() || settle_hdr.is_empty() {
         String::new()
     } else {
@@ -171,12 +196,17 @@ fn write_response(s: &mut TcpStream, code: u16, reason: &str, body: &str, settle
 /// 결제 헤더(base64 JSON)를 복호화해 EIP-3009 서명자를 복구하고, value/payTo/network 를 검증한다.
 /// V1({scheme,network,payload}) · V2({accepted,payload}) 두 형태 모두 받는다.
 fn verify_payment(header: &str) -> Result<Address, String> {
-    let raw = B64.decode(header.trim()).map_err(|e| format!("base64: {e}"))?;
+    let raw = B64
+        .decode(header.trim())
+        .map_err(|e| format!("base64: {e}"))?;
     let v: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| format!("json: {e}"))?;
 
     // scheme/network 는 V1=최상위, V2=accepted 안.
     let (scheme, net) = if v.get("accepted").is_some() {
-        (v["accepted"]["scheme"].as_str(), v["accepted"]["network"].as_str())
+        (
+            v["accepted"]["scheme"].as_str(),
+            v["accepted"]["network"].as_str(),
+        )
     } else {
         (v["scheme"].as_str(), v["network"].as_str())
     };
@@ -191,12 +221,17 @@ fn verify_payment(header: &str) -> Result<Address, String> {
     let auth = &v["payload"]["authorization"];
     let sig_hex = v["payload"]["signature"].as_str().ok_or("서명 없음")?;
 
-    let from = Address::from_str(auth["from"].as_str().ok_or("from 없음")?).map_err(|e| e.to_string())?;
+    let from =
+        Address::from_str(auth["from"].as_str().ok_or("from 없음")?).map_err(|e| e.to_string())?;
     let to = Address::from_str(auth["to"].as_str().ok_or("to 없음")?).map_err(|e| e.to_string())?;
-    let value = U256::from_str(auth["value"].as_str().ok_or("value 없음")?).map_err(|e| e.to_string())?;
-    let valid_after = U256::from_str(auth["validAfter"].as_str().ok_or("validAfter 없음")?).map_err(|e| e.to_string())?;
-    let valid_before = U256::from_str(auth["validBefore"].as_str().ok_or("validBefore 없음")?).map_err(|e| e.to_string())?;
-    let nonce = B256::from_str(auth["nonce"].as_str().ok_or("nonce 없음")?).map_err(|e| e.to_string())?;
+    let value =
+        U256::from_str(auth["value"].as_str().ok_or("value 없음")?).map_err(|e| e.to_string())?;
+    let valid_after = U256::from_str(auth["validAfter"].as_str().ok_or("validAfter 없음")?)
+        .map_err(|e| e.to_string())?;
+    let valid_before = U256::from_str(auth["validBefore"].as_str().ok_or("validBefore 없음")?)
+        .map_err(|e| e.to_string())?;
+    let nonce =
+        B256::from_str(auth["nonce"].as_str().ok_or("nonce 없음")?).map_err(|e| e.to_string())?;
 
     // 서버가 요구한 결제 조건과 일치하는지(액수·수취인).
     if value != U256::from_str(MAX_AMOUNT).unwrap() {
@@ -222,7 +257,9 @@ fn verify_payment(header: &str) -> Result<Address, String> {
     };
     let hash = order.eip712_signing_hash(&domain);
     let sig = alloy::primitives::Signature::from_str(sig_hex).map_err(|e| e.to_string())?;
-    let recovered = sig.recover_address_from_prehash(&hash).map_err(|e| e.to_string())?;
+    let recovered = sig
+        .recover_address_from_prehash(&hash)
+        .map_err(|e| e.to_string())?;
     if recovered != from {
         return Err("서명자 ≠ from (위조)".into());
     }
@@ -230,7 +267,10 @@ fn verify_payment(header: &str) -> Result<Address, String> {
 }
 
 /// 지갑 역할: 고른 요구에 맞춰 EIP-3009 인가를 서명한다(GUI의 sign_authorization 와 동일 로직).
-fn sign_for(signer: &PrivateKeySigner, req: &kura_mcp::x402::Requirement) -> kura_mcp::x402::X402Payment {
+fn sign_for(
+    signer: &PrivateKeySigner,
+    req: &kura_mcp::x402::Requirement,
+) -> kura_mcp::x402::X402Payment {
     use alloy::signers::SignerSync;
     let to = Address::from_str(&req.pay_to).unwrap();
     let value = U256::from_str(&req.amount).unwrap();
@@ -305,7 +345,12 @@ async fn drive_loop(mode: Mode) -> Address {
     let sub = required.build_submission(&req, &payment).unwrap();
 
     // 4) 결제 헤더 붙여 재요청 → 200 + 콘텐츠.
-    let paid = client.get(&url).header(sub.header_name, &sub.value).send().await.unwrap();
+    let paid = client
+        .get(&url)
+        .header(sub.header_name, &sub.value)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(paid.status().as_u16(), 200, "서명 검증 후 200이어야 한다");
     assert!(
         paid.headers().get(sub.response_header).is_some(),
@@ -351,7 +396,10 @@ async fn live_real_endpoint_v2_parse() {
         .get("payment-required")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    assert!(h.is_some(), "실 엔드포인트는 payment-required 헤더로 요구를 준다(V2)");
+    assert!(
+        h.is_some(),
+        "실 엔드포인트는 payment-required 헤더로 요구를 준다(V2)"
+    );
 
     let body = resp.text().await.unwrap();
     let required = x402::parse_required(h.as_deref(), &body).expect("V2 헤더 파싱");

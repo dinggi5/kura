@@ -107,7 +107,12 @@ fn settlements_path() -> Result<PathBuf, String> {
 fn apply_settlement(list: &mut [HistoryEntry], s: &Settlement) -> bool {
     for e in list.iter_mut() {
         if e.status == "signed" && e.detail == s.nonce {
-            e.status = if s.success { "settled" } else { "settle_failed" }.into();
+            e.status = if s.success {
+                "settled"
+            } else {
+                "settle_failed"
+            }
+            .into();
             e.settle_tx = s.tx.clone();
             return true;
         }
@@ -201,16 +206,30 @@ mod tests {
     fn apply_settlement_updates_matching_signed_entry() {
         let mut list = vec![
             HistoryEntry {
-                ts: 1, token: "USDC".into(), to: "0xpay".into(), amount: "0.01".into(),
-                status: "signed".into(), detail: "0xNONCE".into(), settle_tx: String::new(),
+                ts: 1,
+                token: "USDC".into(),
+                to: "0xpay".into(),
+                amount: "0.01".into(),
+                status: "signed".into(),
+                detail: "0xNONCE".into(),
+                settle_tx: String::new(),
             },
             HistoryEntry {
-                ts: 2, token: "USDC".into(), to: "0xother".into(), amount: "0.5".into(),
-                status: "sent".into(), detail: "0xtxhash".into(), settle_tx: String::new(),
+                ts: 2,
+                token: "USDC".into(),
+                to: "0xother".into(),
+                amount: "0.5".into(),
+                status: "sent".into(),
+                detail: "0xtxhash".into(),
+                settle_tx: String::new(),
             },
         ];
         // 매칭 성공 → settled
-        let ok = Settlement { nonce: "0xNONCE".into(), tx: "0xSETTLE".into(), success: true };
+        let ok = Settlement {
+            nonce: "0xNONCE".into(),
+            tx: "0xSETTLE".into(),
+            success: true,
+        };
         assert!(apply_settlement(&mut list, &ok));
         assert_eq!(list[0].status, "settled");
         assert_eq!(list[0].settle_tx, "0xSETTLE");
@@ -220,15 +239,28 @@ mod tests {
         assert!(!apply_settlement(&mut list, &ok));
 
         // 매칭 없는 nonce → false
-        let miss = Settlement { nonce: "0xZZZ".into(), tx: "0xT".into(), success: true };
+        let miss = Settlement {
+            nonce: "0xZZZ".into(),
+            tx: "0xT".into(),
+            success: true,
+        };
         assert!(!apply_settlement(&mut list, &miss));
 
         // 정산 실패 → settle_failed
         let mut list2 = vec![HistoryEntry {
-            ts: 1, token: "USDC".into(), to: "0xpay".into(), amount: "0.01".into(),
-            status: "signed".into(), detail: "0xN2".into(), settle_tx: String::new(),
+            ts: 1,
+            token: "USDC".into(),
+            to: "0xpay".into(),
+            amount: "0.01".into(),
+            status: "signed".into(),
+            detail: "0xN2".into(),
+            settle_tx: String::new(),
         }];
-        let fail = Settlement { nonce: "0xN2".into(), tx: "0xT2".into(), success: false };
+        let fail = Settlement {
+            nonce: "0xN2".into(),
+            tx: "0xT2".into(),
+            success: false,
+        };
         assert!(apply_settlement(&mut list2, &fail));
         assert_eq!(list2[0].status, "settle_failed");
     }
@@ -237,13 +269,20 @@ mod tests {
     #[test]
     fn get_history_redacts_leaked_url_in_detail() {
         let list = vec![HistoryEntry {
-            ts: 1, token: "ETH".into(), to: "0xabc".into(), amount: "0".into(),
+            ts: 1,
+            token: "ETH".into(),
+            to: "0xabc".into(),
+            amount: "0".into(),
             status: "failed".into(),
             detail: "RPC 연결 실패: https://base.alchemy.com/v2/LEAKEDKEY".into(),
             settle_tx: String::new(),
         }];
         let out = redact_details(list);
-        assert!(!out[0].detail.contains("LEAKEDKEY"), "키가 남음: {}", out[0].detail);
+        assert!(
+            !out[0].detail.contains("LEAKEDKEY"),
+            "키가 남음: {}",
+            out[0].detail
+        );
         assert_eq!(out[0].detail, "RPC 연결 실패: [RPC]");
     }
 }

@@ -171,9 +171,10 @@ impl Settings {
     }
 }
 
-/// 지갑 파일이 이미 있는가 — settings.json 이 없을 때 "진짜 신규 설치"와 "설정 파일만
-/// 없는 기존 사용자"를 가른다. 암호화본(wallet.enc)과 옛 평문(wallet.json) 둘 다 본다.
-fn wallet_exists() -> bool {
+/// 지갑 파일이 이미 있는가 — settings.json 이 없거나 필드가 비었을 때 "진짜 신규 설치"와
+/// "기존 사용자"를 가른다. 암호화본(wallet.enc)과 옛 평문(wallet.json) 둘 다 본다.
+/// (개발 42: 언어 기본값도 같은 질문을 쓴다 — i18n::init)
+pub(crate) fn wallet_exists() -> bool {
     jigap_dir()
         .map(|d| d.join("wallet.enc").exists() || d.join("wallet.json").exists())
         .unwrap_or(false)

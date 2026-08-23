@@ -8,6 +8,7 @@
 
 use crate::chain::chain_file;
 use crate::wallet::jigap_dir;
+use crate::{tf, ts};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -94,7 +95,8 @@ struct Settlement {
 /// (모든 ~/.jigap 파일 권한 일관 적용 불변식 — MCP 가 먼저 파일을 만들어도 넓게 노출되지 않게).
 fn write_atomic(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| format!("Couldn't create the folder: {e}"))?;
+        fs::create_dir_all(dir)
+            .map_err(|e| tf!("디렉터리 생성 실패: {e}", "Couldn't create the folder: {e}"))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -103,7 +105,7 @@ fn write_atomic(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     }
     let tmp = path.with_extension("tmp");
     write_file_private(&tmp, bytes)?;
-    fs::rename(&tmp, path).map_err(|e| format!("Couldn't replace the file: {e}"))
+    fs::rename(&tmp, path).map_err(|e| tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}"))
 }
 
 /// 파일을 0600 으로 생성해 내용을 쓴다 (생성 후 chmod 사이의 노출 창 제거).
@@ -117,15 +119,15 @@ fn write_file_private(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
         .truncate(true)
         .mode(0o600)
         .open(path)
-        .map_err(|e| format!("Couldn't save the file: {e}"))?;
+        .map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))?;
     let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
     f.write_all(bytes)
-        .map_err(|e| format!("Couldn't save the file: {e}"))
+        .map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))
 }
 
 #[cfg(not(unix))]
 fn write_file_private(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
-    fs::write(path, bytes).map_err(|e| format!("Couldn't save the file: {e}"))
+    fs::write(path, bytes).map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))
 }
 
 /// 정산 결과를 ~/.jigap/x402_settlements.json 에 추가한다(append). 실패해도 결제 흐름은 안 막는다.
@@ -141,8 +143,12 @@ pub fn record_settlement(nonce: &str, tx: &str, success: bool) -> Result<(), Str
         tx: tx.to_string(),
         success,
     });
-    let json = serde_json::to_string(&list)
-        .map_err(|e| format!("Couldn't serialize the settlement record: {e}"))?;
+    let json = serde_json::to_string(&list).map_err(|e| {
+        tf!(
+            "정산 기록 직렬화 실패: {e}",
+            "Couldn't serialize the settlement record: {e}"
+        )
+    })?;
     write_atomic(&path, json.as_bytes())
 }
 
@@ -234,7 +240,7 @@ fn write_request_kind(
         chain_id: crate::chain::active_chain().chain_id, // 요청 시점 활성 체인 각인(승인 시 GUI가 대조)
     };
     let json = serde_json::to_string_pretty(&req)
-        .map_err(|e| format!("Couldn't serialize the request: {e}"))?;
+        .map_err(|e| tf!("직렬화 실패: {e}", "Couldn't serialize the request: {e}"))?;
 
     // 원자적 single-flight 획득: 요청 파일을 create_new(O_EXCL)로 만든다. 이미 있으면(대기 중) 거절.
     // has_pending() 사전검사와 파일 쓰기 사이의 경합(동시 호출 둘 다 통과해 한쪽 유실)을 닫는다.
@@ -261,16 +267,24 @@ fn claim_request_file(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     let mut f = match opts.open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err("A payment is already waiting for approval. Let the user handle it, then ask again.".into());
+            return Err(ts!("이미 승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 다시 요청하세요.", "A payment is already waiting for approval. Let the user handle it, then ask again.").into());
         }
-        Err(e) => return Err(format!("Couldn't create the request file: {e}")),
+        Err(e) => {
+            return Err(tf!(
+                "요청 파일 생성 실패: {e}",
+                "Couldn't create the request file: {e}"
+            ))
+        }
     };
     // 쓰기 실패 시 부분 파일을 반드시 치운다 — 안 그러면 has_pending()=true 인데 GUI 는 파싱 못 해
     // None 으로 보는 영구 wedge(single-flight 가 영영 막힘)가 된다.
     if let Err(e) = f.write_all(bytes) {
         drop(f);
         let _ = fs::remove_file(path);
-        return Err(format!("Couldn't write the request file: {e}"));
+        return Err(tf!(
+            "요청 파일 저장 실패: {e}",
+            "Couldn't write the request file: {e}"
+        ));
     }
     Ok(())
 }

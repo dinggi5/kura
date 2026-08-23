@@ -7,6 +7,7 @@
 //    effective_rpc() 가 settings.json(GUI와 공유)을 읽어 결정하므로 사용자가 RPC를 바꾸면
 //    두 프로세스가 자동으로 같은 RPC를 쓴다. default_rpc 는 설정이 비었을 때의 폴백.
 
+use crate::{tf, ts};
 use alloy::primitives::{
     utils::{format_ether, format_units},
     Address, U256,
@@ -27,7 +28,10 @@ sol! {
 }
 
 pub fn jigap_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("Couldn't find the home folder")?;
+    let home = dirs::home_dir().ok_or(ts!(
+        "홈 디렉터리를 찾을 수 없습니다",
+        "Couldn't find the home folder"
+    ))?;
     Ok(home.join(".jigap"))
 }
 
@@ -146,10 +150,18 @@ struct LegacyMeta {
 /// 지갑 파일 상태를 알려준다 (비번 불필요).
 pub fn wallet_status() -> Result<WalletStatus, String> {
     if enc_path()?.exists() {
-        let data = fs::read_to_string(enc_path()?)
-            .map_err(|e| format!("Couldn't read the wallet file: {e}"))?;
-        let m: EncMeta = serde_json::from_str(&data)
-            .map_err(|e| format!("Couldn't parse the wallet file: {e}"))?;
+        let data = fs::read_to_string(enc_path()?).map_err(|e| {
+            tf!(
+                "지갑 파일 읽기 실패: {e}",
+                "Couldn't read the wallet file: {e}"
+            )
+        })?;
+        let m: EncMeta = serde_json::from_str(&data).map_err(|e| {
+            tf!(
+                "지갑 파일 파싱 실패: {e}",
+                "Couldn't parse the wallet file: {e}"
+            )
+        })?;
         return Ok(WalletStatus {
             state: "encrypted".into(),
             address: Some(m.address),
@@ -157,10 +169,18 @@ pub fn wallet_status() -> Result<WalletStatus, String> {
         });
     }
     if legacy_path()?.exists() {
-        let data = fs::read_to_string(legacy_path()?)
-            .map_err(|e| format!("Couldn't read the wallet file: {e}"))?;
-        let m: LegacyMeta = serde_json::from_str(&data)
-            .map_err(|e| format!("Couldn't parse the wallet file: {e}"))?;
+        let data = fs::read_to_string(legacy_path()?).map_err(|e| {
+            tf!(
+                "지갑 파일 읽기 실패: {e}",
+                "Couldn't read the wallet file: {e}"
+            )
+        })?;
+        let m: LegacyMeta = serde_json::from_str(&data).map_err(|e| {
+            tf!(
+                "지갑 파일 파싱 실패: {e}",
+                "Couldn't parse the wallet file: {e}"
+            )
+        })?;
         return Ok(WalletStatus {
             state: "legacy".into(),
             address: Some(m.address),
@@ -185,13 +205,14 @@ pub struct Balances {
 pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
     let addr: Address = addr_hex
         .parse()
-        .map_err(|e| format!("Couldn't read that address: {e}"))?;
+        .map_err(|e| tf!("주소 파싱 실패: {e}", "Couldn't read that address: {e}"))?;
 
     let provider = ProviderBuilder::new()
         .connect(&effective_rpc())
         .await
         .map_err(|e| {
-            format!(
+            tf!(
+                "RPC 연결 실패: {}",
                 "Couldn't reach the RPC server: {}",
                 redact_urls(&e.to_string())
             )
@@ -201,7 +222,8 @@ pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
     let (wei, raw): (U256, U256) = tokio::try_join!(
         async {
             provider.get_balance(addr).await.map_err(|e| {
-                format!(
+                tf!(
+                    "ETH 잔액 조회 실패: {}",
                     "Couldn't read the ETH balance: {}",
                     redact_urls(&e.to_string())
                 )
@@ -209,7 +231,8 @@ pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
         },
         async {
             usdc_contract.balanceOf(addr).call().await.map_err(|e| {
-                format!(
+                tf!(
+                    "USDC 잔액 조회 실패: {}",
                     "Couldn't read the USDC balance: {}",
                     redact_urls(&e.to_string())
                 )
@@ -219,8 +242,12 @@ pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
 
     Ok(Balances {
         eth: format_ether(wei),
-        usdc: format_units(raw, active_chain().usdc_decimals)
-            .map_err(|e| format!("Couldn't convert the USDC amount: {e}"))?,
+        usdc: format_units(raw, active_chain().usdc_decimals).map_err(|e| {
+            tf!(
+                "USDC 단위 변환 실패: {e}",
+                "Couldn't convert the USDC amount: {e}"
+            )
+        })?,
     })
 }
 

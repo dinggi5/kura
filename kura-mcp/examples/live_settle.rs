@@ -79,7 +79,10 @@ async fn main() {
         }
     };
     if result.status != "approved" {
-        eprintln!("✗ 승인되지 않음: status={} detail={}", result.status, result.detail);
+        eprintln!(
+            "✗ 승인되지 않음: status={} detail={}",
+            result.status, result.detail
+        );
         std::process::exit(1);
     }
     let signed = result.x402.expect("승인됐는데 서명 페이로드가 없음");

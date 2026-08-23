@@ -88,8 +88,7 @@ fn selected_chain_id() -> u64 {
     };
     match std::fs::read_to_string(dir.join("settings.json")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let wallet_exists =
-                dir.join("wallet.enc").exists() || dir.join("wallet.json").exists();
+            let wallet_exists = dir.join("wallet.enc").exists() || dir.join("wallet.json").exists();
             if wallet_exists {
                 BASE_SEPOLIA.chain_id
             } else {

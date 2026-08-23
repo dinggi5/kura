@@ -71,6 +71,9 @@ export function SettingsScreen({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // 저장 안 한 폼 변경이 있는가 — 언어 전환이 창을 다시 읽어서 이 값들을 버리기 때문에 필요하다
+  // (코덱스 개발 42 P2: 한도를 낮추거나 테스트넷으로 바꿔 두고 언어를 누르면 그 변경이 사라졌다).
+  const [dirty, setDirty] = useState(false);
   // RPC 직접 입력 모드(프리셋에 없는 URL이면 처음부터 직접 입력으로). 프리셋은 체인별로 다르다.
   const [rpcCustom, setRpcCustom] = useState<boolean>(() => {
     const c = chainFromId(current?.chain_id);
@@ -142,11 +145,13 @@ export function SettingsScreen({
   function field(key: keyof Settings, value: string) {
     setS((prev) => (prev ? { ...prev, [key]: value } : prev));
     setSaved(false);
+    setDirty(true);
   }
 
   function toggle(key: BoolSettingKey) {
     setS((prev) => (prev ? { ...prev, [key]: !prev[key] } : prev));
     setSaved(false);
+    setDirty(true);
   }
 
   // 체인 전환 — RPC "선택 종류"는 유지한다. 공식/PublicNode 는 체인별로 정의돼 있으니 새 체인 값으로
@@ -166,6 +171,7 @@ export function SettingsScreen({
     });
     setRpcCustom(false);
     setSaved(false);
+    setDirty(true);
   }
 
   async function save() {
@@ -176,6 +182,7 @@ export function SettingsScreen({
       await invoke("set_settings", { settings: s });
       if (closed.current) return; // 저장 도중 닫혔으면 늦은 setState·자동 닫기 타이머 생성을 막는다
       setSaved(true);
+      setDirty(false);
       // 저장 성공 → "저장됨"을 잠깐 보여준 뒤 메인 화면으로 자동 복귀(매번 닫기를 또 누르는 번거로움 제거).
       // busy 를 유지해 닫히는 동안 폼 전체(아래 fieldset)가 잠긴다 → 이 0.5초 사이 입력이 조용히
       // 버려지는 일을 막는다(코덱스 리뷰 medium). onClose 는 부모가 설정을 다시 불러오게 한다.
@@ -485,7 +492,7 @@ export function SettingsScreen({
                   checked={autostart ?? false}
                   onToggle={toggleAutostart}
                 />
-                <LanguageRow />
+                <LanguageRow dirty={dirty} />
               </RowGroup>
             </Section>
 
@@ -975,13 +982,13 @@ function ToggleRow({
  *  확인과 같은 결), 저장 버튼을 누르기 전까지 옛 언어로 남아 있으면 뭘 고른 건지 알 수 없다.
  *  저장이 실패하면 언어를 바꾸지 않고 그 자리에서 말해 준다 — 화면만 바뀌고 다음 실행에
  *  되돌아오는 게 제일 나쁘다. */
-function LanguageRow() {
+function LanguageRow({ dirty }: { dirty: boolean }) {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const current = lang();
 
   function pick(next: Lang) {
-    if (next === current || busy) return;
+    if (next === current || busy || dirty) return;
     setBusy(true);
     setFailed(false);
     // 성공하면 창을 다시 읽으므로 이 컴포넌트는 그대로 사라진다(busy 를 되돌릴 필요 없음).
@@ -1003,7 +1010,12 @@ function LanguageRow() {
         >
           {failed
             ? t("언어를 저장하지 못했어요. 그대로 뒀어요.", "Couldn't save the language, so nothing changed.")
-            : t("고르면 창이 새 언어로 다시 열려요.", "Picking one reopens the window in that language.")}
+            : dirty
+              ? t(
+                  "저장 안 한 변경이 있어요. 먼저 저장한 뒤에 바꿔주세요.",
+                  "You have unsaved changes. Save them first, then switch.",
+                )
+              : t("고르면 창이 새 언어로 다시 열려요.", "Picking one reopens the window in that language.")}
         </p>
       </div>
       <div className="shrink-0 flex gap-1 p-1 rounded-[var(--radius-pill)] bg-[var(--color-ivory-200)] dark:bg-[var(--color-night-900)]">
@@ -1018,9 +1030,11 @@ function LanguageRow() {
             type="button"
             onClick={() => pick(o.code)}
             aria-pressed={o.code === current}
+            disabled={dirty}
             className={cn(
               "h-7 px-3 rounded-[var(--radius-pill)] text-[12px] tracking-tight",
               "transition-colors duration-[var(--duration-base)]",
+              "disabled:opacity-40 disabled:cursor-not-allowed",
               o.code === current
                 ? "bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-700)] text-[var(--color-ink-900)] dark:text-[#E8E5DD] shadow-[var(--shadow-soft)]"
                 : "text-[var(--color-ink-500)] hover:text-[var(--color-ink-700)]",

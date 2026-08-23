@@ -114,7 +114,9 @@ fn write_response(s: &mut TcpStream, code: u16, reason: &str, body: &str, settle
 
 /// X-PAYMENT(base64 JSON)에서 EIP-3009 서명자를 복구하고 액수·수취인을 검증한다.
 fn verify_payment(header: &str) -> Result<Address, String> {
-    let raw = B64.decode(header.trim()).map_err(|e| format!("base64: {e}"))?;
+    let raw = B64
+        .decode(header.trim())
+        .map_err(|e| format!("base64: {e}"))?;
     let v: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| format!("json: {e}"))?;
     if v["scheme"] != "exact" || v["network"] != "base-sepolia" {
         return Err("scheme/network 불일치".into());
