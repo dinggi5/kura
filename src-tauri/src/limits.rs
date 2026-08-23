@@ -1,5 +1,6 @@
 // 거래 한도 (Session 7) — 단일/일일 누적 한도 검사 + 오늘 사용액 장부(~/.jigap/spend.json).
 
+use crate::i18n::{tf, ts};
 use alloy::primitives::{
     utils::{format_ether, format_units, parse_ether, parse_units},
     U256,
@@ -19,7 +20,11 @@ static SPEND_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 오늘 장부에서 토큰별 누적액(base unit)을 읽는다.
 fn spent_of(spend: &Spend, token: &str) -> U256 {
-    let s = if token == "ETH" { &spend.eth } else { &spend.usdc };
+    let s = if token == "ETH" {
+        &spend.eth
+    } else {
+        &spend.usdc
+    };
     s.parse().unwrap_or(U256::ZERO)
 }
 
@@ -70,9 +75,18 @@ pub(crate) async fn refund_spend(token: &str, value: U256, reserved_day: u64) {
 /// (alloy `parse_units` 는 "-1" 을 I256 으로 받아 `get_absolute()`=`into_raw()` 가 2의 보수
 ///  거대 U256 을 돌려준다 → 음수 한도가 "무제한"으로, 음수 금액이 거대 송금으로 둔갑하는 함정.)
 pub(crate) fn parse_usdc_nonneg(s: &str, dec: u8) -> Result<U256, String> {
-    let pu = parse_units(s.trim(), dec).map_err(|e| format!("금액 형식 오류: {e}"))?;
+    let pu = parse_units(s.trim(), dec).map_err(|e| {
+        tf!(
+            "금액 형식 오류: {e}",
+            "That amount isn't a valid number: {e}"
+        )
+    })?;
     if pu.is_negative() {
-        return Err("음수 금액은 허용되지 않습니다".into());
+        return Err(ts!(
+            "음수 금액은 허용되지 않습니다",
+            "A negative amount isn't allowed"
+        )
+        .into());
     }
     Ok(pu.get_absolute())
 }
@@ -82,9 +96,18 @@ pub(crate) fn parse_usdc_nonneg(s: &str, dec: u8) -> Result<U256, String> {
 pub(crate) fn parse_eth_nonneg(s: &str) -> Result<U256, String> {
     let t = s.trim();
     if t.starts_with('-') {
-        return Err("음수 금액은 허용되지 않습니다".into());
+        return Err(ts!(
+            "음수 금액은 허용되지 않습니다",
+            "A negative amount isn't allowed"
+        )
+        .into());
     }
-    parse_ether(t).map_err(|e| format!("금액 형식 오류: {e}"))
+    parse_ether(t).map_err(|e| {
+        tf!(
+            "금액 형식 오류: {e}",
+            "That amount isn't a valid number: {e}"
+        )
+    })
 }
 
 /// 오늘 누적 사용액 장부. 금액은 base unit(USDC=6decimals, ETH=wei) U256 문자열.
@@ -138,12 +161,18 @@ pub(crate) fn enforce_caps(
 ) -> Result<(), String> {
     if !single_cap.is_zero() && amount > single_cap {
         let s = format_units(single_cap, decimals).unwrap_or_default();
-        return Err(format!("단일 거래 한도({s} {unit})를 초과했습니다"));
+        return Err(tf!(
+            "단일 거래 한도({s} {unit})를 초과했습니다",
+            "Over the per-payment limit ({s} {unit})"
+        ));
     }
     if !daily_cap.is_zero() && spent_today.saturating_add(amount) > daily_cap {
         let remaining = daily_cap.saturating_sub(spent_today);
         let r = format_units(remaining, decimals).unwrap_or_default();
-        return Err(format!("오늘 한도를 초과했습니다 — 남은 한도 {r} {unit}"));
+        return Err(tf!(
+            "오늘 한도를 초과했습니다 — 남은 한도 {r} {unit}",
+            "Over today's limit — {r} {unit} left"
+        ));
     }
     Ok(())
 }
@@ -228,7 +257,10 @@ mod tests {
         assert!(parse_usdc_nonneg("-0.000001", 6).is_err());
         assert!(parse_usdc_nonneg("  -5  ", 6).is_err());
         // 양수·0 은 정상.
-        assert_eq!(parse_usdc_nonneg("1.5", 6).unwrap(), U256::from(1_500_000u64));
+        assert_eq!(
+            parse_usdc_nonneg("1.5", 6).unwrap(),
+            U256::from(1_500_000u64)
+        );
         assert_eq!(parse_usdc_nonneg("0", 6).unwrap(), U256::ZERO);
     }
 

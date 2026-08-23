@@ -8,6 +8,7 @@
 // GUI 프로세스만 한다 → MCP는 "요청"만, 승인은 사람이. 잠금·한도·내역은 기존 send 경로를
 // 그대로 재사용하므로 자동 적용된다.
 
+use crate::i18n::{tf, ts};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -54,7 +55,7 @@ fn default_kind() -> String {
 pub(crate) fn ensure_request_chain(req: &PaymentRequest) -> Result<(), String> {
     if req.chain_id != 0 && req.chain_id != crate::chain::active_chain().chain_id {
         return Err(
-            "결제 요청이 만들어진 네트워크와 현재 네트워크가 달라요 — 네트워크를 확인하고 다시 요청하세요."
+            ts!("결제 요청이 만들어진 네트워크와 현재 네트워크가 달라요 — 네트워크를 확인하고 다시 요청하세요.", "This request was made on a different network than the one you're on now — check the network and ask again.")
                 .into(),
         );
     }
@@ -173,9 +174,16 @@ pub(crate) fn get_pending_request(app: tauri::AppHandle) -> Option<PaymentReques
 /// 실패(비번 오류·잠금·한도 등) 시엔 요청을 치우지 않는다 → 팝업에서 재시도하거나 거부할 수 있다.
 #[tauri::command]
 pub(crate) async fn approve_payment(id: String, password: String) -> Result<PaymentResult, String> {
-    let req = read_request().ok_or("대기 중인 결제 요청이 없습니다")?;
+    let req = read_request().ok_or(ts!(
+        "대기 중인 결제 요청이 없습니다",
+        "There's no payment request waiting"
+    ))?;
     if req.id != id {
-        return Err("요청 ID가 일치하지 않습니다".into());
+        return Err(ts!(
+            "요청 ID가 일치하지 않습니다",
+            "That request ID doesn't match"
+        )
+        .into());
     }
     ensure_request_chain(&req)?; // 요청 시점 체인 ≠ 현재 체인이면 거부(메인넷 오발사 차단)
 
@@ -199,7 +207,10 @@ pub(crate) async fn approve_payment(id: String, password: String) -> Result<Paym
             let hash = match req.token.as_str() {
                 "USDC" => send_usdc(password, req.to.clone(), req.amount.clone()).await,
                 "ETH" => send_eth(password, req.to.clone(), req.amount.clone()).await,
-                other => Err(format!("지원하지 않는 토큰: {other}")),
+                other => Err(tf!(
+                    "지원하지 않는 토큰: {other}",
+                    "Unsupported token: {other}"
+                )),
             }?;
             PaymentResult {
                 id: req.id,
@@ -217,15 +228,23 @@ pub(crate) async fn approve_payment(id: String, password: String) -> Result<Paym
 /// 결제 요청을 거부한다 — MCP에 "거부됨"을 알리고 대기 요청을 치운다.
 #[tauri::command]
 pub(crate) fn reject_payment(id: String, reason: Option<String>) -> Result<(), String> {
-    let req = read_request().ok_or("대기 중인 결제 요청이 없습니다")?;
+    let req = read_request().ok_or(ts!(
+        "대기 중인 결제 요청이 없습니다",
+        "There's no payment request waiting"
+    ))?;
     if req.id != id {
-        return Err("요청 ID가 일치하지 않습니다".into());
+        return Err(ts!(
+            "요청 ID가 일치하지 않습니다",
+            "That request ID doesn't match"
+        )
+        .into());
     }
     resolve_request(&PaymentResult {
         id: req.id,
         status: "rejected".into(),
         tx_hash: String::new(),
-        detail: reason.unwrap_or_else(|| "사용자가 거부했습니다".into()),
+        detail: reason
+            .unwrap_or_else(|| ts!("사용자가 거부했습니다", "Rejected by the user").into()),
         x402: None,
     })
 }
@@ -298,7 +317,9 @@ mod tests {
     // 승인 시간(5분) 안이면 아직 살아 있다.
     #[test]
     fn request_within_window_is_not_stale() {
-        assert!(!is_stale(&req_created(now_secs() - (APPROVAL_WINDOW_SECS - 10))));
+        assert!(!is_stale(&req_created(
+            now_secs() - (APPROVAL_WINDOW_SECS - 10)
+        )));
     }
 
     // 유예분까지 지나면 죽은 요청 — MCP 가 죽어 남긴 파일이 팝오버를 영영 붙잡지 못하게.
@@ -347,8 +368,7 @@ mod tests {
     // 기존(Session 10) 요청 파일은 kind/resource 가 없다 → default 로 채워진다(무손실 호환).
     #[test]
     fn legacy_payment_request_defaults() {
-        let json =
-            r#"{"id":"1","token":"USDC","to":"0xabc","amount":"1","memo":"","created":1}"#;
+        let json = r#"{"id":"1","token":"USDC","to":"0xabc","amount":"1","memo":"","created":1}"#;
         let r: PaymentRequest = serde_json::from_str(json).unwrap();
         assert_eq!(r.kind, "transfer");
         assert!(r.resource.is_empty());

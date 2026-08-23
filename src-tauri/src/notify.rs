@@ -4,6 +4,8 @@
 /// macOS 알림. tauri-plugin-notification(notify-rust)은 옛 NSUserNotificationCenter 를 쓰는데
 /// 최신 macOS(26에서 확인)가 이를 조용히 버린다 — show()가 Ok 인데 화면엔 안 뜸.
 /// 동작이 확인된 osascript 경로를 쓴다. (장기적으론 UNUserNotificationCenter + 서명 번들이 정석)
+use crate::i18n::tf;
+
 pub(crate) fn show_notification(title: &str, body: &str) {
     let script = format!(
         "display notification \"{}\" with title \"{}\"",
@@ -39,12 +41,12 @@ pub(crate) fn auto_pay_notice(
     to: &str,
     resource: &str,
 ) -> (String, String) {
-    let title = format!("자율 결제 {amount} {token}");
+    let title = tf!("자율 결제 {amount} {token}", "Autopay {amount} {token}");
     let body = if kind == "x402" {
         let target = if resource.is_empty() { to } else { resource };
-        format!("x402 서명 · {target}")
+        tf!("x402 서명 · {target}", "x402 signature · {target}")
     } else {
-        format!("송금 · {}", short_addr(to))
+        tf!("송금 · {}", "Transfer · {}", short_addr(to))
     };
     (title, body)
 }

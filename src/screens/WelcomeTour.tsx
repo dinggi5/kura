@@ -7,6 +7,7 @@ import { ArrowLeft, ArrowRight, Check, Sparkles } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { HELP_SECTIONS, type HelpSection } from "@/lib/helpContent";
 import { cardBase, primaryBtn, shell, FlowIcon } from "@/components/ui";
+import { t } from "@/lib/i18n";
 
 // 투어에 띄울 핵심 섹션(순서 보장). 컨셉은 인트로가, 백업은 직전 백업 플로우가 다뤘다.
 const TOUR_IDS = ["fund", "connect", "safety"] as const;
@@ -52,7 +53,7 @@ export function WelcomeTour({
     <motion.main
       role="dialog"
       aria-modal={inert ? undefined : "true"}
-      aria-label="Kura 환영 투어"
+      aria-label={t("Kura 환영 투어", "Welcome tour")}
       inert={inert ? true : undefined}
       className={cn(shell, "fixed inset-0 z-40 overflow-y-auto")}
       initial={{ opacity: 0 }}
@@ -71,7 +72,7 @@ export function WelcomeTour({
             onClick={onDone}
             className="hover:text-[var(--color-ink-900)] dark:hover:text-[#E8E5DD] transition-colors"
           >
-            건너뛰기
+            {t("건너뛰기", "Skip")}
           </button>
         )}
       </header>
@@ -91,15 +92,36 @@ export function WelcomeTour({
             {page.kind === "intro" && (
               <div className="text-center">
                 <FlowIcon><Sparkles size={22} /></FlowIcon>
-                <h1 className="mt-5 text-[20px] tracking-tight">Kura에 오신 걸 환영해요</h1>
+                <h1 className="mt-5 text-[20px] tracking-tight">
+                  {t("Kura에 오신 걸 환영해요", "Welcome to Kura")}
+                </h1>
                 <p className="mt-3 text-[13px] leading-relaxed text-[var(--color-ink-500)]">
-                  AI가 결제를 <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">요청</b>하고,
-                  당신이 <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">비밀번호로 승인</b>하는 지갑이에요.
-                  <br />
-                  열쇠는 이 컴퓨터를 떠나지 않아요.
+                  {t(
+                    <>
+                      AI가 결제를{" "}
+                      <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">요청</b>하고,
+                      당신이{" "}
+                      <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">
+                        비밀번호로 승인
+                      </b>
+                      하는 지갑이에요.
+                      <br />
+                      열쇠는 이 컴퓨터를 떠나지 않아요.
+                    </>,
+                    <>
+                      A wallet where the AI{" "}
+                      <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">asks</b> and you{" "}
+                      <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">
+                        approve with your password
+                      </b>
+                      .
+                      <br />
+                      The key never leaves this computer.
+                    </>,
+                  )}
                 </p>
                 <p className="mt-4 text-[12px] text-[var(--color-ink-300)]">
-                  몇 가지만 짚고 시작할게요.
+                  {t("몇 가지만 짚고 시작할게요.", "A few things before you start.")}
                 </p>
               </div>
             )}
@@ -119,12 +141,24 @@ export function WelcomeTour({
             {page.kind === "outro" && (
               <div className="text-center">
                 <FlowIcon><Check size={22} /></FlowIcon>
-                <h1 className="mt-5 text-[20px] tracking-tight">준비됐어요</h1>
+                <h1 className="mt-5 text-[20px] tracking-tight">{t("준비됐어요", "You're set")}</h1>
                 <p className="mt-3 text-[13px] leading-relaxed text-[var(--color-ink-500)]">
-                  받기로 테스트 코인을 채우고, AI를 연결해 보세요.
-                  <br />
-                  궁금하면 언제든 헤더의{" "}
-                  <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">ⓘ 도움말</b>을 누르면 돼요.
+                  {t(
+                    <>
+                      받기로 테스트 코인을 채우고, AI를 연결해 보세요.
+                      <br />
+                      궁금하면 언제든 헤더의{" "}
+                      <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">ⓘ 도움말</b>을
+                      누르면 돼요.
+                    </>,
+                    <>
+                      Top up with test coins from Receive, then connect your AI.
+                      <br />
+                      The{" "}
+                      <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">ⓘ Help</b>{" "}
+                      button in the header is always there.
+                    </>,
+                  )}
                 </p>
               </div>
             )}
@@ -140,7 +174,7 @@ export function WelcomeTour({
               key={idx}
               type="button"
               onClick={() => go(idx)}
-              aria-label={`${idx + 1}페이지로`}
+              aria-label={t(`${idx + 1}페이지로`, `Go to page ${idx + 1}`)}
               className={cn(
                 "h-1.5 rounded-full transition-all duration-[var(--duration-base)]",
                 idx === i
@@ -156,7 +190,7 @@ export function WelcomeTour({
             <button
               type="button"
               onClick={() => go(i - 1)}
-              aria-label="이전"
+              aria-label={t("이전", "Back")}
               className={cn(
                 "shrink-0 inline-flex items-center justify-center w-11 h-11 rounded-[var(--radius-card)]",
                 "border border-[var(--color-ivory-400)] dark:border-[var(--color-night-700)]",
@@ -179,11 +213,11 @@ export function WelcomeTour({
           >
             {last ? (
               <>
-                <Check size={15} /> 시작하기
+                <Check size={15} /> {t("시작하기", "Get started")}
               </>
             ) : (
               <>
-                다음 <ArrowRight size={15} />
+                {t("다음", "Next")} <ArrowRight size={15} />
               </>
             )}
           </button>

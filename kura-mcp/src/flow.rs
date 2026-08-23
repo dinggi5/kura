@@ -22,7 +22,7 @@ fn cap_body(body: String) -> String {
         return body;
     }
     let mut s: String = body.chars().take(MAX_BODY_CHARS).collect();
-    s.push_str("\n…(본문이 길어 잘렸어요)");
+    s.push_str("\n…(body truncated — it was long)");
     s
 }
 
@@ -36,7 +36,7 @@ async fn read_limited(mut resp: reqwest::Response) -> Result<(Vec<u8>, bool), St
     while let Some(chunk) = resp
         .chunk()
         .await
-        .map_err(|e| format!("본문 읽기 실패: {e}"))?
+        .map_err(|e| format!("Couldn't read the body: {e}"))?
     {
         if buf.len() + chunk.len() > cap {
             buf.extend_from_slice(&chunk[..cap - buf.len()]);
@@ -56,7 +56,7 @@ async fn read_body_capped(resp: reqwest::Response) -> String {
     };
     let mut s = cap_body(String::from_utf8_lossy(&bytes).into_owned());
     if truncated {
-        s.push_str("\n…(본문이 너무 커서 잘렸어요)");
+        s.push_str("\n…(body truncated — it was too large)");
     }
     s
 }
@@ -67,7 +67,7 @@ fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("HTTP 클라이언트 생성 실패: {e}"))
+        .map_err(|e| format!("Couldn't create the HTTP client: {e}"))
 }
 
 /// 결제 재요청 전용 — **리다이렉트를 따라가지 않는다**(`Policy::none`). PAYMENT-SIGNATURE/X-PAYMENT
@@ -78,7 +78,7 @@ fn http_client_no_redirect() -> Result<reqwest::Client, String> {
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| format!("HTTP 클라이언트 생성 실패: {e}"))
+        .map_err(|e| format!("Couldn't create the HTTP client: {e}"))
 }
 
 /// 결제(송금) 요청 결과 — 사람 승인 팝업에서 사용자가 응답한 결과.
@@ -104,15 +104,18 @@ pub async fn run_payment(
 ) -> Result<PayOutcome, String> {
     let token = token.trim().to_uppercase();
     if token != "USDC" && token != "ETH" {
-        return Err("token은 USDC 또는 ETH 여야 합니다".into());
+        return Err("token must be either USDC or ETH".into());
     }
     // 앱이 안 켜져 있으면 승인할 사람이 없다 → 즉시 안내(5분 대기 안 함).
     if !payment::app_alive() {
-        return Err("지갑 앱이 실행 중이 아니에요. 앱을 켠 뒤 다시 시도하세요.".into());
+        return Err("The wallet app isn't running. Open it and try again.".into());
     }
     // single-flight: 이미 대기 중인 요청이 있으면 거절.
     if payment::has_pending() {
-        return Err("이미 승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 다시 요청하세요.".into());
+        return Err(
+            "A payment is already waiting for approval. Let the user handle it, then ask again."
+                .into(),
+        );
     }
 
     let id = payment::write_request(&token, to.trim(), amount.trim(), memo.trim())?;
@@ -133,7 +136,7 @@ pub async fn run_payment(
         }
         None => {
             payment::cancel_request(&id);
-            Err("승인 시간 초과(5분). 사용자가 응답하지 않았어요.".into())
+            Err("Approval timed out after 5 minutes — the user didn't respond.".into())
         }
     }
 }
@@ -171,7 +174,7 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("요청 실패: {e}"))?;
+        .map_err(|e| format!("The request failed: {e}"))?;
     let http_status = resp.status().as_u16();
     if http_status != 402 {
         let body = read_body_capped(resp).await;
@@ -192,11 +195,11 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
     // 402 본문도 스트리밍 상한으로 읽는다(Content-Length 없는 거대 응답 차단). 잘렸으면 = 비정상.
     let (body402_bytes, truncated) = read_limited(resp).await?;
     if truncated {
-        return Err("402 응답 본문이 너무 큽니다".into());
+        return Err("The 402 response body is too large".into());
     }
     let body402 = String::from_utf8_lossy(&body402_bytes).into_owned();
     let required = x402::parse_required(pr_header.as_deref(), &body402)
-        .map_err(|e| format!("402 형식 파싱 실패: {e}"))?;
+        .map_err(|e| format!("Couldn't parse the 402 response: {e}"))?;
     let req = x402::pick_requirement(&required)?;
     let amount_usdc = x402::base_units_to_usdc(&req.amount)?;
     let resource = required.display_resource(&req, &url);
@@ -213,10 +216,13 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
 
     // 3) 승인할 앱이 켜져 있는지 + single-flight.
     if !payment::app_alive() {
-        return Err("지갑 앱이 실행 중이 아니에요. 앱을 켠 뒤 다시 시도하세요.".into());
+        return Err("The wallet app isn't running. Open it and try again.".into());
     }
     if payment::has_pending() {
-        return Err("이미 승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 다시 요청하세요.".into());
+        return Err(
+            "A payment is already waiting for approval. Let the user handle it, then ask again."
+                .into(),
+        );
     }
 
     // 4) GUI에 서명 요청 → 사람 승인 → 서명 페이로드 수신.
@@ -225,7 +231,7 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
         Some(r) => r,
         None => {
             payment::cancel_request(&id);
-            return Err("승인 시간 초과(5분). 사용자가 응답하지 않았어요.".into());
+            return Err("Approval timed out after 5 minutes — the user didn't respond.".into());
         }
     };
     if result.status != "approved" {
@@ -236,7 +242,7 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
     }
     let payment = result
         .x402
-        .ok_or("승인됐지만 서명 페이로드가 비어 있어요")?;
+        .ok_or("Approved, but the signature payload is empty")?;
 
     // 5) 결제 헤더를 붙여 재요청 → 콘텐츠 수신.
     // V2면 PAYMENT-SIGNATURE(+ resource/accepted 에코), V1이면 X-PAYMENT. 정산 응답 헤더 이름도 버전별.
@@ -248,7 +254,7 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
         .header(sub.header_name, &sub.value)
         .send()
         .await
-        .map_err(|e| format!("결제 재요청 실패: {e}"))?;
+        .map_err(|e| format!("The paid re-request failed: {e}"))?;
     let paid_status = paid_resp.status().as_u16();
     let settlement = paid_resp
         .headers()

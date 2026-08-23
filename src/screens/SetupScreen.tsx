@@ -12,6 +12,7 @@ import type { WalletInfo, WalletStatus } from "@/lib/types";
 import { markWelcomePending } from "@/lib/welcome";
 import { cardBase, enter, primaryBtn, shell, FieldHint, FlowIcon, PwInput } from "@/components/ui";
 import { BackupFlow } from "@/screens/BackupFlow";
+import { t } from "@/lib/i18n";
 
 // BIP-39 표준 길이. 백엔드(import_wallet)와 같은 집합으로 버튼 활성을 가볍게 게이팅한다.
 const VALID_WORD_COUNTS = [12, 15, 18, 21, 24];
@@ -109,10 +110,10 @@ export function SetupScreen({
   }
 
   const title = isImport
-    ? "복구 문구로 가져오기"
+    ? t("복구 문구로 가져오기", "Import a recovery phrase")
     : isLegacy
-      ? "지갑을 비밀번호로 보호하기"
-      : "새 지갑 만들기";
+      ? t("지갑을 비밀번호로 보호하기", "Protect your wallet with a password")
+      : t("새 지갑 만들기", "Create a new wallet");
 
   return (
     <main className={shell}>
@@ -128,21 +129,40 @@ export function SetupScreen({
 
         <p className="mt-2 text-center text-[13px] leading-relaxed text-[var(--color-ink-500)]">
           {isImport ? (
-            <>
-              다른 지갑의 복구 문구(12~24단어)를 입력하면
-              <br />그 지갑을 Kura로 가져와요. 새 비밀번호로 이 기기에 암호화돼요.
-            </>
+            t(
+              <>
+                다른 지갑의 복구 문구(12~24단어)를 입력하면
+                <br />그 지갑을 Kura로 가져와요. 새 비밀번호로 이 기기에 암호화돼요.
+              </>,
+              <>
+                Enter another wallet's recovery phrase (12–24 words)
+                <br />to bring that wallet into Kura. It's encrypted on this Mac with a new password.
+              </>,
+            )
           ) : isLegacy ? (
-            <>
-              지금은 키가 잠금 없이 저장돼 있어요.
-              <br />
-              비밀번호로 암호화하면 이 비번이 있어야만 송금할 수 있어요.
-            </>
+            t(
+              <>
+                지금은 키가 잠금 없이 저장돼 있어요.
+                <br />
+                비밀번호로 암호화하면 이 비번이 있어야만 송금할 수 있어요.
+              </>,
+              <>
+                Right now your key is stored unlocked.
+                <br />
+                Encrypt it with a password and nothing can be sent without that password.
+              </>,
+            )
           ) : (
-            <>
-              송금할 때마다 입력할 비밀번호를 정하세요.
-              <br />이 비번으로 키가 암호화돼 저장돼요.
-            </>
+            t(
+              <>
+                송금할 때마다 입력할 비밀번호를 정하세요.
+                <br />이 비번으로 키가 암호화돼 저장돼요.
+              </>,
+              <>
+                Choose the password you'll type for every payment.
+                <br />Your key is stored encrypted with it.
+              </>,
+            )
           )}
         </p>
 
@@ -155,7 +175,10 @@ export function SetupScreen({
               spellCheck={false}
               autoCapitalize="none"
               autoCorrect="off"
-              placeholder="복구 문구를 공백으로 구분해 입력하세요"
+              placeholder={t(
+                "복구 문구를 공백으로 구분해 입력하세요",
+                "Type your recovery phrase, words separated by spaces",
+              )}
               className={cn(
                 "w-full px-3.5 py-3 rounded-[var(--radius-card)] resize-none",
                 "bg-[var(--color-ivory-100)] dark:bg-[var(--color-night-900)]",
@@ -169,7 +192,7 @@ export function SetupScreen({
             />
             <div className="mt-1.5 flex items-center justify-between text-[11px]">
               <span className="text-[var(--color-ink-300)]">
-                주변에 보는 사람이 없는 곳에서 입력하세요.
+                {t("주변에 보는 사람이 없는 곳에서 입력하세요.", "Type this where nobody can see your screen.")}
               </span>
               {wordCount > 0 && (
                 <span
@@ -178,7 +201,7 @@ export function SetupScreen({
                     phraseOk ? "text-[var(--color-accent)]" : "text-[var(--color-ink-300)]",
                   )}
                 >
-                  단어 {wordCount}개
+                  {t(`단어 ${wordCount}개`, `${wordCount} words`)}
                 </span>
               )}
             </div>
@@ -187,7 +210,10 @@ export function SetupScreen({
 
         {!isImport && !isLegacy && (
           <p className="mt-3 text-center text-[11px] leading-relaxed text-[var(--color-ink-300)]">
-            다음 단계에서 복구용 12단어를 백업해요. 비밀번호를 잊으면 이 12단어로만 되찾을 수 있어요 — Kura 가져오기나 다른 표준 지갑(BIP-39)에서.
+            {t(
+              "다음 단계에서 복구용 12단어를 백업해요. 비밀번호를 잊으면 이 12단어로만 되찾을 수 있어요 — Kura 가져오기나 다른 표준 지갑(BIP-39)에서.",
+              "Next you'll back up your 12 recovery words. If you forget your password, those words are the only way back — through Import here, or any standard BIP-39 wallet.",
+            )}
           </p>
         )}
 
@@ -195,18 +221,22 @@ export function SetupScreen({
           <PwInput
             value={pw}
             onChange={setPw}
-            placeholder={isImport ? "새 비밀번호 (8자 이상)" : "비밀번호 (8자 이상)"}
+            placeholder={
+              isImport
+                ? t("새 비밀번호 (8자 이상)", "New password (8 characters or more)")
+                : t("비밀번호 (8자 이상)", "Password (8 characters or more)")
+            }
             onEnter={() => document.getElementById("pw2")?.focus()}
           />
-          {tooShort && <FieldHint>8자 이상으로 정해주세요.</FieldHint>}
+          {tooShort && <FieldHint>{t("8자 이상으로 정해주세요.", "Use at least 8 characters.")}</FieldHint>}
           <PwInput
             id="pw2"
             value={pw2}
             onChange={setPw2}
-            placeholder="비밀번호 확인"
+            placeholder={t("비밀번호 확인", "Confirm password")}
             onEnter={isImport ? submitImport : submit}
           />
-          {mismatch && <FieldHint>비밀번호가 서로 달라요.</FieldHint>}
+          {mismatch && <FieldHint>{t("비밀번호가 서로 달라요.", "These don't match.")}</FieldHint>}
         </div>
 
         {error && (
@@ -226,7 +256,11 @@ export function SetupScreen({
           ) : (
             <Lock size={15} />
           )}
-          {isImport ? "가져오기" : isLegacy ? "비밀번호로 보호" : "지갑 만들기"}
+          {isImport
+            ? t("가져오기", "Import")
+            : isLegacy
+              ? t("비밀번호로 보호", "Protect with password")
+              : t("지갑 만들기", "Create wallet")}
         </button>
 
         {!isLegacy && (
@@ -238,7 +272,7 @@ export function SetupScreen({
                 disabled={busy}
                 className="text-[12px] text-[var(--color-ink-500)] hover:text-[var(--color-ink-900)] transition-colors disabled:opacity-50"
               >
-                ← 새 지갑 만들기로 돌아가기
+                {t("← 새 지갑 만들기로 돌아가기", "← Back to creating a new wallet")}
               </button>
             ) : (
               <button
@@ -247,8 +281,8 @@ export function SetupScreen({
                 disabled={busy}
                 className="text-[12px] text-[var(--color-ink-500)] hover:text-[var(--color-ink-900)] transition-colors disabled:opacity-50"
               >
-                이미 복구 문구가 있나요?{" "}
-                <span className="text-[var(--color-accent)]">가져오기</span>
+                {t("이미 복구 문구가 있나요?", "Already have a recovery phrase?")}{" "}
+                <span className="text-[var(--color-accent)]">{t("가져오기", "Import it")}</span>
               </button>
             )}
           </div>

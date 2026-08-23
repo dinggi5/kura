@@ -5,6 +5,7 @@
 
 pub mod chain;
 pub mod flow;
+pub mod i18n;
 pub mod payment;
 pub mod wallet;
 pub mod x402;

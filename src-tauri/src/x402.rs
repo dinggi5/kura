@@ -7,6 +7,7 @@
 // 보안: 서명도 "내 USDC를 빼갈 권한"을 주는 행위다 → 송금과 똑같이 긴급 잠금·단일/일일
 // 한도를 적용하고, 서명 시점에 누적 사용액에 기록한다(보수적: 서명=인출 권한 부여).
 
+use crate::i18n::{tf, ts};
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::OsRng;
 use alloy::primitives::{Address, B256, U256};
@@ -88,7 +89,7 @@ async fn sign_authorization(
     let sig = signer
         .sign_hash(&hash)
         .await
-        .map_err(|e| format!("서명 실패: {e}"))?;
+        .map_err(|e| tf!("서명 실패: {e}", "Couldn't sign: {e}"))?;
 
     // 65바이트 r||s||v (v=27/28) — EIP-3009 ecrecover 가 기대하는 형식.
     let mut sig_bytes = [0u8; 65];
@@ -158,15 +159,29 @@ async fn do_sign_x402_inner(
     let amt = amount_usdc.trim();
     let value: U256 = parse_usdc_nonneg(amt, dec)?;
     if value.is_zero() {
-        return Err("0보다 큰 금액을 입력하세요".into());
+        return Err(ts!(
+            "0보다 큰 금액을 입력하세요",
+            "Enter an amount greater than 0"
+        )
+        .into());
     }
     let to_addr = parse_to_addr(&to)?;
     let to = to.trim();
 
     // 긴급 잠금: 켜져 있으면 결제를 가장 먼저 차단한다 (비상 스위치).
     if read_lock() {
-        log_attempt("USDC", to, amt, "blocked", "긴급 잠금 (x402 서명)");
-        return Err("긴급 잠금이 켜져 있어 결제가 차단됐어요. 해제 후 다시 시도하세요.".into());
+        log_attempt(
+            "USDC",
+            to,
+            amt,
+            "blocked",
+            ts!("긴급 잠금 (x402 서명)", "Emergency lock (x402 signature)"),
+        );
+        return Err(ts!(
+            "긴급 잠금이 켜져 있어 결제가 차단됐어요. 해제 후 다시 시도하세요.",
+            "Emergency lock is on, so the payment was blocked. Turn it off and try again."
+        )
+        .into());
     }
 
     // 한도 검사 + 예약 (송금과 동일 — 서명도 USDC 인출 권한 부여라 누적에 보수적으로 선반영).
@@ -295,7 +310,10 @@ mod tests {
                 .call()
                 .await
                 .expect("DOMAIN_SEPARATOR 조회");
-            println!("chain {} : local = {local}  onchain = {onchain}", chain.chain_id);
+            println!(
+                "chain {} : local = {local}  onchain = {onchain}",
+                chain.chain_id
+            );
             assert_eq!(local, onchain, "체인 {} 도메인 불일치", chain.chain_id);
         }
     }

@@ -1,5 +1,7 @@
 // 표시용 포맷 헬퍼 + 공용 상수.
 
+import { locale, t } from "./i18n";
+
 /** 단일 거래 안전 상한 (백엔드 상수와 일치). */
 export const MAX_ETH = 0.05;
 export const MAX_USDC = 5;
@@ -40,9 +42,10 @@ export function isAddressLike(s: string): boolean {
 /** 유닉스 초 → 상대 시각 ("방금", "N분 전", 날짜). */
 export function fmtRelTime(ts: number): string {
   const diff = Date.now() / 1000 - ts;
-  if (diff < 60) return "방금";
-  if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
-  if (diff < 7 * 86400) return `${Math.floor(diff / 86400)}일 전`;
-  return new Date(ts * 1000).toLocaleDateString("ko-KR", { month: "short", day: "numeric" });
+  const n = (v: number) => Math.floor(v);
+  if (diff < 60) return t("방금", "just now");
+  if (diff < 3600) return t(`${n(diff / 60)}분 전`, `${n(diff / 60)}m ago`);
+  if (diff < 86400) return t(`${n(diff / 3600)}시간 전`, `${n(diff / 3600)}h ago`);
+  if (diff < 7 * 86400) return t(`${n(diff / 86400)}일 전`, `${n(diff / 86400)}d ago`);
+  return new Date(ts * 1000).toLocaleDateString(locale(), { month: "short", day: "numeric" });
 }

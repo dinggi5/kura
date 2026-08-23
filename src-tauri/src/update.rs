@@ -17,6 +17,7 @@
 //   4. **승인 대기 중엔 설치를 막는다.** 설치 끝에 앱을 재시작하는데, 그때 대기 중인 결제
 //      요청이 있으면 그대로 죽는다 — MCP 쪽은 응답을 영영 못 받는다.
 
+use crate::i18n::{tf, ts};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -64,17 +65,23 @@ pub(crate) async fn check_update(
     app: AppHandle,
     state: State<'_, PendingUpdate>,
 ) -> Result<Option<UpdateInfo>, String> {
-    let updater = app
-        .updater()
-        .map_err(|e| format!("업데이트 확인을 준비하지 못했어요: {e}"))?;
+    let updater = app.updater().map_err(|e| {
+        tf!(
+            "업데이트 확인을 준비하지 못했어요: {e}",
+            "Couldn't get ready to check for updates: {e}"
+        )
+    })?;
 
     let found = updater
         .check()
         .await
-        .map_err(|e| format!("업데이트 확인 실패: {e}"))?;
+        .map_err(|e| tf!("업데이트 확인 실패: {e}", "Couldn't check for updates: {e}"))?;
 
     // 락은 await 가 끝난 뒤에만 잡는다 (std Mutex 가드를 await 너머로 들고 가면 안 된다).
-    let mut slot = state.0.lock().map_err(|_| "업데이트 상태가 깨졌어요".to_string())?;
+    let mut slot = state
+        .0
+        .lock()
+        .map_err(|_| ts!("업데이트 상태가 깨졌어요", "The update state is broken").to_string())?;
     match found {
         Some(update) => {
             let info = UpdateInfo {
@@ -105,15 +112,26 @@ pub(crate) async fn install_update(
     // 🔴 설치는 재시작으로 끝난다. 승인 대기 중인 결제가 있으면 그 요청은 응답 없이 죽고,
     // MCP 쪽은 타임아웃까지 매달린다. 사람이 결정할 게 남아 있는 동안엔 앱을 안 내린다.
     if crate::ipc::has_pending() {
-        return Err("승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 업데이트하세요.".into());
+        return Err(ts!(
+            "승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 업데이트하세요.",
+            "A payment is waiting for your approval. Handle it first, then update."
+        )
+        .into());
     }
 
     // 객체를 꺼내 온다(락을 await 너머로 안 들고 가려고). 실패하면 아래에서 되돌려 놓는다 —
     // 다운로드가 한 번 끊겼다고 사용자가 검사부터 다시 하게 만들 이유가 없다.
     let update = {
-        let mut slot = state.0.lock().map_err(|_| "업데이트 상태가 깨졌어요".to_string())?;
-        slot.take()
-            .ok_or_else(|| "설치할 업데이트가 없어요. 다시 확인해 주세요.".to_string())?
+        let mut slot = state.0.lock().map_err(|_| {
+            ts!("업데이트 상태가 깨졌어요", "The update state is broken").to_string()
+        })?;
+        slot.take().ok_or_else(|| {
+            ts!(
+                "설치할 업데이트가 없어요. 다시 확인해 주세요.",
+                "There's no update to install. Check again."
+            )
+            .to_string()
+        })?
     };
 
     // 받기와 깔기를 **나눠서** 한다. `download_and_install` 한 방이면 위의 대기 검사와
@@ -134,7 +152,16 @@ pub(crate) async fn install_update(
         .await
     {
         Ok(b) => b,
-        Err(e) => return Err(restore_slot(&state, update, format!("업데이트 내려받기 실패: {e}"))),
+        Err(e) => {
+            return Err(restore_slot(
+                &state,
+                update,
+                tf!(
+                    "업데이트 내려받기 실패: {e}",
+                    "Couldn't download the update: {e}"
+                ),
+            ))
+        }
     };
 
     // 🔴 다시 확인한다. 여기까지가 되돌릴 수 있는 마지막 지점이다 — 아직 앱을 안 건드렸고,
@@ -143,12 +170,23 @@ pub(crate) async fn install_update(
         return Err(restore_slot(
             &state,
             update,
-            "내려받는 사이에 결제 승인 요청이 들어왔어요. 먼저 처리한 뒤 다시 시도하세요.".into(),
+            ts!(
+                "내려받는 사이에 결제 승인 요청이 들어왔어요. 먼저 처리한 뒤 다시 시도하세요.",
+                "A payment request came in while downloading. Handle it first, then try again."
+            )
+            .into(),
         ));
     }
 
     if let Err(e) = update.install(bytes) {
-        return Err(restore_slot(&state, update, format!("업데이트 설치 실패: {e}")));
+        return Err(restore_slot(
+            &state,
+            update,
+            tf!(
+                "업데이트 설치 실패: {e}",
+                "Couldn't install the update: {e}"
+            ),
+        ));
     }
 
     // 여기까지 왔으면 새 번들이 디스크에 깔렸다. 재시작해야 새 코드가 돈다 —

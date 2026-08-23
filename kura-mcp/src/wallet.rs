@@ -27,7 +27,7 @@ sol! {
 }
 
 pub fn jigap_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("홈 디렉터리를 찾을 수 없습니다")?;
+    let home = dirs::home_dir().ok_or("Couldn't find the home folder")?;
     Ok(home.join(".jigap"))
 }
 
@@ -146,8 +146,10 @@ struct LegacyMeta {
 /// 지갑 파일 상태를 알려준다 (비번 불필요).
 pub fn wallet_status() -> Result<WalletStatus, String> {
     if enc_path()?.exists() {
-        let data = fs::read_to_string(enc_path()?).map_err(|e| format!("지갑 파일 읽기 실패: {e}"))?;
-        let m: EncMeta = serde_json::from_str(&data).map_err(|e| format!("지갑 파일 파싱 실패: {e}"))?;
+        let data = fs::read_to_string(enc_path()?)
+            .map_err(|e| format!("Couldn't read the wallet file: {e}"))?;
+        let m: EncMeta = serde_json::from_str(&data)
+            .map_err(|e| format!("Couldn't parse the wallet file: {e}"))?;
         return Ok(WalletStatus {
             state: "encrypted".into(),
             address: Some(m.address),
@@ -155,10 +157,10 @@ pub fn wallet_status() -> Result<WalletStatus, String> {
         });
     }
     if legacy_path()?.exists() {
-        let data =
-            fs::read_to_string(legacy_path()?).map_err(|e| format!("지갑 파일 읽기 실패: {e}"))?;
-        let m: LegacyMeta =
-            serde_json::from_str(&data).map_err(|e| format!("지갑 파일 파싱 실패: {e}"))?;
+        let data = fs::read_to_string(legacy_path()?)
+            .map_err(|e| format!("Couldn't read the wallet file: {e}"))?;
+        let m: LegacyMeta = serde_json::from_str(&data)
+            .map_err(|e| format!("Couldn't parse the wallet file: {e}"))?;
         return Ok(WalletStatus {
             state: "legacy".into(),
             address: Some(m.address),
@@ -181,34 +183,44 @@ pub struct Balances {
 
 /// 지갑 주소의 ETH(가스용) + USDC(결제용) 잔액을 Base Sepolia에서 조회한다.
 pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
-    let addr: Address = addr_hex.parse().map_err(|e| format!("주소 파싱 실패: {e}"))?;
+    let addr: Address = addr_hex
+        .parse()
+        .map_err(|e| format!("Couldn't read that address: {e}"))?;
 
     let provider = ProviderBuilder::new()
         .connect(&effective_rpc())
         .await
-        .map_err(|e| format!("RPC 연결 실패: {}", redact_urls(&e.to_string())))?;
+        .map_err(|e| {
+            format!(
+                "Couldn't reach the RPC server: {}",
+                redact_urls(&e.to_string())
+            )
+        })?;
 
     let usdc_contract = IERC20::new(active_chain().usdc_address, &provider);
     let (wei, raw): (U256, U256) = tokio::try_join!(
         async {
-            provider
-                .get_balance(addr)
-                .await
-                .map_err(|e| format!("ETH 잔액 조회 실패: {}", redact_urls(&e.to_string())))
+            provider.get_balance(addr).await.map_err(|e| {
+                format!(
+                    "Couldn't read the ETH balance: {}",
+                    redact_urls(&e.to_string())
+                )
+            })
         },
         async {
-            usdc_contract
-                .balanceOf(addr)
-                .call()
-                .await
-                .map_err(|e| format!("USDC 잔액 조회 실패: {}", redact_urls(&e.to_string())))
+            usdc_contract.balanceOf(addr).call().await.map_err(|e| {
+                format!(
+                    "Couldn't read the USDC balance: {}",
+                    redact_urls(&e.to_string())
+                )
+            })
         },
     )?;
 
     Ok(Balances {
         eth: format_ether(wei),
         usdc: format_units(raw, active_chain().usdc_decimals)
-            .map_err(|e| format!("USDC 단위 변환 실패: {e}"))?,
+            .map_err(|e| format!("Couldn't convert the USDC amount: {e}"))?,
     })
 }
 
@@ -293,16 +305,23 @@ mod tests {
     /// MCP/CLI 에러는 AI 채팅으로 나가므로 URL 의 API 키가 새면 안 된다.
     #[test]
     fn redact_hides_url_api_key() {
-        let raw = "RPC 연결 실패: error sending request for url (https://h/v2/SUPERSECRETKEY): timed out";
+        let raw =
+            "RPC 연결 실패: error sending request for url (https://h/v2/SUPERSECRETKEY): timed out";
         let red = redact_urls(raw);
         assert!(!red.contains("SUPERSECRETKEY"), "키가 남음: {red}");
-        assert!(red.contains("[RPC]") && red.contains("timed out"), "형태 깨짐: {red}");
+        assert!(
+            red.contains("[RPC]") && red.contains("timed out"),
+            "형태 깨짐: {red}"
+        );
     }
 
     /// 코덱스: host 대소문자·query 콤마·ws/wss 우회 차단.
     #[test]
     fn redact_handles_case_subdelims_and_ws() {
-        assert_eq!(redact_urls("x HTTPS://BASE.ALCHEMY.com/v2/KEY y"), "x [RPC] y");
+        assert_eq!(
+            redact_urls("x HTTPS://BASE.ALCHEMY.com/v2/KEY y"),
+            "x [RPC] y"
+        );
         let red = redact_urls("https://rpc.example/rpc?x=a,api_key=SECRET done");
         assert!(!red.contains("SECRET"), "{red}");
         assert_eq!(red, "[RPC] done");
@@ -332,6 +351,9 @@ mod tests {
     fn redact_leaves_non_urls() {
         assert_eq!(redact_urls("주소 파싱 실패: bad"), "주소 파싱 실패: bad");
         assert_eq!(redact_urls("just :// floating"), "just :// floating");
-        assert_eq!(redact_urls("잔액 조회 실패: https://x/y 입니다"), "잔액 조회 실패: [RPC] 입니다");
+        assert_eq!(
+            redact_urls("잔액 조회 실패: https://x/y 입니다"),
+            "잔액 조회 실패: [RPC] 입니다"
+        );
     }
 }

@@ -11,6 +11,7 @@
 //   lock      긴급 잠금 (비상 스위치)
 //   trusted   화이트리스트(신뢰 주소) — 자율 결제 가드
 //   history   거래 내역 + x402 정산 추적
+//   i18n      화면 언어(한국어·영어) — 사람에게 보이는 문자열 두 벌 (개발 42)
 //   transfer  온체인 송금(ETH/USDC) + 잔액 조회
 //   x402      EIP-3009 오프체인 서명 (x402 "exact")
 //   ipc       MCP ↔ GUI 결제 승인 파일 IPC + AI 연결 배지
@@ -25,6 +26,7 @@ mod autostart;
 mod chain;
 mod connect;
 mod history;
+mod i18n;
 mod ipc;
 mod limits;
 mod lock;
@@ -81,6 +83,8 @@ pub fn run() {
         .manage(tray::PopoverState::default())
         .manage(update::PendingUpdate::default())
         .setup(|app| {
+            // 언어를 제일 먼저 정한다 — 트레이 메뉴부터 이미 사람이 읽는 글자다 (개발 42).
+            i18n::init();
             tray::build(app.handle())?;
             // 업데이트가 자동 시작 설정을 지우고 갔는지 확인해 되살린다(개발 31).
             // 트레이보다 뒤, 창을 띄우기 전 — 실패해도 앱은 그대로 뜬다.
@@ -149,6 +153,8 @@ pub fn run() {
             autostart::get_autostart,
             autostart::set_autostart,
             settings::set_auto_check_update,
+            settings::set_lang,
+            settings::get_lang,
             update::check_update,
             update::install_update,
             connect::get_connect_status,

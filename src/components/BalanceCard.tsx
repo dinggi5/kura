@@ -6,6 +6,7 @@ import { cn } from "@/lib/cn";
 import { fmtAmount, shortenAddress } from "@/lib/format";
 import type { Balances } from "@/lib/types";
 import { cardBase, enter } from "@/components/ui";
+import { t } from "@/lib/i18n";
 
 export function BalanceCard({
   address,
@@ -27,12 +28,12 @@ export function BalanceCard({
   return (
     <motion.section {...enter} className={cn(cardBase, "px-8 py-10")}>
       <div className="flex items-center justify-between">
-        <p className="text-[11px] tracking-[0.04em] text-[var(--color-ink-500)]">총 잔액</p>
+        <p className="text-[11px] tracking-[0.04em] text-[var(--color-ink-500)]">{t("총 잔액", "Total balance")}</p>
         <button
           type="button"
           onClick={onRefresh}
           disabled={refreshing}
-          aria-label="잔액 새로고침"
+          aria-label={t("잔액 새로고침", "Refresh balance")}
           className={cn(
             "inline-flex items-center justify-center w-7 h-7 rounded-full",
             "text-[var(--color-ink-500)] dark:text-[#B5AFA2]",
@@ -58,9 +59,9 @@ export function BalanceCard({
       <p className="mt-2 flex items-center gap-1.5 text-[13px] text-[var(--color-ink-500)] num">
         <Fuel size={12} className="text-[var(--color-ink-300)]" />
         {balanceError ? (
-          <span className="text-red-500/80 text-[12px]">잔액 조회 실패</span>
+          <span className="text-red-500/80 text-[12px]">{t("잔액 조회 실패", "Couldn't load balance")}</span>
         ) : (
-          <>가스용 ETH {fmtAmount(balances?.eth, 5)}</>
+          <>{t("가스용 ETH ", "ETH for gas ")}{fmtAmount(balances?.eth, 5)}</>
         )}
       </p>
 

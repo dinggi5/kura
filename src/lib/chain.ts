@@ -8,10 +8,12 @@
 
 import { createContext, useContext } from "react";
 
+import { t } from "./i18n";
+
 export interface ChainConfig {
   /** EIP-155 체인 ID — settings.chain_id 와 매칭. */
   id: number;
-  /** 사람용 표시 이름 (예: "Base Sepolia"). */
+  /** 사람용 표시 이름 (예: "Base Sepolia"). 언어를 타는 값이라 `chainName()` 으로 읽는다. */
   name: string;
   /** 익스플로러 이름 (버튼 라벨용, 예: "BaseScan"). */
   explorerName: string;
@@ -39,7 +41,7 @@ export const BASE_SEPOLIA: ChainConfig = {
 /** Base 메인넷 (실제 자금). 신규 기본 체인 (개발 39). */
 export const BASE_MAINNET: ChainConfig = {
   id: 8453,
-  name: "Base 메인넷",
+  name: t("Base 메인넷", "Base mainnet"),
   explorerName: "BaseScan",
   explorerTx: "https://basescan.org/tx/",
   defaultRpc: "https://mainnet.base.org",

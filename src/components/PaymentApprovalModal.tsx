@@ -19,6 +19,7 @@ import { useChain } from "@/lib/chain";
 import { fmtAmount, fmtCountdown, secsLeft, shortenAddress } from "@/lib/format";
 import type { Balances, PaymentRequest } from "@/lib/types";
 import { modalCard, modalOverlay, primaryBtn, secondaryBtn, PwInput } from "@/components/ui";
+import { t } from "@/lib/i18n";
 
 /// 십진 문자열을 토큰 decimals 기준 base unit(BigInt)으로. 형식이 아니면 null(검사 생략).
 /// 부동소수 비교의 정밀도 손실을 피하려고 정수 비교용으로 쓴다.
@@ -99,7 +100,12 @@ export function PaymentApprovalModal({
   async function reject() {
     setBusy(true);
     try {
-      await invoke("reject_payment", { id: request.id, reason: "사용자가 거부함" });
+      // 이 문구는 내역에 그대로 저장된다 — 나중에 언어를 바꿔도 옛 기록은 그때 언어로 남는다
+      // (기록은 "그때 그렇게 보였다"의 사본이라 소급해 고치지 않는다).
+      await invoke("reject_payment", {
+        id: request.id,
+        reason: t("사용자가 거부함", "Rejected by the user"),
+      });
     } catch {
       /* 거부 실패는 무시 — 어차피 닫는다 */
     }
@@ -125,7 +131,9 @@ export function PaymentApprovalModal({
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5 text-[11px] tracking-[0.04em] text-[var(--color-accent)]">
             <Bot size={13} />
-            {isX402 ? "AI x402 결제 요청" : "AI 결제 요청"}
+            {isX402
+              ? t("AI x402 결제 요청", "AI x402 payment request")
+              : t("AI 결제 요청", "AI payment request")}
           </span>
           <span className="num text-[11px] text-[var(--color-ink-300)]">{fmtCountdown(remaining)}</span>
         </div>
@@ -139,7 +147,7 @@ export function PaymentApprovalModal({
         >
           <Globe size={11} />
           {chain.name}
-          {!chain.testnet && " · 실제 자금"}
+          {!chain.testnet && t(" · 실제 자금", " · real funds")}
         </div>
 
         {/* 무엇에 대한 결제인지 */}
@@ -148,7 +156,9 @@ export function PaymentApprovalModal({
             {request.memo}
           </p>
         ) : (
-          <p className="mt-4 text-[13px] text-[var(--color-ink-300)]">결제 사유가 제공되지 않았어요.</p>
+          <p className="mt-4 text-[13px] text-[var(--color-ink-300)]">
+            {t("결제 사유가 제공되지 않았어요.", "No reason was given for this payment.")}
+          </p>
         )}
 
         {/* x402: 결제 대상 리소스 URL */}
@@ -173,19 +183,22 @@ export function PaymentApprovalModal({
           {trusted === true && (
             <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--color-ink-300)]">
               <ShieldCheck size={11} />
-              이전에 승인한 주소
+              {t("이전에 승인한 주소", "You've approved this address before")}
             </p>
           )}
           {trusted === false && (
             <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-500">
               <AlertTriangle size={11} />
-              처음 보는 주소예요
+              {t("처음 보는 주소예요", "You haven't sent here before")}
             </p>
           )}
           {isX402 && (
             <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--color-ink-300)]">
               <FileSignature size={11} />
-              오프체인 서명 · 가스 없음 (정산은 페이실리테이터)
+              {t(
+                "오프체인 서명 · 가스 없음 (정산은 페이실리테이터)",
+                "Off-chain signature · no gas (the facilitator settles it)",
+              )}
             </p>
           )}
         </div>
@@ -193,18 +206,25 @@ export function PaymentApprovalModal({
         {locked && (
           <p className="mt-1 flex items-center gap-1.5 text-[11px] text-red-600 dark:text-red-500">
             <ShieldAlert size={12} />
-            긴급 잠금 중 — 승인해도 차단돼요. 먼저 잠금을 해제하세요.
+            {t(
+              "긴급 잠금 중 — 승인해도 차단돼요. 먼저 잠금을 해제하세요.",
+              "Emergency lock is on — approving won't send. Turn the lock off first.",
+            )}
           </p>
         )}
         {!tokenOk && (
-          <p className="mt-1 text-[11px] text-red-500">알 수 없는 토큰: {request.token}</p>
+          <p className="mt-1 text-[11px] text-red-500">
+            {t(`알 수 없는 토큰: ${request.token}`, `Unknown token: ${request.token}`)}
+          </p>
         )}
         {insufficient && (
           <p className="mt-1 flex items-center gap-1.5 text-[11px] text-red-600 dark:text-red-500">
             <AlertTriangle size={12} className="shrink-0" />
-            {request.token} 잔액이 부족해요 · 보유 {fmtAmount(haveStr ?? "0", 6)} / 필요{" "}
-            {fmtAmount(request.amount, 6)}
-            {isX402 && " (정산 시 실패)"}
+            {t(
+              `${request.token} 잔액이 부족해요 · 보유 ${fmtAmount(haveStr ?? "0", 6)} / 필요 ${fmtAmount(request.amount, 6)}`,
+              `Not enough ${request.token} · you have ${fmtAmount(haveStr ?? "0", 6)}, this needs ${fmtAmount(request.amount, 6)}`,
+            )}
+            {isX402 && t(" (정산 시 실패)", " (settlement would fail)")}
           </p>
         )}
 
@@ -212,7 +232,11 @@ export function PaymentApprovalModal({
           <PwInput
             value={pw}
             onChange={setPw}
-            placeholder={isX402 ? "비밀번호로 서명 승인" : "비밀번호로 승인"}
+            placeholder={
+              isX402
+                ? t("비밀번호로 서명 승인", "Password to approve the signature")
+                : t("비밀번호로 승인", "Password to approve")
+            }
             autoFocus
             onEnter={() => pw && !busy && tokenOk && !locked && !insufficient && approve()}
           />
@@ -222,7 +246,7 @@ export function PaymentApprovalModal({
 
         <div className="mt-5 grid grid-cols-[1fr_1.8fr] gap-2">
           <button type="button" onClick={reject} disabled={busy} className={cn(secondaryBtn, "w-full")}>
-            거부
+            {t("거부", "Reject")}
           </button>
           <button
             type="button"
@@ -237,7 +261,7 @@ export function PaymentApprovalModal({
             ) : (
               <Lock size={15} />
             )}
-            {isX402 ? "승인하고 서명" : "승인하고 보내기"}
+            {isX402 ? t("승인하고 서명", "Approve and sign") : t("승인하고 보내기", "Approve and send")}
           </button>
         </div>
       </motion.section>

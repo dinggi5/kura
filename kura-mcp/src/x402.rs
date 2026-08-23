@@ -79,7 +79,8 @@ pub struct Submission {
 fn network_supported(raw: &str) -> bool {
     let chain = active_chain();
     let n = raw.trim();
-    n.eq_ignore_ascii_case(chain.x402_network_v1) || n.eq_ignore_ascii_case(chain.x402_network_caip2)
+    n.eq_ignore_ascii_case(chain.x402_network_v1)
+        || n.eq_ignore_ascii_case(chain.x402_network_caip2)
 }
 
 fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -93,16 +94,15 @@ pub fn parse_required(header: Option<&str>, body: &str) -> Result<PaymentRequire
         Some(h) => {
             let bytes = B64
                 .decode(h)
-                .map_err(|e| format!("payment-required 헤더 base64 디코드 실패: {e}"))?;
+                .map_err(|e| format!("Couldn't base64-decode the payment-required header: {e}"))?;
             serde_json::from_slice(&bytes)
-                .map_err(|e| format!("payment-required 헤더 JSON 파싱 실패: {e}"))?
+                .map_err(|e| format!("Couldn't parse the payment-required header as JSON: {e}"))?
         }
-        None => serde_json::from_str(body).map_err(|e| format!("402 본문 파싱 실패: {e}"))?,
+        None => {
+            serde_json::from_str(body).map_err(|e| format!("Couldn't parse the 402 body: {e}"))?
+        }
     };
-    let version = raw
-        .get("x402Version")
-        .and_then(Value::as_u64)
-        .unwrap_or(1) as u8;
+    let version = raw.get("x402Version").and_then(Value::as_u64).unwrap_or(1) as u8;
     Ok(PaymentRequired { raw, version })
 }
 
@@ -149,7 +149,7 @@ pub fn pick_requirement(pr: &PaymentRequired) -> Result<Requirement, String> {
         })
         .unwrap_or_default();
     Err(format!(
-        "지원하는 결제 요구가 없어요. 우리는 exact·Base Sepolia(USDC)만 지원합니다. 서버 제시: [{}]",
+        "No supported payment requirement. Kura supports the exact scheme on Base with USDC only. Server offered: [{}]",
         offered.join(", ")
     ))
 }
@@ -215,7 +215,8 @@ impl PaymentRequired {
             });
             (body, "X-PAYMENT", "X-PAYMENT-RESPONSE")
         };
-        let bytes = serde_json::to_vec(&json).map_err(|e| format!("payload 직렬화 실패: {e}"))?;
+        let bytes = serde_json::to_vec(&json)
+            .map_err(|e| format!("Couldn't serialize the payload: {e}"))?;
         Ok(Submission {
             header_name,
             value: B64.encode(bytes),
@@ -231,7 +232,7 @@ pub fn base_units_to_usdc(base: &str) -> Result<String, String> {
     let n: u128 = base
         .trim()
         .parse()
-        .map_err(|_| format!("금액 형식 오류: {base}"))?;
+        .map_err(|_| format!("That amount isn't a valid number: {base}"))?;
     let whole = n / scale;
     let frac = n % scale;
     if frac == 0 {
@@ -328,7 +329,10 @@ mod tests {
         assert_eq!(req.amount, "10000");
         assert_eq!(req.pay_to, "0x1111111111111111111111111111111111111111");
         assert_eq!(pr.description(&req), "프리미엄 데이터");
-        assert_eq!(pr.display_resource(&req, "fallback"), "https://example.com/data");
+        assert_eq!(
+            pr.display_resource(&req, "fallback"),
+            "https://example.com/data"
+        );
     }
 
     /// V2: payment-required 헤더(base64)에서 파싱 + eip155:84532 요구 선택(solana는 건너뜀).
@@ -341,7 +345,10 @@ mod tests {
         assert_eq!(req.network, "eip155:84532"); // solana 가 아니라 EVM 을 골라야 한다
         assert_eq!(req.amount, "10000"); // "amount" 필드도 읽힌다
         assert_eq!(req.pay_to, "0x209693Bc6afc0C5328bA36FaF03C514EF312287C");
-        assert_eq!(pr.display_resource(&req, "fallback"), "https://www.x402.org/protected");
+        assert_eq!(
+            pr.display_resource(&req, "fallback"),
+            "https://www.x402.org/protected"
+        );
         assert_eq!(pr.description(&req), "Access to protected content");
     }
 
@@ -383,7 +390,8 @@ mod tests {
     /// 정산 응답 파싱: V2 "transaction" / V1 "txHash" 둘 다, success 기본 true, tx 없으면 None.
     #[test]
     fn settlement_parse() {
-        let v2 = B64.encode(r#"{"success":true,"transaction":"0xSETTLE","network":"eip155:84532"}"#);
+        let v2 =
+            B64.encode(r#"{"success":true,"transaction":"0xSETTLE","network":"eip155:84532"}"#);
         assert_eq!(parse_settlement(&v2), Some(("0xSETTLE".into(), true)));
         let v1 = B64.encode(r#"{"success":false,"txHash":"0xT1"}"#);
         assert_eq!(parse_settlement(&v1), Some(("0xT1".into(), false)));

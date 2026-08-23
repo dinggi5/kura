@@ -30,6 +30,7 @@ import { GITHUB_URL } from "@/lib/helpContent";
 import type { Settings, SpendView } from "@/lib/types";
 import type { UpdateHook } from "@/lib/useUpdate";
 import { cardBase, enter, inputBase, modalCard, modalOverlay, primaryBtn, shell } from "@/components/ui";
+import { chooseLang, lang, t, type Lang } from "@/lib/i18n";
 
 const RPC_CUSTOM = "__custom__";
 
@@ -42,8 +43,8 @@ type BoolSettingKey = "lock_on_blur" | "notify_auto" | "auto_trusted_only";
 // 저장하면 체인을 바꿔도 옛 RPC 에 고정되는 함정이 생긴다 (개발 18 코덱스 리뷰 #1).
 function rpcPresets(chain: ChainConfig): { label: string; url: string }[] {
   return [
-    { label: `${chain.name} 공식`, url: "" },
-    { label: "PublicNode (로그 없음 표방)", url: chain.publicNode },
+    { label: t(`${chain.name} 공식`, `${chain.name} official`), url: "" },
+    { label: t("PublicNode (로그 없음 표방)", "PublicNode (claims no logs)"), url: chain.publicNode },
   ];
 }
 
@@ -199,7 +200,7 @@ export function SettingsScreen({
         <header className="flex items-center justify-between text-[12px] text-[var(--color-ink-500)]">
           <span className="flex items-center gap-2">
             <SettingsIcon size={12} className="text-[var(--color-accent)]" />
-            설정
+            {t("설정", "Settings")}
           </span>
           <button
             type="button"
@@ -207,7 +208,7 @@ export function SettingsScreen({
             disabled={busy}
             className="hover:text-[var(--color-ink-900)] dark:hover:text-[#E8E5DD] transition-colors disabled:opacity-40 disabled:pointer-events-none"
           >
-            닫기
+            {t("닫기", "Close")}
           </button>
         </header>
 
@@ -215,7 +216,9 @@ export function SettingsScreen({
           <motion.section {...enter} className={cn(cardBase, "px-6 py-10")}>
             <div className="flex flex-col items-center">
               <Loader2 size={24} className="animate-spin text-[var(--color-accent)]" />
-              <p className="mt-3 text-[13px] text-[var(--color-ink-500)]">설정 불러오는 중…</p>
+              <p className="mt-3 text-[13px] text-[var(--color-ink-500)]">
+                {t("설정 불러오는 중…", "Loading settings…")}
+              </p>
             </div>
           </motion.section>
         ) : (
@@ -224,13 +227,18 @@ export function SettingsScreen({
             {/* 한도 — 단일/하루 누적 한도(USDC·ETH) */}
             <Section
               icon={<Gauge size={13} className="text-[var(--color-accent)]" />}
-              title="한도"
+              title={t("한도", "Limits")}
               delay={0}
             >
               <p className="text-[13px] leading-relaxed text-[var(--color-ink-500)]">
-                단일 거래·하루 누적 한도를 넘으면 송금을 막아줘요. AI의 큰 지출을 막기 위한 안전 장치예요.
+                {t(
+                  "단일 거래·하루 누적 한도를 넘으면 송금을 막아줘요. AI의 큰 지출을 막기 위한 안전 장치예요.",
+                  "Anything over the per-payment or daily limit is blocked. This is the guardrail against a big spend by the AI.",
+                )}
               </p>
-              <p className="mt-1.5 text-[11px] text-[var(--color-ink-300)]">0으로 두면 무제한이에요.</p>
+              <p className="mt-1.5 text-[11px] text-[var(--color-ink-300)]">
+                {t("0으로 두면 무제한이에요.", "Leave a limit at 0 for no limit.")}
+              </p>
 
               <div className="mt-5 space-y-3">
                 <LimitGroup
@@ -256,35 +264,43 @@ export function SettingsScreen({
             {/* 자율 결제 (Session 14) — 한도 이하 AI 결제를 비번 없이 자동 승인 */}
             <Section
               icon={<Zap size={13} className="text-[var(--color-accent)]" />}
-              title="자율 결제"
+              title={t("자율 결제", "Autopay")}
               delay={0.04}
             >
               <p className="text-[13px] leading-relaxed text-[var(--color-ink-500)]">
-                이 금액 이하의 AI 결제 요청은, 세션을 잠금 해제해 두면 비번 없이 자동 승인돼요.
-                넘는 금액은 항상 비번을 받아요.
+                {t(
+                  "이 금액 이하의 AI 결제 요청은, 세션을 잠금 해제해 두면 비번 없이 자동 승인돼요. 넘는 금액은 항상 비번을 받아요.",
+                  "With the session unlocked, AI payments at or under this amount go through without your password. Anything larger always asks.",
+                )}
               </p>
               <p className="mt-1.5 text-[11px] text-[var(--color-ink-300)]">
-                한도를 0으로 두면 자율 결제가 꺼져요(항상 비번). 단일·하루 한도는 그대로 함께 적용돼요.
+                {t(
+                  "한도를 0으로 두면 자율 결제가 꺼져요(항상 비번). 단일·하루 한도는 그대로 함께 적용돼요.",
+                  "Set the limit to 0 to turn autopay off (always ask). The per-payment and daily limits still apply on top.",
+                )}
               </p>
 
               <div className="mt-5 rounded-[var(--radius-card)] border border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] px-4 py-4">
                 <div className="grid grid-cols-2 gap-3">
                   <UnitInput
-                    label="자율 한도"
+                    label={t("자율 한도", "Autopay limit")}
                     unit="USDC"
                     value={s.auto_approve_usdc}
                     onChange={(v) => field("auto_approve_usdc", v)}
                   />
                   <UnitInput
-                    label="자동 잠금"
-                    unit="분"
+                    label={t("자동 잠금", "Auto-lock")}
+                    unit={t("분", "min")}
                     intOnly
                     value={s.auto_lock_mins}
                     onChange={(v) => field("auto_lock_mins", v)}
                   />
                 </div>
                 <p className="mt-2.5 text-[11px] text-[var(--color-ink-300)]">
-                  유휴 시간이 지나면 자동으로 다시 잠겨요. 0이면 유휴 잠금 안 함(앱 종료·긴급 잠금 시엔 항상 잠김).
+                  {t(
+                    "유휴 시간이 지나면 자동으로 다시 잠겨요. 0이면 유휴 잠금 안 함(앱 종료·긴급 잠금 시엔 항상 잠김).",
+                    "The session locks itself after this much idle time. 0 means no idle lock (quitting the app or the emergency lock still locks it).",
+                  )}
                 </p>
               </div>
 
@@ -293,35 +309,47 @@ export function SettingsScreen({
               <RowGroup>
                 {/* 자리비움 자동 잠금 (Session 14) */}
                 <ToggleRow
-                  title="자리 비우면 자동 잠금"
-                  desc="다른 앱으로 전환하거나 화면이 잠기면 세션을 즉시 잠가요."
+                  title={t("자리 비우면 자동 잠금", "Lock when you step away")}
+                  desc={t(
+                    "다른 앱으로 전환하거나 화면이 잠기면 세션을 즉시 잠가요.",
+                    "Switching to another app or locking your screen locks the session at once.",
+                  )}
                   checked={s.lock_on_blur}
                   onToggle={() => toggle("lock_on_blur")}
                 />
                 {/* 자율 결제 알림 (Session 15) — 비번 없이 나간 돈을 보호자가 사후 인지 */}
                 <ToggleRow
-                  title="자율 결제 알림"
-                  desc="비번 없이 자동 승인된 결제를 macOS 알림으로 알려줘요."
+                  title={t("자율 결제 알림", "Autopay notifications")}
+                  desc={t(
+                    "비번 없이 자동 승인된 결제를 macOS 알림으로 알려줘요.",
+                    "A macOS notification tells you about payments approved without your password.",
+                  )}
                   checked={s.notify_auto}
                   onToggle={() => toggle("notify_auto")}
                 />
                 {/* 자율 결제 화이트리스트 (Session 16) — 처음 보는 주소는 자율 대상에서 제외 */}
                 <ToggleRow
-                  title="자율 결제 화이트리스트"
-                  desc="비번으로 승인한 적 있는 주소에만 자율 결제를 허용해요. 새 주소는 첫 결제만 비번이 필요해요."
+                  title={t("자율 결제 화이트리스트", "Autopay allowlist")}
+                  desc={t(
+                    "비번으로 승인한 적 있는 주소에만 자율 결제를 허용해요. 새 주소는 첫 결제만 비번이 필요해요.",
+                    "Autopay only goes to addresses you've approved with your password before. A new address needs your password once.",
+                  )}
                   checked={s.auto_trusted_only}
                   onToggle={() => toggle("auto_trusted_only")}
                 />
                 {/* 화이트리스트 주소 (Session 17) — 목록은 모달로 (많아지면 설정이 길어지니) */}
                 <div className="flex items-center justify-between px-4 py-3.5">
                   <div className="min-w-0 pr-3">
-                    <p className="text-[13px] tracking-tight">화이트리스트 주소</p>
+                    <p className="text-[13px] tracking-tight">{t("화이트리스트 주소", "Allowed addresses")}</p>
                     <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-ink-300)]">
                       {trusted === null
-                        ? "불러오는 중…"
+                        ? t("불러오는 중…", "Loading…")
                         : trusted.length === 0
-                          ? "아직 없어요 — 비번으로 승인하면 자동으로 학습돼요."
-                          : `${trusted.length}개 학습됨`}
+                          ? t(
+                              "아직 없어요 — 비번으로 승인하면 자동으로 학습돼요.",
+                              "None yet — approving with your password adds one.",
+                            )
+                          : t(`${trusted.length}개 학습됨`, `${trusted.length} learned`)}
                     </p>
                   </div>
                   <button
@@ -330,7 +358,7 @@ export function SettingsScreen({
                     disabled={!trusted || trusted.length === 0}
                     className="shrink-0 text-[12px] text-[var(--color-accent)] disabled:text-[var(--color-ink-300)] hover:underline transition-colors"
                   >
-                    주소 보기
+                    {t("주소 보기", "View")}
                   </button>
                 </div>
               </RowGroup>
@@ -340,12 +368,14 @@ export function SettingsScreen({
                 왼쪽·기본(CHAINS 순서). 메인넷 선택 시엔 실돈 경고를 콜아웃으로 올려 위계를 준다. */}
             <Section
               icon={<Network size={13} className="text-[var(--color-accent)]" />}
-              title="네트워크"
+              title={t("네트워크", "Network")}
               delay={0.08}
             >
               <p className="text-[13px] leading-relaxed text-[var(--color-ink-500)]">
-                잔액·결제가 이뤄지는 블록체인이에요. 메인넷은 실제 자금이 오가고, 테스트넷은 가짜
-                코인으로 연습해요. 체인별로 한도·사용액·내역·화이트리스트가 따로 관리돼요.
+                {t(
+                  "잔액·결제가 이뤄지는 블록체인이에요. 메인넷은 실제 자금이 오가고, 테스트넷은 가짜 코인으로 연습해요. 체인별로 한도·사용액·내역·화이트리스트가 따로 관리돼요.",
+                  "The blockchain your balance and payments live on. Mainnet moves real funds; the testnet is practice with fake coins. Limits, spending, history, and the allowlist are kept per chain.",
+                )}
               </p>
               <div className="mt-4 grid grid-cols-2 gap-2">
                 {CHAINS.map((c) => {
@@ -364,7 +394,9 @@ export function SettingsScreen({
                     >
                       {c.name}
                       <span className="block mt-0.5 text-[10px] text-[var(--color-ink-300)]">
-                        {c.testnet ? "연습용 · 가짜 코인" : "실제 자금"}
+                        {c.testnet
+                          ? t("연습용 · 가짜 코인", "Practice · fake coins")
+                          : t("실제 자금", "Real funds")}
                       </span>
                     </button>
                   );
@@ -372,14 +404,16 @@ export function SettingsScreen({
               </div>
               {chain.testnet ? (
                 <p className="mt-2.5 text-[11px] text-[var(--color-ink-300)]">
-                  바꾼 뒤 저장을 누르면 적용돼요.
+                  {t("바꾼 뒤 저장을 누르면 적용돼요.", "Press save to apply the change.")}
                 </p>
               ) : (
                 // 실돈 경고는 문장 한 줄이 아니라 콜아웃 — 일상 설정과 위험 설정의 시각 위계 분리(개발 39).
                 <div className="mt-2.5 rounded-[var(--radius-card)] border border-amber-500/30 bg-amber-500/5 px-3.5 py-2.5">
                   <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-500">
-                    메인넷은 실제 USDC·ETH가 오가요. 운영 예산만 소액 충전하고, 위의 한도를 확인해
-                    두세요. 바꾼 뒤 저장을 누르면 적용돼요.
+                    {t(
+                      "메인넷은 실제 USDC·ETH가 오가요. 운영 예산만 소액 충전하고, 위의 한도를 확인해 두세요. 바꾼 뒤 저장을 누르면 적용돼요.",
+                      "Mainnet moves real USDC and ETH. Top up only what the agent needs, and check your limits above. Press save to apply the change.",
+                    )}
                   </p>
                 </div>
               )}
@@ -388,12 +422,14 @@ export function SettingsScreen({
             {/* RPC 서버 (Session 14) — 프라이버시: 공개 RPC는 내 IP↔지갑을 볼 수 있음 */}
             <Section
               icon={<Globe size={13} className="text-[var(--color-accent)]" />}
-              title="RPC 서버"
+              title={t("RPC 서버", "RPC server")}
               delay={0.12}
             >
               <p className="text-[13px] leading-relaxed text-[var(--color-ink-500)]">
-                잔액 조회·송금에 쓰는 서버예요. 공개 RPC는 내 IP와 지갑 주소를 볼 수 있어요. 프라이버시가
-                중요하면 본인 키 엔드포인트(Alchemy/노드 등)를 직접 넣으세요.
+                {t(
+                  "잔액 조회·송금에 쓰는 서버예요. 공개 RPC는 내 IP와 지갑 주소를 볼 수 있어요. 프라이버시가 중요하면 본인 키 엔드포인트(Alchemy/노드 등)를 직접 넣으세요.",
+                  "The server used to read balances and send payments. A public RPC can see your IP and wallet address. If that matters to you, paste your own endpoint (Alchemy, your own node, and so on).",
+                )}
               </p>
               <select
                 value={rpcCustom ? RPC_CUSTOM : presetUrl(s.rpc_url, chain)}
@@ -413,7 +449,7 @@ export function SettingsScreen({
                     {p.label}
                   </option>
                 ))}
-                <option value={RPC_CUSTOM}>직접 입력…</option>
+                <option value={RPC_CUSTOM}>{t("직접 입력…", "Enter your own…")}</option>
               </select>
               {rpcCustom && (
                 <input
@@ -430,20 +466,26 @@ export function SettingsScreen({
             {/* 앱 (Session 18) — 상시 구동: 창을 닫아도 백그라운드에서 결제 요청을 받는다 */}
             <Section
               icon={<Power size={13} className="text-[var(--color-accent)]" />}
-              title="앱"
+              title={t("앱", "App")}
               delay={0.16}
             >
               <p className="text-[13px] leading-relaxed text-[var(--color-ink-500)]">
-                창을 닫아도 앱은 종료되지 않고 백그라운드에서 결제 요청을 받아요. 완전히 끄려면
-                ⌘Q를 누르세요.
+                {t(
+                  "창을 닫아도 앱은 종료되지 않고 백그라운드에서 결제 요청을 받아요. 완전히 끄려면 ⌘Q를 누르세요.",
+                  "Closing the window doesn't quit Kura — it keeps taking payment requests in the background. Press ⌘Q to quit for real.",
+                )}
               </p>
               <RowGroup>
                 <ToggleRow
-                  title="로그인 시 자동 시작"
-                  desc="Mac에 로그인하면 지갑이 자동으로 켜져요. 끄고 켜는 즉시 적용돼요."
+                  title={t("로그인 시 자동 시작", "Start at login")}
+                  desc={t(
+                    "Mac에 로그인하면 지갑이 자동으로 켜져요. 끄고 켜는 즉시 적용돼요.",
+                    "The wallet opens when you log in to your Mac. This applies the moment you flip it.",
+                  )}
                   checked={autostart ?? false}
                   onToggle={toggleAutostart}
                 />
+                <LanguageRow />
               </RowGroup>
             </Section>
 
@@ -455,7 +497,7 @@ export function SettingsScreen({
               ) : busy ? (
                 <Loader2 size={15} className="animate-spin" />
               ) : null}
-              {saved ? "저장됨" : "저장하고 닫기"}
+              {saved ? t("저장됨", "Saved") : t("저장하고 닫기", "Save and close")}
             </button>
           </fieldset>
         )}
@@ -543,7 +585,7 @@ function AboutSection({ update, autoCheck }: { update: UpdateHook; autoCheck: bo
   }
 
   return (
-    <Section icon={<Info size={13} className="text-[var(--color-accent)]" />} title="정보" delay={0.2}>
+    <Section icon={<Info size={13} className="text-[var(--color-accent)]" />} title={t("정보", "About")} delay={0.2}>
       <div className="flex items-baseline justify-between">
         <span className="text-[13px] tracking-tight">Kura</span>
         <span className="num font-mono text-[11px] text-[var(--color-ink-300)]">
@@ -557,16 +599,28 @@ function AboutSection({ update, autoCheck }: { update: UpdateHook; autoCheck: bo
           생기면 이 문장부터 미래형으로 되돌릴 것. 신뢰의 근거로 내세운 문장이라, 사실과
           어긋나면 뒤에 단서를 붙이는 걸로는 못 고친다(개발 27 코덱스 2라운드 지적). */}
       <p className="mt-3 text-[13px] leading-relaxed text-[var(--color-ink-500)]">
-        Kura는 소스 코드가 MIT 라이선스로 공개돼 있어요. 열쇠와 돈을 다루는 코드를 직접 읽어
-        확인하고, 직접 빌드해서 쓸 수 있어요.
+        {t(
+          "Kura는 소스 코드가 MIT 라이선스로 공개돼 있어요. 열쇠와 돈을 다루는 코드를 직접 읽어 확인하고, 직접 빌드해서 쓸 수 있어요.",
+          "Kura's source is public under the MIT license. You can read the code that handles your key and your money, and build it yourself.",
+        )}
       </p>
       {/* 저장(로컬)과 전송(RPC)을 나눠 쓴 건 개발 27 판단 그대로. 개발 29 에서 한 겹 더 —
           "내역이 ~/.jigap 에만 있다"가 "내 거래가 비공개다"로 읽히면 안 된다. 보낸 거래는
           공개 체인에 영구히 남는다. 지갑에서 이 오해는 값이 비싸다. */}
       <p className="mt-1.5 text-[11px] leading-snug text-[var(--color-ink-300)]">
-        지갑 키·설정·거래 내역은 이 컴퓨터의 <span className="font-mono">~/.jigap</span> 폴더에만
-        저장돼요. 잔액을 확인하고 송금할 때만 위에서 고른 RPC 서버로 요청이 나가요 — 그쪽은 내
-        주소를 볼 수 있고, 보낸 거래는 공개 블록체인에 남아요.
+        {t(
+          <>
+            지갑 키·설정·거래 내역은 이 컴퓨터의 <span className="font-mono">~/.jigap</span>{" "}
+            폴더에만 저장돼요. 잔액을 확인하고 송금할 때만 위에서 고른 RPC 서버로 요청이 나가요 —
+            그쪽은 내 주소를 볼 수 있고, 보낸 거래는 공개 블록체인에 남아요.
+          </>,
+          <>
+            Your key, settings, and history stay in the <span className="font-mono">~/.jigap</span>{" "}
+            folder on this computer. Requests only leave for the RPC server you picked above, to read
+            balances and send payments — that server can see your address, and payments you send stay
+            on a public blockchain.
+          </>,
+        )}
       </p>
 
       <div className="mt-4 flex items-center justify-between">
@@ -576,14 +630,14 @@ function AboutSection({ update, autoCheck }: { update: UpdateHook; autoCheck: bo
           className="inline-flex items-center gap-1.5 text-[12px] text-[var(--color-accent)] hover:underline transition-colors"
         >
           <ExternalLink size={12} />
-          소스 코드 보기
+          {t("소스 코드 보기", "Read the source")}
         </button>
-        <span className="text-[11px] text-[var(--color-ink-300)]">MIT 라이선스</span>
+        <span className="text-[11px] text-[var(--color-ink-300)]">{t("MIT 라이선스", "MIT license")}</span>
       </div>
       {/* 글꼴 고지 — 앱에 Pretendard 를 함께 담아 배포하므로 OFL 1.1 이 고지를 요구한다.
           라이선스 전문은 번들 안(fonts/LICENSE-Pretendard.txt)에도 같이 들어간다. */}
       <p className="mt-3 text-[10px] text-[var(--color-ink-300)]">
-        글꼴 Pretendard — SIL Open Font License 1.1
+        {t("글꼴 Pretendard — SIL Open Font License 1.1", "Pretendard typeface — SIL Open Font License 1.1")}
       </p>
     </Section>
   );
@@ -622,24 +676,30 @@ function TrustedAddrsModal({
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5 text-[11px] tracking-[0.04em] text-[var(--color-accent)]">
             <ShieldCheck size={13} />
-            화이트리스트 주소
+            {t("화이트리스트 주소", "Allowed addresses")}
           </span>
           <button
             type="button"
             onClick={onClose}
-            aria-label="닫기"
+            aria-label={t("닫기", "Close")}
             className="p-1 text-[var(--color-ink-300)] hover:text-[var(--color-ink-900)] dark:hover:text-[#E8E5DD] transition-colors"
           >
             <X size={14} />
           </button>
         </div>
         <p className="mt-3 text-[12px] leading-relaxed text-[var(--color-ink-500)]">
-          비번으로 승인하면 자동으로 학습돼요. 철회하면 다음 결제 때 다시 비번을 받아요.
+          {t(
+            "비번으로 승인하면 자동으로 학습돼요. 철회하면 다음 결제 때 다시 비번을 받아요.",
+            "Approving with your password adds an address here. Remove one and the next payment to it asks again.",
+          )}
         </p>
 
         {addrs.length === 0 ? (
           <p className="mt-5 mb-1 text-[12px] text-[var(--color-ink-300)]">
-            모두 철회했어요. 비번으로 승인하면 다시 학습돼요.
+            {t(
+              "모두 철회했어요. 비번으로 승인하면 다시 학습돼요.",
+              "All removed. Approving with your password adds them back.",
+            )}
           </p>
         ) : (
           <ul className="mt-4 max-h-72 overflow-y-auto space-y-0.5 -mx-2">
@@ -653,7 +713,7 @@ function TrustedAddrsModal({
                 </span>
                 {confirming === addr ? (
                   <span className="flex items-center gap-2 shrink-0">
-                    <span className="text-[11px] text-[var(--color-ink-500)]">철회할까요?</span>
+                    <span className="text-[11px] text-[var(--color-ink-500)]">{t("철회할까요?", "Remove it?")}</span>
                     <button
                       type="button"
                       onClick={() => {
@@ -662,22 +722,25 @@ function TrustedAddrsModal({
                       }}
                       className="text-[11px] font-medium text-red-500 hover:underline"
                     >
-                      철회
+                      {t("철회", "Remove")}
                     </button>
                     <button
                       type="button"
                       onClick={() => setConfirming(null)}
                       className="text-[11px] text-[var(--color-ink-300)] hover:underline"
                     >
-                      취소
+                      {t("취소", "Cancel")}
                     </button>
                   </span>
                 ) : (
                   <button
                     type="button"
                     onClick={() => setConfirming(addr)}
-                    aria-label={`${shortenAddress(addr)} 철회`}
-                    title="화이트리스트에서 철회"
+                    aria-label={t(
+                      `${shortenAddress(addr)} 철회`,
+                      `Remove ${shortenAddress(addr)}`,
+                    )}
+                    title={t("화이트리스트에서 철회", "Remove from the allowlist")}
                     className="shrink-0 p-1 rounded-md text-[var(--color-ink-300)] hover:text-red-500 transition-colors"
                   >
                     <Trash2 size={13} />
@@ -719,7 +782,7 @@ function UpdateBlock({
         <div>
           <p className="flex items-center gap-2 text-[13px] tracking-tight">
             <Loader2 size={13} className="animate-spin text-[var(--color-accent)]" />
-            업데이트 설치 중…
+            {t("업데이트 설치 중…", "Installing the update…")}
           </p>
           {/* 크기를 모르면(Content-Length 없음) 퍼센트 대신 받은 용량만 보여준다 —
               0% 에 멈춘 것처럼 보이는 게 제일 나쁘다. */}
@@ -734,19 +797,30 @@ function UpdateBlock({
           </div>
           <p className="mt-2 text-[11px] text-[var(--color-ink-300)]">
             {pct === null
-              ? `${fmtBytes(progress?.downloaded ?? 0)} 받는 중`
+              ? t(
+                  `${fmtBytes(progress?.downloaded ?? 0)} 받는 중`,
+                  `${fmtBytes(progress?.downloaded ?? 0)} downloaded`,
+                )
               : `${pct}% · ${fmtBytes(progress?.downloaded ?? 0)}`}
-            {" — "}끝나면 앱이 저절로 다시 시작돼요.
+            {" — "}
+            {t("끝나면 앱이 저절로 다시 시작돼요.", "Kura restarts itself when it's done.")}
           </p>
         </div>
       ) : info ? (
         <div>
           <div className="flex items-baseline justify-between gap-3">
             <p className="text-[13px] tracking-tight">
-              새 버전 <span className="num font-mono">{info.version}</span>
+              {t(
+                <>
+                  새 버전 <span className="num font-mono">{info.version}</span>
+                </>,
+                <>
+                  Version <span className="num font-mono">{info.version}</span> is available
+                </>,
+              )}
             </p>
             <span className="num font-mono text-[11px] text-[var(--color-ink-300)]">
-              지금 {info.current_version}
+              {t(`지금 ${info.current_version}`, `now ${info.current_version}`)}
             </span>
           </div>
           {info.notes && (
@@ -762,13 +836,17 @@ function UpdateBlock({
             className={cn(primaryBtn, "mt-3 h-9 text-[13px]")}
           >
             <ArrowUpCircle size={14} />
-            지금 설치하고 다시 시작
+            {t("지금 설치하고 다시 시작", "Install now and restart")}
           </button>
         </div>
       ) : (
         <div className="flex items-center justify-between gap-3">
           <p className="min-w-0 text-[12px] text-[var(--color-ink-500)]">
-            {checking ? "확인 중…" : upToDate ? "최신 버전이에요." : "업데이트를 확인할 수 있어요."}
+            {checking
+              ? t("확인 중…", "Checking…")
+              : upToDate
+                ? t("최신 버전이에요.", "You're on the latest version.")
+                : t("업데이트를 확인할 수 있어요.", "You can check for an update.")}
           </p>
           <button
             type="button"
@@ -783,7 +861,7 @@ function UpdateBlock({
             )}
           >
             <RefreshCw size={12} className={cn(checking && "animate-spin")} />
-            업데이트 확인
+            {t("업데이트 확인", "Check now")}
           </button>
         </div>
       )}
@@ -792,13 +870,20 @@ function UpdateBlock({
 
       <div className="mt-3 flex items-center justify-between gap-3 border-t border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] pt-3">
         <div className="min-w-0 pr-1">
-          <p className="text-[12px] tracking-tight">시작할 때 확인</p>
+          <p className="text-[12px] tracking-tight">{t("시작할 때 확인", "Check at startup")}</p>
           {/* 무엇이 나가는지 적는다 — 로컬 전용을 내세운 앱이라 조용한 바깥 통신이 있으면 안 된다. */}
           <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-ink-300)]">
-            앱을 켤 때 새 버전이 있는지 깃허브에 물어봐요(현재 버전과 IP가 그쪽에 남아요).
+            {t(
+              "앱을 켤 때 새 버전이 있는지 깃허브에 물어봐요(현재 버전과 IP가 그쪽에 남아요).",
+              "On launch, Kura asks GitHub whether a new version exists (your current version and IP show up there).",
+            )}
           </p>
         </div>
-        <Switch checked={autoCheckOn} onToggle={onToggleAutoCheck} label="시작할 때 확인" />
+        <Switch
+          checked={autoCheckOn}
+          onToggle={onToggleAutoCheck}
+          label={t("시작할 때 확인", "Check at startup")}
+        />
       </div>
     </div>
   );
@@ -884,6 +969,71 @@ function ToggleRow({
   );
 }
 
+/** 언어 선택 행 (개발 42) — 고른 즉시 저장하고 창을 새 언어로 다시 읽는다.
+ *
+ *  "저장하고 닫기"에 묶지 않는다: 언어는 폼 값이 아니라 앱 관리 필드고(자동 시작·업데이트
+ *  확인과 같은 결), 저장 버튼을 누르기 전까지 옛 언어로 남아 있으면 뭘 고른 건지 알 수 없다.
+ *  저장이 실패하면 언어를 바꾸지 않고 그 자리에서 말해 준다 — 화면만 바뀌고 다음 실행에
+ *  되돌아오는 게 제일 나쁘다. */
+function LanguageRow() {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const current = lang();
+
+  function pick(next: Lang) {
+    if (next === current || busy) return;
+    setBusy(true);
+    setFailed(false);
+    // 성공하면 창을 다시 읽으므로 이 컴포넌트는 그대로 사라진다(busy 를 되돌릴 필요 없음).
+    chooseLang(next).catch(() => {
+      setBusy(false);
+      setFailed(true);
+    });
+  }
+
+  return (
+    <div className="flex items-center justify-between px-4 py-3.5">
+      <div className="min-w-0 pr-3">
+        <p className="text-[13px] tracking-tight">{t("언어", "Language")}</p>
+        <p
+          className={cn(
+            "mt-0.5 text-[11px] leading-snug",
+            failed ? "text-red-500/90" : "text-[var(--color-ink-300)]",
+          )}
+        >
+          {failed
+            ? t("언어를 저장하지 못했어요. 그대로 뒀어요.", "Couldn't save the language, so nothing changed.")
+            : t("고르면 창이 새 언어로 다시 열려요.", "Picking one reopens the window in that language.")}
+        </p>
+      </div>
+      <div className="shrink-0 flex gap-1 p-1 rounded-[var(--radius-pill)] bg-[var(--color-ivory-200)] dark:bg-[var(--color-night-900)]">
+        {(
+          [
+            { code: "ko", label: "한국어" },
+            { code: "en", label: "English" },
+          ] as { code: Lang; label: string }[]
+        ).map((o) => (
+          <button
+            key={o.code}
+            type="button"
+            onClick={() => pick(o.code)}
+            aria-pressed={o.code === current}
+            className={cn(
+              "h-7 px-3 rounded-[var(--radius-pill)] text-[12px] tracking-tight",
+              "transition-colors duration-[var(--duration-base)]",
+              o.code === current
+                ? "bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-700)] text-[var(--color-ink-900)] dark:text-[#E8E5DD] shadow-[var(--shadow-soft)]"
+                : "text-[var(--color-ink-500)] hover:text-[var(--color-ink-700)]",
+            )}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** 단위가 붙는 숫자 입력 — 단위를 필드 안 오른쪽에 고정해 표기·정렬을 통일한다(개발 39 정리).
  *  전엔 라벨에 "(USDC)" "(분)" 처럼 괄호로 섞여 붙어 있었다. */
 function UnitInput({
@@ -942,12 +1092,22 @@ function LimitGroup({
       <div className="flex items-center justify-between">
         <span className="text-[13px] tracking-tight">{token}</span>
         <span className="text-[11px] text-[var(--color-ink-300)] num">
-          오늘 {fmtAmount(usedToday, frac)} 사용
+          {t(`오늘 ${fmtAmount(usedToday, frac)} 사용`, `${fmtAmount(usedToday, frac)} used today`)}
         </span>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-3">
-        <UnitInput label="단일 거래 한도" unit={token} value={single} onChange={onSingle} />
-        <UnitInput label="하루 누적 한도" unit={token} value={daily} onChange={onDaily} />
+        <UnitInput
+          label={t("단일 거래 한도", "Per payment")}
+          unit={token}
+          value={single}
+          onChange={onSingle}
+        />
+        <UnitInput
+          label={t("하루 누적 한도", "Per day")}
+          unit={token}
+          value={daily}
+          onChange={onDaily}
+        />
       </div>
     </div>
   );

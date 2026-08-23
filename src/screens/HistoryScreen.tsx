@@ -17,6 +17,7 @@ import { useChain } from "@/lib/chain";
 import { fmtAmount, fmtRelTime, shortenAddress } from "@/lib/format";
 import type { HistoryEntry } from "@/lib/types";
 import { cardBase, enter, shell } from "@/components/ui";
+import { t } from "@/lib/i18n";
 
 export function HistoryScreen({
   entries,
@@ -30,14 +31,14 @@ export function HistoryScreen({
       <header className="w-full max-w-md flex items-center justify-between text-[12px] text-[var(--color-ink-500)]">
         <span className="flex items-center gap-2">
           <History size={12} className="text-[var(--color-accent)]" />
-          거래 내역
+          {t("거래 내역", "History")}
         </span>
         <button
           type="button"
           onClick={onClose}
           className="hover:text-[var(--color-ink-900)] dark:hover:text-[#E8E5DD] transition-colors"
         >
-          닫기
+          {t("닫기", "Close")}
         </button>
       </header>
 
@@ -45,16 +46,21 @@ export function HistoryScreen({
         {entries == null ? (
           <div className="flex flex-col items-center py-12">
             <Loader2 size={22} className="animate-spin text-[var(--color-accent)]" />
-            <p className="mt-3 text-[13px] text-[var(--color-ink-500)]">불러오는 중…</p>
+            <p className="mt-3 text-[13px] text-[var(--color-ink-500)]">{t("불러오는 중…", "Loading…")}</p>
           </div>
         ) : entries.length === 0 ? (
           <div className="flex flex-col items-center py-12 text-center">
             <div className="w-12 h-12 rounded-full flex items-center justify-center bg-[var(--color-ivory-200)] dark:bg-[var(--color-night-700)] text-[var(--color-ink-300)]">
               <History size={20} />
             </div>
-            <p className="mt-4 text-[13px] text-[var(--color-ink-500)]">아직 거래 내역이 없어요.</p>
+            <p className="mt-4 text-[13px] text-[var(--color-ink-500)]">
+              {t("아직 거래 내역이 없어요.", "No transactions yet.")}
+            </p>
             <p className="mt-1 text-[11px] text-[var(--color-ink-300)]">
-              보낸 송금과 차단된 시도가 여기에 쌓여요.
+              {t(
+                "보낸 송금과 차단된 시도가 여기에 쌓여요.",
+                "Payments you send and attempts that were blocked show up here.",
+              )}
             </p>
           </div>
         ) : (
@@ -72,12 +78,12 @@ export function HistoryScreen({
 }
 
 const HISTORY_META: Record<string, { icon: React.ReactNode; ring: string; label: string; labelColor: string }> = {
-  sent: { icon: <ArrowUpRight size={15} />, ring: "bg-[var(--color-accent)]/10 text-[var(--color-accent)]", label: "보냄", labelColor: "" },
-  settled: { icon: <Check size={15} />, ring: "bg-[var(--color-accent)]/10 text-[var(--color-accent)]", label: "정산됨", labelColor: "" },
-  signed: { icon: <FileSignature size={15} />, ring: "bg-[var(--color-ink-500)]/10 text-[var(--color-ink-500)] dark:text-[#B5AFA2]", label: "정산 대기", labelColor: "text-[var(--color-ink-300)]" },
-  blocked: { icon: <Ban size={15} />, ring: "bg-amber-500/10 text-amber-600 dark:text-amber-500", label: "차단됨", labelColor: "text-amber-600 dark:text-amber-500" },
-  failed: { icon: <AlertTriangle size={15} />, ring: "bg-red-500/10 text-red-600 dark:text-red-500", label: "실패", labelColor: "text-red-500/80" },
-  settle_failed: { icon: <AlertTriangle size={15} />, ring: "bg-red-500/10 text-red-600 dark:text-red-500", label: "정산 실패", labelColor: "text-red-500/80" },
+  sent: { icon: <ArrowUpRight size={15} />, ring: "bg-[var(--color-accent)]/10 text-[var(--color-accent)]", label: t("보냄", "Sent"), labelColor: "" },
+  settled: { icon: <Check size={15} />, ring: "bg-[var(--color-accent)]/10 text-[var(--color-accent)]", label: t("정산됨", "Settled"), labelColor: "" },
+  signed: { icon: <FileSignature size={15} />, ring: "bg-[var(--color-ink-500)]/10 text-[var(--color-ink-500)] dark:text-[#B5AFA2]", label: t("정산 대기", "Awaiting settlement"), labelColor: "text-[var(--color-ink-300)]" },
+  blocked: { icon: <Ban size={15} />, ring: "bg-amber-500/10 text-amber-600 dark:text-amber-500", label: t("차단됨", "Blocked"), labelColor: "text-amber-600 dark:text-amber-500" },
+  failed: { icon: <AlertTriangle size={15} />, ring: "bg-red-500/10 text-red-600 dark:text-red-500", label: t("실패", "Failed"), labelColor: "text-red-500/80" },
+  settle_failed: { icon: <AlertTriangle size={15} />, ring: "bg-red-500/10 text-red-600 dark:text-red-500", label: t("정산 실패", "Settlement failed"), labelColor: "text-red-500/80" },
 };
 
 function HistoryRow({ entry }: { entry: HistoryEntry }) {
@@ -120,7 +126,7 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
             onClick={() => openUrl(chain.explorerTx + linkTx).catch(() => {})}
             className="inline-flex items-center gap-1 text-[11px] text-[var(--color-ink-500)] hover:text-[var(--color-accent)] transition-colors"
           >
-            <ExternalLink size={11} /> 보기
+            <ExternalLink size={11} /> {t("보기", "View")}
           </button>
         ) : (
           <span className={cn("text-[11px]", meta.labelColor || "text-[var(--color-ink-300)]")}>{meta.label}</span>

@@ -32,38 +32,39 @@ struct WalletServer {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct HistoryArgs {
-    /// 최근 몇 건을 가져올지 (기본 20, 최대 200).
+    /// How many recent entries to return (default 20, max 200).
     #[serde(default)]
     limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PayArgs {
-    /// 받는 주소 (0x로 시작하는 42자).
+    /// Recipient address (42 characters, starting with 0x).
     to: String,
-    /// 금액 (십진수 문자열, 예: "1.5").
+    /// Amount as a decimal string, for example "1.5".
     amount: String,
-    /// 토큰: "USDC"(기본) 또는 "ETH".
+    /// Token: "USDC" (default) or "ETH".
     #[serde(default)]
     token: Option<String>,
-    /// 무엇에 대한 결제인지 — 사용자가 승인 팝업에서 보고 판단한다(있는 게 좋다).
+    /// What the payment is for — the user reads this in the approval window, so fill it in.
     #[serde(default)]
     memo: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct X402Args {
-    /// 가져올 유료 리소스의 URL (http/https).
+    /// URL of the paid resource to fetch (http/https).
     url: String,
-    /// 무엇에 대한 결제인지 — 사용자가 승인 팝업에서 보고 판단한다. 채워주는 게 좋다.
+    /// What the payment is for — the user reads this in the approval window, so fill it in.
     #[serde(default)]
     memo: Option<String>,
 }
 
 /// JSON 직렬화 결과를 MCP 텍스트 콘텐츠로 감싼다.
 fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
-    let text = serde_json::to_string_pretty(value)
-        .map_err(|e| McpError::internal_error(format!("직렬화 실패: {e}"), None))?;
+    let text = serde_json::to_string_pretty(value).map_err(|e| {
+        McpError::internal_error(format!("Couldn't serialize the result: {e}"), None)
+    })?;
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
@@ -76,7 +77,7 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "지갑 상태와 주소를 반환한다. state는 encrypted(정상)/legacy/none. 비번 불필요(읽기 전용)."
+        description = "Returns the wallet's state and address. state is encrypted (normal), legacy, or none. No password needed — read only."
     )]
     async fn get_wallet_status(&self) -> Result<CallToolResult, McpError> {
         let status = wallet::wallet_status().map_err(|e| McpError::internal_error(e, None))?;
@@ -84,13 +85,13 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "지갑의 ETH(가스용)와 USDC(결제용) 잔액을 활성 네트워크(Base — 사용자 설정에 따라 테스트넷/메인넷)에서 조회한다. 지갑이 없으면 오류."
+        description = "Reads the wallet's ETH (for gas) and USDC (for payments) balances on the active network (Base — testnet or mainnet, per the user's setting). Errors if there is no wallet."
     )]
     async fn get_balances(&self) -> Result<CallToolResult, McpError> {
         let status = wallet::wallet_status().map_err(|e| McpError::internal_error(e, None))?;
         let addr = status
             .address
-            .ok_or_else(|| McpError::internal_error("지갑이 아직 없습니다", None))?;
+            .ok_or_else(|| McpError::internal_error("There is no wallet yet", None))?;
         let balances = wallet::get_balances(&addr)
             .await
             .map_err(|e| McpError::internal_error(e, None))?;
@@ -98,9 +99,9 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "최근 거래 시도 내역을 최신순으로 반환한다. status는 sent(전송됨)/blocked(차단)/failed(실패)/\
-        signed(x402 서명·정산 대기)/settled(x402 정산됨, settle_tx=정산 tx)/settle_failed(정산 실패). \
-        limit으로 개수 제한 가능(기본 20)."
+        description = "Returns recent transaction attempts, newest first. status is one of sent, blocked, failed, \
+        signed (x402 signed, awaiting settlement), settled (x402 settled, settle_tx is the settlement tx), \
+        or settle_failed. Use limit to cap how many come back (default 20)."
     )]
     async fn get_history(
         &self,
@@ -113,12 +114,14 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "사용자에게 결제(송금)를 요청한다. 지갑 앱이 승인 팝업을 띄우고, 사용자가 \
-        비밀번호로 승인해야만 실제로 전송된다(최대 5분 대기). 예외는 사용자가 앱에서 자율 결제를 \
-        직접 켠 경우 하나 — 그때만 세션 잠금 해제·소액 한도·신뢰 주소 조건 안에서 자동 승인된다. \
-        인자: to(받는 주소), amount(금액 십진수 문자열), token(USDC 기본/ETH), memo(결제 사유 — 사용자가 \
-        보고 판단하니 꼭 채워라). 단일/일일 한도와 긴급잠금은 앱이 강제한다. 비밀번호는 절대 인자로 \
-        보내지 마라 — 앱에서만 입력한다. 반환: status(approved/rejected/failed) + tx_hash + explorer 링크."
+        description = "Asks the user to make a payment. The wallet app opens an approval window, and the \
+        payment is only sent once the user approves it with their password (it waits up to 5 minutes). The one \
+        exception is autopay, which the user turns on themselves — only then can a payment be approved \
+        automatically, and only within an unlocked session, a small limit, and a trusted address. \
+        Arguments: to (recipient address), amount (decimal string), token (USDC by default, or ETH), memo \
+        (what the payment is for — the user reads it to decide, so always fill it in). Per-payment and daily \
+        limits and the emergency lock are enforced by the app. Never send a password as an argument — the \
+        user types it in the app. Returns: status (approved/rejected/failed), tx_hash, and an explorer link."
     )]
     async fn request_payment(
         &self,
@@ -142,13 +145,14 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "x402 유료 리소스(URL)를 가져온다. 먼저 GET 해보고 402 Payment Required 가 \
-        오면, 서버가 요구한 결제(exact·활성 Base 네트워크·USDC)를 지갑 앱 팝업으로 사용자에게 승인받아 \
-        EIP-3009 서명을 만들고, X-PAYMENT 헤더를 붙여 같은 URL을 재요청해 콘텐츠를 돌려준다. \
-        결제가 필요 없으면(402가 아니면) 그대로 본문을 반환한다. 승인 규칙은 request_payment 와 같고 \
-        (기본 비밀번호 승인, 자율 결제를 켠 경우만 조건부 자동), 단일/일일 한도·긴급잠금은 앱이 강제한다. 비밀번호는 절대 인자로 보내지 마라. \
-        인자: url(필수), memo(결제 사유 — 사용자가 보고 판단하니 채워라). \
-        반환: paid 여부, status, http_status, 본문(body), 결제 시 amount/pay_to/settlement."
+        description = "Fetches an x402 paid resource (a URL). It GETs the URL first; if the server answers \
+        402 Payment Required, it asks the user to approve the required payment (exact scheme, the active Base \
+        network, USDC) in the wallet app, builds an EIP-3009 signature, and re-requests the same URL with an \
+        X-PAYMENT header to return the content. If no payment is required (no 402), it just returns the body. \
+        Approval works exactly as in request_payment (password by default; automatic only when the user has \
+        turned autopay on), and the app enforces per-payment and daily limits and the emergency lock. Never \
+        send a password as an argument. Arguments: url (required), memo (what the payment is for — the user \
+        reads it to decide). Returns: paid, status, http_status, body, and amount/pay_to/settlement when paid."
     )]
     async fn x402_fetch(
         &self,
@@ -197,12 +201,12 @@ impl ServerHandler for WalletServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Kura — 로컬 AI 에이전트 이더리움 지갑(Base — 사용자 설정에 따라 테스트넷/메인넷; \
-                 get_balances/get_wallet_status 로 현재 잔액을 확인하라. 메인넷이면 실제 자금이다). \
-                 잔액/주소/거래내역을 읽기 전용으로 조회한다. 결제는 request_payment로 \
-                 '요청'하면 지갑 앱이 사용자 승인 팝업을 띄운다 — 기본값은 사람이 비밀번호로 \
-                 승인해야 전송되고, 사용자가 자율 결제를 켠 경우에만 그 한도 안에서 자동 승인된다 \
-                 (비밀번호는 절대 채팅/MCP에 입력하지 말 것)."
+                "Kura — a local Ethereum wallet for AI agents (on Base — testnet or mainnet, per the \
+                 user's setting; check get_balances/get_wallet_status for the current balance. On mainnet \
+                 these are real funds). Balance, address, and history are read-only. To pay, call \
+                 request_payment: the wallet app opens an approval window — by default a human must approve \
+                 with their password, and only when the user has turned autopay on is it approved \
+                 automatically, within that limit. Never ask for or accept a password in chat or over MCP."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

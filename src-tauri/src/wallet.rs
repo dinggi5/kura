@@ -2,6 +2,7 @@
 // 키는 ~/.jigap/wallet.enc 에 암호화 저장. 비번이 있어야만 복호화/서명 가능.
 // 기존 평문 wallet.json 은 최초 1회 마이그레이션으로 암호화 후 삭제.
 
+use crate::i18n::{tf, ts};
 use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -112,7 +113,12 @@ pub(crate) fn signer_from_phrase(phrase: &str) -> Result<PrivateKeySigner, Strin
     MnemonicBuilder::<English>::default()
         .phrase(phrase)
         .build()
-        .map_err(|e| format!("니모닉에서 키 파생 실패: {e}"))
+        .map_err(|e| {
+            tf!(
+                "니모닉에서 키 파생 실패: {e}",
+                "Couldn't derive the key from the recovery phrase: {e}"
+            )
+        })
 }
 
 /// 니모닉 문구에서 EVM 주소(EIP-55 체크섬)를 파생한다.
@@ -130,11 +136,16 @@ fn derive_key(
     p: u32,
 ) -> Result<Zeroizing<[u8; 32]>, String> {
     use argon2::{Algorithm, Params, Version};
-    let params = Params::new(m, t, p, Some(32)).map_err(|e| format!("KDF 파라미터 오류: {e}"))?;
+    let params = Params::new(m, t, p, Some(32)).map_err(|e| {
+        tf!(
+            "KDF 파라미터 오류: {e}",
+            "Key-derivation parameters are invalid: {e}"
+        )
+    })?;
     let mut key = Zeroizing::new([0u8; 32]);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password_into(password.as_bytes(), salt, &mut *key)
-        .map_err(|e| format!("키 유도 실패: {e}"))?;
+        .map_err(|e| tf!("키 유도 실패: {e}", "Couldn't derive the key: {e}"))?;
     Ok(key)
 }
 
@@ -154,11 +165,12 @@ fn encrypt_with(
     OsRng.fill_bytes(&mut nonce_bytes);
 
     let key = derive_key(password, &salt, m, t, p)?;
-    let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|e| format!("암호기 생성 실패: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(&*key)
+        .map_err(|e| tf!("암호기 생성 실패: {e}", "Couldn't set up encryption: {e}"))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, phrase.as_bytes())
-        .map_err(|e| format!("암호화 실패: {e}"))?;
+        .map_err(|e| tf!("암호화 실패: {e}", "Encryption failed: {e}"))?;
 
     Ok(EncryptedWallet {
         version,
@@ -184,45 +196,64 @@ pub(crate) fn decrypt_wallet(
     w: &EncryptedWallet,
     password: &str,
 ) -> Result<Zeroizing<String>, String> {
-    let salt = B64.decode(&w.salt).map_err(|e| format!("솔트 디코드 실패: {e}"))?;
-    let nonce_bytes = B64.decode(&w.nonce).map_err(|e| format!("논스 디코드 실패: {e}"))?;
-    let ciphertext = B64
-        .decode(&w.ciphertext)
-        .map_err(|e| format!("암호문 디코드 실패: {e}"))?;
+    let salt = B64
+        .decode(&w.salt)
+        .map_err(|e| tf!("솔트 디코드 실패: {e}", "Couldn't decode the salt: {e}"))?;
+    let nonce_bytes = B64
+        .decode(&w.nonce)
+        .map_err(|e| tf!("논스 디코드 실패: {e}", "Couldn't decode the nonce: {e}"))?;
+    let ciphertext = B64.decode(&w.ciphertext).map_err(|e| {
+        tf!(
+            "암호문 디코드 실패: {e}",
+            "Couldn't decode the ciphertext: {e}"
+        )
+    })?;
 
     // 파일에 기록된 파라미터로 키 유도 — v2(필드 없음)는 serde default = 옛 기본값.
     let key = derive_key(password, &salt, w.kdf_m, w.kdf_t, w.kdf_p)?;
-    let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|e| format!("암호기 생성 실패: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(&*key)
+        .map_err(|e| tf!("암호기 생성 실패: {e}", "Couldn't set up encryption: {e}"))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext.as_ref())
-        .map_err(|_| "비밀번호가 올바르지 않습니다".to_string())?;
+    let plaintext = cipher.decrypt(nonce, ciphertext.as_ref()).map_err(|_| {
+        ts!("비밀번호가 올바르지 않습니다", "That password isn't right").to_string()
+    })?;
 
     String::from_utf8(plaintext)
         .map(Zeroizing::new)
-        .map_err(|e| format!("복호화 데이터 손상: {e}"))
+        .map_err(|e| {
+            tf!(
+                "복호화 데이터 손상: {e}",
+                "The decrypted data is damaged: {e}"
+            )
+        })
 }
 
 /// 암호화된 지갑을 디스크에 저장 (소유자만 읽기/쓰기, 원자 교체 —
 /// mark_backed_up 등 재작성 중 크래시로 지갑 파일이 깨지면 키 유실이라 치명적).
 fn write_encrypted(w: &EncryptedWallet) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(w).map_err(|e| format!("직렬화 실패: {e}"))?;
+    let json = serde_json::to_string_pretty(w)
+        .map_err(|e| tf!("직렬화 실패: {e}", "Couldn't serialize the wallet: {e}"))?;
     write_atomic(&enc_path()?, json.as_bytes())
 }
 
 pub(crate) fn read_encrypted() -> Result<EncryptedWallet, String> {
-    let data =
-        fs::read_to_string(enc_path()?).map_err(|e| format!("지갑 파일 읽기 실패: {e}"))?;
-    serde_json::from_str(&data).map_err(|e| format!("지갑 파일 파싱 실패: {e}"))
+    let data = fs::read_to_string(enc_path()?).map_err(|e| {
+        tf!(
+            "지갑 파일 읽기 실패: {e}",
+            "Couldn't read the wallet file: {e}"
+        )
+    })?;
+    serde_json::from_str(&data).map_err(|e| {
+        tf!(
+            "지갑 파일 파싱 실패: {e}",
+            "Couldn't parse the wallet file: {e}"
+        )
+    })
 }
 
 /// v2(옛 KDF) 지갑을 강화 파라미터(v3)로 재암호화한 사본을 만든다. 이미 v3면 None.
 /// 순수 함수 — 디스크에 안 쓴다(쓰기는 maybe_upgrade_kdf). backed_up 플래그는 보존.
-fn upgraded_wallet(
-    w: &EncryptedWallet,
-    phrase: &str,
-    password: &str,
-) -> Option<EncryptedWallet> {
+fn upgraded_wallet(w: &EncryptedWallet, phrase: &str, password: &str) -> Option<EncryptedWallet> {
     if w.version >= 3 {
         return None;
     }
@@ -261,10 +292,18 @@ pub(crate) fn get_wallet_status() -> Result<WalletStatus, String> {
         });
     }
     if legacy_path()?.exists() {
-        let data = fs::read_to_string(legacy_path()?)
-            .map_err(|e| format!("지갑 파일 읽기 실패: {e}"))?;
-        let lw: LegacyWallet =
-            serde_json::from_str(&data).map_err(|e| format!("지갑 파일 파싱 실패: {e}"))?;
+        let data = fs::read_to_string(legacy_path()?).map_err(|e| {
+            tf!(
+                "지갑 파일 읽기 실패: {e}",
+                "Couldn't read the wallet file: {e}"
+            )
+        })?;
+        let lw: LegacyWallet = serde_json::from_str(&data).map_err(|e| {
+            tf!(
+                "지갑 파일 파싱 실패: {e}",
+                "Couldn't parse the wallet file: {e}"
+            )
+        })?;
         return Ok(WalletStatus {
             state: "legacy".into(),
             address: Some(lw.address),
@@ -284,11 +323,15 @@ pub(crate) fn get_wallet_status() -> Result<WalletStatus, String> {
 pub(crate) fn create_wallet(password: String) -> Result<WalletInfo, String> {
     let password = Zeroizing::new(password); // 사용 후 메모리에서 0으로 덮음
     if enc_path()?.exists() {
-        return Err("이미 지갑이 있습니다".into());
+        return Err(ts!("이미 지갑이 있습니다", "A wallet already exists").into());
     }
     let mut rng = rand::thread_rng();
-    let mnemonic = Mnemonic::<English>::new_with_count(&mut rng, 12)
-        .map_err(|e| format!("니모닉 생성 실패: {e}"))?;
+    let mnemonic = Mnemonic::<English>::new_with_count(&mut rng, 12).map_err(|e| {
+        tf!(
+            "니모닉 생성 실패: {e}",
+            "Couldn't generate a recovery phrase: {e}"
+        )
+    })?;
     let phrase = Zeroizing::new(mnemonic.to_phrase());
     let address = derive_address(&phrase)?;
 
@@ -303,25 +346,47 @@ pub(crate) fn create_wallet(password: String) -> Result<WalletInfo, String> {
 pub(crate) fn migrate_wallet(password: String) -> Result<WalletInfo, String> {
     let password = Zeroizing::new(password);
     if enc_path()?.exists() {
-        return Err("이미 암호화된 지갑이 있습니다".into());
+        return Err(ts!(
+            "이미 암호화된 지갑이 있습니다",
+            "An encrypted wallet already exists"
+        )
+        .into());
     }
     let legacy = legacy_path()?;
-    let data = fs::read_to_string(&legacy).map_err(|e| format!("기존 지갑 읽기 실패: {e}"))?;
-    let lw: LegacyWallet =
-        serde_json::from_str(&data).map_err(|e| format!("기존 지갑 파싱 실패: {e}"))?;
+    let data = fs::read_to_string(&legacy).map_err(|e| {
+        tf!(
+            "기존 지갑 읽기 실패: {e}",
+            "Couldn't read the existing wallet: {e}"
+        )
+    })?;
+    let lw: LegacyWallet = serde_json::from_str(&data).map_err(|e| {
+        tf!(
+            "기존 지갑 파싱 실패: {e}",
+            "Couldn't parse the existing wallet: {e}"
+        )
+    })?;
     let mnemonic = Zeroizing::new(lw.mnemonic);
 
     // 무결성 확인: 저장된 주소가 니모닉에서 실제 파생되는지.
     let derived = derive_address(&mnemonic)?;
     if !derived.eq_ignore_ascii_case(&lw.address) {
-        return Err("기존 지갑 파일이 손상되었습니다 (주소 불일치)".into());
+        return Err(ts!(
+            "기존 지갑 파일이 손상되었습니다 (주소 불일치)",
+            "The existing wallet file is damaged (address mismatch)"
+        )
+        .into());
     }
 
     let w = encrypt_wallet(&mnemonic, &derived, &password)?;
     write_encrypted(&w)?;
 
     // 암호화 성공 후에만 평문 파일 제거.
-    fs::remove_file(&legacy).map_err(|e| format!("기존 평문 파일 삭제 실패: {e}"))?;
+    fs::remove_file(&legacy).map_err(|e| {
+        tf!(
+            "기존 평문 파일 삭제 실패: {e}",
+            "Couldn't delete the old unencrypted file: {e}"
+        )
+    })?;
 
     Ok(WalletInfo { address: derived })
 }
@@ -354,14 +419,20 @@ fn build_imported_wallet(phrase: &str, password: &str) -> Result<EncryptedWallet
     let normalized = normalize_mnemonic(phrase);
     let count = normalized.split_whitespace().count();
     if !matches!(count, 12 | 15 | 18 | 21 | 24) {
-        return Err(format!(
-            "복구 문구는 12·15·18·21·24단어 중 하나여야 해요 (지금 {count}개)"
+        return Err(tf!(
+            "복구 문구는 12·15·18·21·24단어 중 하나여야 해요 (지금 {count}개)",
+            "A recovery phrase has 12, 15, 18, 21, or 24 words (this one has {count})"
         ));
     }
     // BIP-39 체크섬·단어 검증 + 주소 파생. 잘못된 단어·순서·체크섬이면 여기서 거부된다.
     // (원시 파생 에러는 내부 정보라 노출하지 않고 사람 말 메시지로 바꾼다.)
-    let address = derive_address(&normalized)
-        .map_err(|_| "복구 문구가 올바르지 않아요. 단어와 순서를 다시 확인해주세요.".to_string())?;
+    let address = derive_address(&normalized).map_err(|_| {
+        ts!(
+            "복구 문구가 올바르지 않아요. 단어와 순서를 다시 확인해주세요.",
+            "That recovery phrase isn't valid. Check the words and their order."
+        )
+        .to_string()
+    })?;
 
     let mut w = encrypt_wallet(&normalized, &address, password)?;
     w.backed_up = true;
@@ -376,7 +447,7 @@ pub(crate) fn import_wallet(password: String, phrase: String) -> Result<WalletIn
     let password = Zeroizing::new(password); // 사용 후 메모리에서 0으로 덮음
     let phrase = Zeroizing::new(phrase);
     if enc_path()?.exists() {
-        return Err("이미 지갑이 있습니다".into());
+        return Err(ts!("이미 지갑이 있습니다", "A wallet already exists").into());
     }
     let w = build_imported_wallet(&phrase, &password)?;
     let address = w.address.clone();
@@ -475,7 +546,8 @@ mod tests {
     // kdf 기본값은 반드시 v2 시절 파라미터(19 MiB/t=2/p=1) — 아니면 기존 지갑이 안 열린다.
     #[test]
     fn legacy_v2_without_backed_up_field_loads() {
-        let json = r#"{"version":2,"address":"0xabc","salt":"AA==","nonce":"AA==","ciphertext":"AA=="}"#;
+        let json =
+            r#"{"version":2,"address":"0xabc","salt":"AA==","nonce":"AA==","ciphertext":"AA=="}"#;
         let w: EncryptedWallet = serde_json::from_str(json).expect("파싱 성공");
         assert!(!w.backed_up);
         assert_eq!((w.kdf_m, w.kdf_t, w.kdf_p), (KDF_M_V2, KDF_T_V2, KDF_P_V2));
@@ -512,7 +584,10 @@ mod tests {
 
         let v3 = upgraded_wallet(&v2, phrase, "pw").expect("v2는 업그레이드 대상");
         assert_eq!(v3.version, 3);
-        assert_eq!((v3.kdf_m, v3.kdf_t, v3.kdf_p), (KDF_M_V3, KDF_T_V3, KDF_P_V3));
+        assert_eq!(
+            (v3.kdf_m, v3.kdf_t, v3.kdf_p),
+            (KDF_M_V3, KDF_T_V3, KDF_P_V3)
+        );
         assert_eq!(v3.address, "0xAddr");
         assert!(v3.backed_up); // 백업 표시 보존
         assert_eq!(decrypt_wallet(&v3, "pw").unwrap().as_str(), phrase);

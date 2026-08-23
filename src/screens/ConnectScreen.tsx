@@ -24,6 +24,7 @@ import { GITHUB_URL } from "@/lib/helpContent";
 import { useCopy } from "@/lib/useCopy";
 import type { AgentStatus, ConnectStatus } from "@/lib/types";
 import { cardBase, enter, primaryBtn, secondaryBtn, shell } from "@/components/ui";
+import { t } from "@/lib/i18n";
 
 const em = "text-[var(--color-ink-700)] dark:text-[#E8E5DD]";
 
@@ -104,7 +105,10 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
       await invoke("connect_claude_desktop");
       setDesktopMsg({
         ok: true,
-        text: "Claude 데스크톱에 설치 창이 떴어요 — 거기서 '설치'를 누르면 끝나요.",
+        text: t(
+          "Claude 데스크톱에 설치 창이 떴어요 — 거기서 '설치'를 누르면 끝나요.",
+          "Claude desktop opened its installer — press Install there and you're done.",
+        ),
       });
     } catch (e) {
       setDesktopMsg({ ok: false, text: String(e) });
@@ -145,14 +149,14 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
       <header className="w-full max-w-md flex items-center justify-between text-[12px] text-[var(--color-ink-500)]">
         <span className="flex items-center gap-2">
           <Plug size={12} className="text-[var(--color-accent)]" />
-          AI 연결
+          {t("AI 연결", "Connect an AI")}
         </span>
         <button
           type="button"
           onClick={onClose}
           className="hover:text-[var(--color-ink-900)] dark:hover:text-[#E8E5DD] transition-colors"
         >
-          닫기
+          {t("닫기", "Close")}
         </button>
       </header>
 
@@ -166,14 +170,31 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                 <span className="relative inline-flex w-2 h-2 rounded-full bg-[var(--color-accent)]" />
               </span>
               <p className="text-[13px] text-[var(--color-ink-700)] dark:text-[#E8E5DD]">
-                <b className={em}>연결돼 있어요.</b> AI가 결제를 요청하면 승인 팝업이 떠요.
+                {t(
+                  <>
+                    <b className={em}>연결돼 있어요.</b> AI가 결제를 요청하면 승인 팝업이 떠요.
+                  </>,
+                  <>
+                    <b className={em}>Connected.</b> When the AI asks to pay, an approval window
+                    opens.
+                  </>,
+                )}
               </p>
             </div>
           ) : (
             <p className="text-[12px] leading-relaxed text-[var(--color-ink-500)]">
-              <b className={em}>아직 연결된 AI가 없어요.</b> 아래에서 쓰는 앱을 골라 연결하면,
-              AI가 잔액을 읽고 결제를 <b className={em}>요청</b>할 수 있어요. 승인은 언제나 이
-              앱에서 해요.
+              {t(
+                <>
+                  <b className={em}>아직 연결된 AI가 없어요.</b> 아래에서 쓰는 앱을 골라 연결하면,
+                  AI가 잔액을 읽고 결제를 <b className={em}>요청</b>할 수 있어요. 승인은 언제나 이
+                  앱에서 해요.
+                </>,
+                <>
+                  <b className={em}>No AI is connected yet.</b> Pick the app you use below, and it
+                  can read your balance and <b className={em}>ask</b> to pay. Approving always
+                  happens here.
+                </>,
+              )}
             </p>
           )}
         </section>
@@ -181,30 +202,40 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
         {/* Claude 데스크톱 — 동봉 확장(.mcpb) 열기 = 설치 다이얼로그 직행 */}
         <ClientCard
           icon={<MessageSquare size={14} />}
-          title="Claude 데스크톱"
+          title={t("Claude 데스크톱", "Claude desktop")}
           tag={
             status &&
             (status.desktop_ext_installed ? (
-              <StateTag ok label="확장 설치됨" />
+              <StateTag ok label={t("확장 설치됨", "Extension installed")} />
             ) : status.desktop_installed ? undefined : (
-              <StateTag label="앱 미설치" />
+              <StateTag label={t("앱 미설치", "App not installed")} />
             ))
           }
         >
           {status && !status.desktop_installed ? (
             <div className="space-y-2.5">
-              <p>Claude 데스크톱 앱이 이 맥에 없어요. 먼저 설치하고 다시 오세요.</p>
+              <p>
+                {t(
+                  "Claude 데스크톱 앱이 이 맥에 없어요. 먼저 설치하고 다시 오세요.",
+                  "The Claude desktop app isn't on this Mac. Install it first, then come back.",
+                )}
+              </p>
               <button
                 type="button"
                 onClick={() => openUrl("https://claude.ai/download").catch(() => {})}
                 className={cn(secondaryBtn, "w-full")}
               >
-                <ExternalLink size={13} /> claude.ai/download 열기
+                <ExternalLink size={13} /> {t("claude.ai/download 열기", "Open claude.ai/download")}
               </button>
             </div>
           ) : (
             <div className="space-y-2.5">
-              <p>버튼을 누르면 Claude에 확장 설치 창이 떠요. 거기서 '설치'만 누르면 돼요.</p>
+              <p>
+                {t(
+                  "버튼을 누르면 Claude에 확장 설치 창이 떠요. 거기서 '설치'만 누르면 돼요.",
+                  "Press the button and Claude opens its extension installer. Press Install there.",
+                )}
+              </p>
               <button
                 type="button"
                 onClick={() => void connectDesktop()}
@@ -217,9 +248,9 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                 {desktopBusy ? (
                   <Loader2 size={14} className="animate-spin" />
                 ) : status?.desktop_ext_installed ? (
-                  "확장 다시 설치"
+                  t("확장 다시 설치", "Reinstall the extension")
                 ) : (
-                  "Claude 데스크톱에 연결"
+                  t("Claude 데스크톱에 연결", "Connect Claude desktop")
                 )}
               </button>
               {desktopMsg && (
@@ -243,31 +274,53 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
           tag={
             status &&
             (status.cli_registered ? (
-              <StateTag ok label="등록됨" />
+              <StateTag ok label={t("등록됨", "Registered")} />
             ) : status.cli_registered_other ? (
-              <StateTag label="다른 경로 등록됨" />
+              <StateTag label={t("다른 경로 등록됨", "Points elsewhere")} />
             ) : status.cli_path ? undefined : (
-              <StateTag label="CLI 못 찾음" />
+              <StateTag label={t("CLI 못 찾음", "CLI not found")} />
             ))
           }
         >
           {status?.cli_registered ? (
             <p>
-              등록돼 있어요. 아무 폴더에서나 <b className={em}>claude</b>를 실행하면 자동으로
-              연결돼요.
+              {t(
+                <>
+                  등록돼 있어요. 아무 폴더에서나 <b className={em}>claude</b>를 실행하면 자동으로
+                  연결돼요.
+                </>,
+                <>
+                  Registered. Run <b className={em}>claude</b> in any folder and it connects on its
+                  own.
+                </>,
+              )}
             </p>
           ) : tempNoPath ? (
             // 임시 경로를 등록해 주면 마운트 해제 순간 죽는 등록이 남는다.
             <p>
-              앱이 임시 위치(디스크 이미지 등)에서 실행 중이에요. Kura를{" "}
-              <b className={em}>응용 프로그램</b> 폴더로 옮겨서 실행한 뒤 다시 연결하세요.
+              {t(
+                <>
+                  앱이 임시 위치(디스크 이미지 등)에서 실행 중이에요. Kura를{" "}
+                  <b className={em}>응용 프로그램</b> 폴더로 옮겨서 실행한 뒤 다시 연결하세요.
+                </>,
+                <>
+                  The app is running from a temporary location (a disk image, for example). Move
+                  Kura to <b className={em}>Applications</b>, open it from there, and connect again.
+                </>,
+              )}
             </p>
           ) : status?.cli_path ? (
             <div className="space-y-2.5">
               <p>
                 {status.cli_registered_other
-                  ? "kura 등록이 있지만 다른 경로(옛 설치 등)를 가리키고 있어요. 다시 등록하면 이 앱으로 바로잡아요."
-                  : "버튼 한 번으로 등록돼요. 다음 claude 실행부터 어느 폴더에서든 연결돼요."}
+                  ? t(
+                      "kura 등록이 있지만 다른 경로(옛 설치 등)를 가리키고 있어요. 다시 등록하면 이 앱으로 바로잡아요.",
+                      "A kura entry exists, but it points somewhere else (an older install). Registering again points it at this app.",
+                    )
+                  : t(
+                      "버튼 한 번으로 등록돼요. 다음 claude 실행부터 어느 폴더에서든 연결돼요.",
+                      "One button registers it. From the next claude run on, it works in any folder.",
+                    )}
               </p>
               <button
                 type="button"
@@ -278,9 +331,9 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                 {cliBusy ? (
                   <Loader2 size={14} className="animate-spin" />
                 ) : status.cli_registered_other ? (
-                  "이 앱으로 다시 등록"
+                  t("이 앱으로 다시 등록", "Point it at this app")
                 ) : (
-                  "Claude Code에 연결"
+                  t("Claude Code에 연결", "Connect Claude Code")
                 )}
               </button>
               {cliError && (
@@ -294,7 +347,7 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                     onClick={() => copy(reRegisterCommand)}
                     className={cn(secondaryBtn, "w-full")}
                   >
-                    {copied ? <Check size={13} /> : <Copy size={13} />} 명령 복사
+                    {copied ? <Check size={13} /> : <Copy size={13} />} {t("명령 복사", "Copy command")}
                   </button>
                 </div>
               )}
@@ -302,8 +355,10 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
           ) : (
             <div className="space-y-2.5">
               <p>
-                claude 명령을 찾지 못했어요. Claude Code를 쓰고 있다면 터미널에서 직접
-                등록하세요:
+                {t(
+                  "claude 명령을 찾지 못했어요. Claude Code를 쓰고 있다면 터미널에서 직접 등록하세요:",
+                  "Couldn't find the claude command. If you use Claude Code, register it yourself in a terminal:",
+                )}
               </p>
               <CodeBox text={cliCommand} />
               <button
@@ -311,26 +366,37 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                 onClick={() => copy(cliCommand)}
                 className={cn(secondaryBtn, "w-full")}
               >
-                {copied ? <Check size={13} /> : <Copy size={13} />} 명령 복사
+                {copied ? <Check size={13} /> : <Copy size={13} />} {t("명령 복사", "Copy command")}
               </button>
             </div>
           )}
         </ClientCard>
 
         {/* 그 외 MCP 클라이언트 — 경로만 있으면 어디든 */}
-        <ClientCard icon={<Bot size={14} />} title="다른 AI 앱 (Cursor 등)">
+        <ClientCard icon={<Bot size={14} />} title={t("다른 AI 앱 (Cursor 등)", "Other AI apps (Cursor and friends)")}>
           {tempNoPath ? (
             // 이 상태의 mcpPath 폴백(/Applications/…)은 아직 없는 파일이다 — 복사하게
             // 두면 죽은 경로를 등록한다(코덱스 개발38 1차). 같은 "옮기기" 안내로 대체.
             <p>
-              앱이 임시 위치(디스크 이미지 등)에서 실행 중이에요. Kura를{" "}
-              <b className={em}>응용 프로그램</b> 폴더로 옮겨서 실행하면 등록할 경로가
-              생겨요.
+              {t(
+                <>
+                  앱이 임시 위치(디스크 이미지 등)에서 실행 중이에요. Kura를{" "}
+                  <b className={em}>응용 프로그램</b> 폴더로 옮겨서 실행하면 등록할 경로가 생겨요.
+                </>,
+                <>
+                  The app is running from a temporary location (a disk image, for example). Move
+                  Kura to <b className={em}>Applications</b> and open it from there to get a path
+                  worth registering.
+                </>,
+              )}
             </p>
           ) : (
           <div className="space-y-2.5">
             <p>
-              MCP를 지원하는 앱이면 어디든 붙어요. 서버로 이 경로를 등록하면 돼요:
+              {t(
+                "MCP를 지원하는 앱이면 어디든 붙어요. 서버로 이 경로를 등록하면 돼요:",
+                "Any app that speaks MCP can use this. Register this path as the server:",
+              )}
             </p>
             <CodeBox text={mcpPath} />
             <div className="flex items-center justify-between gap-2">
@@ -339,14 +405,14 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                 onClick={() => copyPath(mcpPath)}
                 className="inline-flex items-center gap-1 text-[11px] text-[var(--color-ink-500)] hover:text-[var(--color-accent)] transition-colors"
               >
-                {pathCopied ? <Check size={11} /> : <Copy size={11} />} 경로 복사
+                {pathCopied ? <Check size={11} /> : <Copy size={11} />} {t("경로 복사", "Copy path")}
               </button>
               <button
                 type="button"
                 onClick={() => openUrl(`${GITHUB_URL}#readme`).catch(() => {})}
                 className="inline-flex items-center gap-1 text-[11px] text-[var(--color-ink-500)] hover:text-[var(--color-accent)] transition-colors"
               >
-                <ExternalLink size={11} /> GitHub 문서
+                <ExternalLink size={11} /> {t("GitHub 문서", "GitHub docs")}
               </button>
             </div>
           </div>

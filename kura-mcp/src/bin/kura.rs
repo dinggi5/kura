@@ -14,11 +14,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kura_mcp::chain::active_chain;
 use kura_mcp::flow::{self, X402Outcome};
+use kura_mcp::i18n::{lang, Lang};
 use kura_mcp::wallet;
+use kura_mcp::{tf, ts};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const HELP: &str = "\
+const HELP_KO: &str = "\
 Kura — AI 에이전트 전용 로컬 지갑 CLI
 
 사용법:
@@ -38,6 +40,33 @@ Kura — AI 에이전트 전용 로컬 지갑 CLI
 보안: 비밀번호는 절대 CLI 로 받지 않습니다. 결제는 기본값으로 지갑 앱이 팝업으로 사람 승인을
 받아야 실행되고(최대 5분 대기; 앱에서 자율 결제를 켠 경우만 그 한도 안에서 자동 승인),
 단일/일일 한도·긴급잠금·화이트리스트는 앱이 강제합니다.";
+
+const HELP_EN: &str = "\
+Kura — a local wallet CLI for AI agents
+
+Usage:
+  kura status                     wallet state and address
+  kura balance                    ETH (gas) · USDC (payments) balances
+  kura history [--limit N]        recent transactions (default 20, max 200)
+  kura pay <address> <amount>     ask to pay → approve with your password in the app
+       --token USDC|ETH           token (USDC by default)
+       --memo \"reason\"            what the payment is for, shown in the approval window
+  kura fetch <URL> [--memo \"reason\"]   pay for an x402 resource and fetch it
+
+Global options:
+  --json        machine-readable JSON output (for scripts)
+  -h, --help    this help
+  -V, --version version
+
+Security: this CLI never takes your password. By default a payment only goes out after you
+approve it in the wallet app (it waits up to 5 minutes; automatic approval happens only within
+the limit you set if you turned autopay on), and the app enforces the per-payment and daily
+limits, the emergency lock, and the allowlist.";
+
+/// 도움말은 사람이 읽는 화면이라 언어를 탄다. 상수는 두 벌로 두고 여기서 고른다.
+fn help() -> &'static str {
+    ts!(HELP_KO, HELP_EN)
+}
 
 /// 파싱된 명령줄 — 전역 플래그 + 위치 인자 + 값 옵션.
 struct Cli {
@@ -76,7 +105,10 @@ fn parse(args: &[String]) -> Parsed {
                 // --key=value 형태.
                 if let Some((k, v)) = body.split_once('=') {
                     if !VALUE_OPTS.contains(&k) {
-                        return Parsed::Error(format!("알 수 없는 옵션: --{k}"));
+                        return Parsed::Error(tf!(
+                            "알 수 없는 옵션: --{k}",
+                            "Unknown option: --{k}"
+                        ));
                     }
                     cli.opts.insert(k.to_string(), v.to_string());
                 } else if VALUE_OPTS.contains(&body) {
@@ -89,13 +121,14 @@ fn parse(args: &[String]) -> Parsed {
                             i += 1;
                         }
                         _ => {
-                            return Parsed::Error(format!(
-                                "--{body} 에 값이 필요해요 (값이 --로 시작하면 --{body}=값 형태로 주세요)"
+                            return Parsed::Error(tf!(
+                                "--{body} 에 값이 필요해요 (값이 --로 시작하면 --{body}=값 형태로 주세요)",
+                                "--{body} needs a value (if the value starts with --, write it as --{body}=value)"
                             ))
                         }
                     }
                 } else {
-                    return Parsed::Error(format!("알 수 없는 옵션: {a}"));
+                    return Parsed::Error(tf!("알 수 없는 옵션: {a}", "Unknown option: {a}"));
                 }
             }
             _ => cli.positionals.push(a.clone()),
@@ -110,7 +143,7 @@ async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cli = match parse(&args) {
         Parsed::Help => {
-            println!("{HELP}");
+            println!("{}", help());
             return ExitCode::SUCCESS;
         }
         Parsed::Version => {
@@ -118,7 +151,7 @@ async fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Parsed::Error(msg) => {
-            eprintln!("{msg}\n\n{HELP}");
+            eprintln!("{msg}\n\n{}", help());
             return ExitCode::FAILURE;
         }
         Parsed::Run(cli) => cli,
@@ -126,7 +159,7 @@ async fn main() -> ExitCode {
 
     let cmd = cli.positionals.first().map(String::as_str).unwrap_or("");
     if cmd.is_empty() {
-        println!("{HELP}");
+        println!("{}", help());
         return ExitCode::SUCCESS;
     }
     // 잘못된 KURA_CHAIN_ID 면 어떤 출력보다 먼저 즉시 종료한다(부분 출력 방지 — 검증은 active_chain
@@ -143,7 +176,13 @@ async fn main() -> ExitCode {
         "history" => cmd_history(&cli).await.map(|_| true),
         "pay" => cmd_pay(&cli, rest).await,
         "fetch" => cmd_fetch(&cli, rest).await,
-        other => Err(format!("알 수 없는 명령: {other}\n\n{HELP}")),
+        other => {
+            let help = help();
+            Err(tf!(
+                "알 수 없는 명령: {other}\n\n{help}",
+                "Unknown command: {other}\n\n{help}"
+            ))
+        }
     };
 
     match result {
@@ -165,30 +204,67 @@ async fn cmd_status(cli: &Cli) -> Result<(), String> {
         return Ok(());
     }
     let state = match s.state.as_str() {
-        "encrypted" => "암호화됨 ✓",
-        "legacy" => "평문 (앱에서 비번 설정 필요)",
-        _ => "없음 (앱에서 지갑을 먼저 만드세요)",
+        "encrypted" => ts!("암호화됨 ✓", "encrypted ✓"),
+        "legacy" => ts!(
+            "평문 (앱에서 비번 설정 필요)",
+            "unencrypted (set a password in the app)"
+        ),
+        _ => ts!(
+            "없음 (앱에서 지갑을 먼저 만드세요)",
+            "none (create a wallet in the app first)"
+        ),
     };
-    println!("지갑      {state}");
+    println!("{}", tf!("지갑      {state}", "Wallet    {state}"));
     if let Some(addr) = &s.address {
-        println!("주소      {addr}");
-        println!("백업      {}", if s.backed_up { "완료" } else { "안 됨 — 시드 백업 권장" });
+        println!("{}", tf!("주소      {addr}", "Address   {addr}"));
+        println!(
+            "{}",
+            tf!(
+                "백업      {}",
+                "Backup    {}",
+                if s.backed_up {
+                    ts!("완료", "done")
+                } else {
+                    ts!("안 됨 — 시드 백업 권장", "not yet — back up your 12 words")
+                }
+            )
+        );
     }
-    println!("네트워크  {}", network_label());
+    println!("{}", tf!("네트워크  {}", "Network   {}", network_label()));
     Ok(())
 }
 
 async fn cmd_balance(cli: &Cli) -> Result<(), String> {
     let s = wallet::wallet_status()?;
-    let addr = s.address.ok_or("지갑이 아직 없어요. 앱에서 먼저 만드세요.")?;
+    let addr = s.address.ok_or_else(|| {
+        ts!(
+            "지갑이 아직 없어요. 앱에서 먼저 만드세요.",
+            "There's no wallet yet. Create one in the app first."
+        )
+        .to_string()
+    })?;
     let b = wallet::get_balances(&addr).await?;
     if cli.json {
         print_json(&b)?;
         return Ok(());
     }
-    println!("USDC  {}  (결제용)", trim_zeros(&b.usdc));
-    println!("ETH   {}  (가스용)", trim_zeros(&b.eth));
-    println!("네트워크  {}", network_label());
+    println!(
+        "{}",
+        tf!(
+            "USDC  {}  (결제용)",
+            "USDC  {}  (for payments)",
+            trim_zeros(&b.usdc)
+        )
+    );
+    println!(
+        "{}",
+        tf!(
+            "ETH   {}  (가스용)",
+            "ETH   {}  (for gas)",
+            trim_zeros(&b.eth)
+        )
+    );
+    println!("{}", tf!("네트워크  {}", "Network   {}", network_label()));
     Ok(())
 }
 
@@ -197,7 +273,12 @@ async fn cmd_history(cli: &Cli) -> Result<(), String> {
     let limit = match cli.opts.get("limit") {
         Some(v) => v
             .parse::<usize>()
-            .map_err(|_| format!("--limit 은 0 이상의 정수여야 해요: {v}"))?
+            .map_err(|_| {
+                tf!(
+                    "--limit 은 0 이상의 정수여야 해요: {v}",
+                    "--limit must be a whole number, 0 or more: {v}"
+                )
+            })?
             .min(200),
         None => 20,
     };
@@ -208,19 +289,26 @@ async fn cmd_history(cli: &Cli) -> Result<(), String> {
         return Ok(());
     }
     if list.is_empty() {
-        println!("아직 거래 내역이 없어요.");
+        println!(
+            "{}",
+            ts!("아직 거래 내역이 없어요.", "No transactions yet.")
+        );
         return Ok(());
     }
     let now = now_secs();
     for e in &list {
         // 정산된 x402 는 정산 tx, 그 외는 detail(보통 tx 해시)을 증빙으로 보여준다.
-        let hash = if !e.settle_tx.is_empty() { &e.settle_tx } else { &e.detail };
+        let hash = if !e.settle_tx.is_empty() {
+            &e.settle_tx
+        } else {
+            &e.detail
+        };
         let mut line = format!(
             "{}  ·  {} {}  ·  {}  ·  → {}",
-            status_ko(&e.status),
+            status_label(&e.status, lang()),
             e.token,
             e.amount,
-            rel_time(now, e.ts),
+            rel_time(now, e.ts, lang()),
             shorten(&e.to),
         );
         if hash.starts_with("0x") {
@@ -235,17 +323,31 @@ async fn cmd_history(cli: &Cli) -> Result<(), String> {
 
 /// 반환: 결제 성공(approved) 여부. 거부/실패면 false → main 이 종료코드 1.
 async fn cmd_pay(cli: &Cli, rest: &[String]) -> Result<bool, String> {
-    let to = rest
-        .first()
-        .ok_or("받는 주소가 필요해요.\n\nkura pay <주소> <금액> [--token USDC|ETH] [--memo \"사유\"]")?;
-    let amount = rest
-        .get(1)
-        .ok_or("금액이 필요해요.\n\nkura pay <주소> <금액> [--token USDC|ETH] [--memo \"사유\"]")?;
+    let to = rest.first().ok_or_else(|| {
+        ts!(
+            "받는 주소가 필요해요.\n\nkura pay <주소> <금액> [--token USDC|ETH] [--memo \"사유\"]",
+            "A recipient address is required.\n\nkura pay <address> <amount> [--token USDC|ETH] [--memo \"reason\"]"
+        )
+        .to_string()
+    })?;
+    let amount = rest.get(1).ok_or_else(|| {
+        ts!(
+            "금액이 필요해요.\n\nkura pay <주소> <금액> [--token USDC|ETH] [--memo \"사유\"]",
+            "An amount is required.\n\nkura pay <address> <amount> [--token USDC|ETH] [--memo \"reason\"]"
+        )
+        .to_string()
+    })?;
     let token = cli.opts.get("token").map(String::as_str).unwrap_or("USDC");
     let memo = cli.opts.get("memo").map(String::as_str).unwrap_or("");
 
     if !cli.json {
-        println!("지갑 앱 승인을 기다리는 중… (최대 5분, 앱 팝업에서 비번 입력)");
+        println!(
+            "{}",
+            ts!(
+                "지갑 앱 승인을 기다리는 중… (최대 5분, 앱 팝업에서 비번 입력)",
+                "Waiting for approval in the wallet app… (up to 5 minutes; type your password there)"
+            )
+        );
     }
     let out = flow::run_payment(token, to, amount, memo).await?;
     let success = out.status == "approved";
@@ -260,18 +362,29 @@ async fn cmd_pay(cli: &Cli, rest: &[String]) -> Result<bool, String> {
     } else {
         match out.status.as_str() {
             "approved" => {
-                println!("✓ 승인됨");
+                println!("{}", ts!("✓ 승인됨", "✓ Approved"));
                 if !out.tx_hash.is_empty() {
                     println!("  tx    {}", out.tx_hash);
                 }
                 if !out.explorer.is_empty() {
-                    println!("  보기  {}", out.explorer);
+                    println!("{}", tf!("  보기  {}", "  view  {}", out.explorer));
                 }
             }
-            "rejected" => println!("✗ 사용자가 거부했어요."),
+            "rejected" => println!(
+                "{}",
+                ts!("✗ 사용자가 거부했어요.", "✗ The user rejected it.")
+            ),
             _ => eprintln!(
-                "✗ 실패: {}",
-                if out.detail.is_empty() { "알 수 없는 오류" } else { &out.detail }
+                "{}",
+                tf!(
+                    "✗ 실패: {}",
+                    "✗ Failed: {}",
+                    if out.detail.is_empty() {
+                        ts!("알 수 없는 오류", "unknown error")
+                    } else {
+                        &out.detail
+                    }
+                )
             ),
         }
     }
@@ -282,13 +395,23 @@ async fn cmd_pay(cli: &Cli, rest: &[String]) -> Result<bool, String> {
 
 /// 반환: 성공 여부(결제 불필요로 콘텐츠 수신 또는 결제·정산 완료). 거부/실패/정산실패면 false.
 async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
-    let url = rest
-        .first()
-        .ok_or("URL 이 필요해요.\n\nkura fetch <URL> [--memo \"사유\"]")?;
+    let url = rest.first().ok_or_else(|| {
+        ts!(
+            "URL 이 필요해요.\n\nkura fetch <URL> [--memo \"사유\"]",
+            "A URL is required.\n\nkura fetch <URL> [--memo \"reason\"]"
+        )
+        .to_string()
+    })?;
     let memo = cli.opts.get("memo").map(String::as_str);
 
     if !cli.json {
-        println!("리소스를 가져오는 중… (결제가 필요하면 지갑 앱 승인을 기다립니다, 최대 5분)");
+        println!(
+            "{}",
+            ts!(
+                "리소스를 가져오는 중… (결제가 필요하면 지갑 앱 승인을 기다립니다, 최대 5분)",
+                "Fetching the resource… (if it needs payment, this waits up to 5 minutes for your approval)"
+            )
+        );
     }
     let out = flow::run_x402(url, memo).await?;
     // 성공 = 결제 불필요(콘텐츠 받음) 또는 결제·정산까지 완료. 거부/실패/정산실패는 종료코드 1.
@@ -302,16 +425,36 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
     } else {
         match out {
             X402Outcome::NotPaid { http_status, body } => {
-                println!("결제 불필요 (HTTP {http_status})\n");
+                println!(
+                    "{}",
+                    tf!(
+                        "결제 불필요 (HTTP {http_status})\n",
+                        "No payment required (HTTP {http_status})\n"
+                    )
+                );
                 println!("{body}");
             }
             X402Outcome::Declined { status, detail } => {
                 if status == "rejected" {
-                    eprintln!("✗ 사용자가 결제를 거부했어요.");
+                    eprintln!(
+                        "{}",
+                        ts!(
+                            "✗ 사용자가 결제를 거부했어요.",
+                            "✗ The user rejected the payment."
+                        )
+                    );
                 } else {
                     eprintln!(
-                        "✗ 결제 실패: {}",
-                        if detail.is_empty() { "알 수 없는 오류" } else { &detail }
+                        "{}",
+                        tf!(
+                            "✗ 결제 실패: {}",
+                            "✗ Payment failed: {}",
+                            if detail.is_empty() {
+                                ts!("알 수 없는 오류", "unknown error")
+                            } else {
+                                &detail
+                            }
+                        )
                     );
                 }
             }
@@ -325,14 +468,34 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                 body,
             } => {
                 if ok {
-                    println!("✓ 결제 완료 — {amount} USDC → {}", shorten(&pay_to));
+                    println!(
+                        "{}",
+                        tf!(
+                            "✓ 결제 완료 — {amount} USDC → {}",
+                            "✓ Paid — {amount} USDC → {}",
+                            shorten(&pay_to)
+                        )
+                    );
                 } else {
-                    println!("△ 서명·전송했으나 정산 실패 (HTTP {http_status})");
+                    println!(
+                        "{}",
+                        tf!(
+                            "△ 서명·전송했으나 정산 실패 (HTTP {http_status})",
+                            "△ Signed and sent, but settlement failed (HTTP {http_status})"
+                        )
+                    );
                 }
-                println!("  리소스  {resource}");
+                println!("{}", tf!("  리소스  {resource}", "  resource  {resource}"));
                 if !settlement.is_empty() {
                     // settlement 은 base64(ASCII) → 바이트 슬라이스 안전. 앞부분만 미리보기.
-                    println!("  정산증빙  {}…", &settlement[..settlement.len().min(24)]);
+                    println!(
+                        "{}",
+                        tf!(
+                            "  정산증빙  {}…",
+                            "  receipt   {}…",
+                            &settlement[..settlement.len().min(24)]
+                        )
+                    );
                 }
                 println!("\n{body}");
             }
@@ -351,7 +514,13 @@ fn x402_json(out: &X402Outcome) -> serde_json::Value {
             "paid": false, "status": status, "detail": detail,
         }),
         X402Outcome::Paid {
-            http_status, ok, amount, pay_to, resource, settlement, body,
+            http_status,
+            ok,
+            amount,
+            pay_to,
+            resource,
+            settlement,
+            body,
         } => serde_json::json!({
             "paid": true,
             "status": if *ok { "ok" } else { "settlement_failed" },
@@ -369,7 +538,8 @@ fn x402_json(out: &X402Outcome) -> serde_json::Value {
 // ── 표시 헬퍼 (순수 함수 — 테스트됨) ────────────────────────────────────────
 
 fn print_json<T: serde::Serialize>(v: &T) -> Result<(), String> {
-    let s = serde_json::to_string_pretty(v).map_err(|e| format!("직렬화 실패: {e}"))?;
+    let s = serde_json::to_string_pretty(v)
+        .map_err(|e| tf!("직렬화 실패: {e}", "Couldn't serialize the output: {e}"))?;
     println!("{s}");
     Ok(())
 }
@@ -384,22 +554,30 @@ fn now_secs() -> u64 {
 /// 활성 체인의 사람용 라벨. 메인넷은 실제 자금임을 강조한다.
 fn network_label() -> String {
     match active_chain().chain_id {
-        84_532 => "Base Sepolia (테스트넷)".into(),
-        8453 => "Base 메인넷 · 실제 자금 ⚠️".into(),
-        id => format!("체인 {id}"),
+        84_532 => ts!("Base Sepolia (테스트넷)", "Base Sepolia (testnet)").into(),
+        8453 => ts!("Base 메인넷 · 실제 자금 ⚠️", "Base mainnet · real funds ⚠️").into(),
+        id => tf!("체인 {id}", "chain {id}"),
     }
 }
 
-/// 내역 status 코드를 한글로.
-fn status_ko(status: &str) -> &str {
-    match status {
-        "sent" => "보냄",
-        "blocked" => "차단됨",
-        "failed" => "실패",
-        "signed" => "서명됨(정산대기)",
-        "settled" => "정산됨",
-        "settle_failed" => "정산실패",
-        other => other,
+/// 내역 status 코드를 사람 말로.
+///
+/// `rel_time` 과 같은 이유로 언어를 인자로 받는다 — 테스트가 값으로 검증하는 순수 함수라,
+/// 전역 언어를 읽으면 사용자가 앱을 영어로 바꾼 순간 `cargo test` 가 깨진다.
+fn status_label(status: &str, lang: Lang) -> &str {
+    let (ko, en) = match status {
+        "sent" => ("보냄", "sent"),
+        "blocked" => ("차단됨", "blocked"),
+        "failed" => ("실패", "failed"),
+        "signed" => ("서명됨(정산대기)", "signed (awaiting settlement)"),
+        "settled" => ("정산됨", "settled"),
+        "settle_failed" => ("정산실패", "settlement failed"),
+        // 모르는 코드는 그대로 — 새 status 가 생겨도 원문이 보이는 편이 낫다(옛 status_ko 와 같다).
+        other => return other,
+    };
+    match lang {
+        Lang::Ko => ko,
+        Lang::En => en,
     }
 }
 
@@ -430,16 +608,34 @@ fn shorten(s: &str) -> String {
 }
 
 /// now-ts 를 사람용 상대 시간으로(달력 변환 불필요 — 타임존 함정 회피). 미래면 "방금".
-fn rel_time(now: u64, ts: u64) -> String {
+///
+/// 언어를 전역에서 읽지 않고 **인자로 받는다** — 이 함수는 테스트가 값으로 검증하는
+/// 순수 함수라, 전역을 보면 테스트 결과가 사용자의 settings.json 에 좌우된다.
+fn rel_time(now: u64, ts: u64, lang: Lang) -> String {
     let d = now.saturating_sub(ts);
-    if d < 60 {
-        "방금".into()
-    } else if d < 3_600 {
-        format!("{}분 전", d / 60)
-    } else if d < 86_400 {
-        format!("{}시간 전", d / 3_600)
-    } else {
-        format!("{}일 전", d / 86_400)
+    match lang {
+        Lang::Ko => {
+            if d < 60 {
+                "방금".into()
+            } else if d < 3_600 {
+                format!("{}분 전", d / 60)
+            } else if d < 86_400 {
+                format!("{}시간 전", d / 3_600)
+            } else {
+                format!("{}일 전", d / 86_400)
+            }
+        }
+        Lang::En => {
+            if d < 60 {
+                "just now".into()
+            } else if d < 3_600 {
+                format!("{}m ago", d / 60)
+            } else if d < 86_400 {
+                format!("{}h ago", d / 3_600)
+            } else {
+                format!("{}d ago", d / 86_400)
+            }
+        }
     }
 }
 
@@ -496,25 +692,40 @@ mod tests {
         assert!(matches!(parse(&["--version".into()]), Parsed::Version));
         assert!(matches!(parse(&["-V".into()]), Parsed::Version));
         // 하위명령보다 우선.
-        assert!(matches!(parse(&["pay".into(), "--help".into()]), Parsed::Help));
+        assert!(matches!(
+            parse(&["pay".into(), "--help".into()]),
+            Parsed::Help
+        ));
     }
 
     #[test]
     fn parse_unknown_option_errors() {
-        assert!(matches!(parse(&["status".into(), "--bogus".into()]), Parsed::Error(_)));
+        assert!(matches!(
+            parse(&["status".into(), "--bogus".into()]),
+            Parsed::Error(_)
+        ));
         assert!(matches!(parse(&["--nope=1".into()]), Parsed::Error(_)));
     }
 
     #[test]
     fn parse_missing_value_errors() {
         // --token 이 마지막이라 값이 없음.
-        assert!(matches!(parse(&["pay".into(), "--token".into()]), Parsed::Error(_)));
+        assert!(matches!(
+            parse(&["pay".into(), "--token".into()]),
+            Parsed::Error(_)
+        ));
     }
 
     #[test]
     fn parse_value_opt_rejects_dashed_next() {
         // `--memo --json` 은 --json 을 memo 로 삼키지 않고 값 누락 오류로 본다.
-        let a = vec!["pay".into(), "a".into(), "1".into(), "--memo".into(), "--json".into()];
+        let a = vec![
+            "pay".into(),
+            "a".into(),
+            "1".into(),
+            "--memo".into(),
+            "--json".into(),
+        ];
         assert!(matches!(parse(&a), Parsed::Error(_)));
         // 의도적 --값은 = 형태로 허용.
         match parse(&["pay".into(), "a".into(), "1".into(), "--memo=--keep".into()]) {
@@ -535,25 +746,37 @@ mod tests {
 
     #[test]
     fn shorten_addr() {
-        assert_eq!(shorten("0x8b7ba5077d261739f5FeBB31B10167671e590161"), "0x8b7b…0161");
+        assert_eq!(
+            shorten("0x8b7ba5077d261739f5FeBB31B10167671e590161"),
+            "0x8b7b…0161"
+        );
         assert_eq!(shorten(""), "-");
         assert_eq!(shorten("short"), "short");
     }
 
     #[test]
     fn rel_time_buckets() {
-        assert_eq!(rel_time(1000, 1000), "방금");
-        assert_eq!(rel_time(1000, 970), "방금"); // 30초
-        assert_eq!(rel_time(1000, 880), "2분 전"); // 120초
-        assert_eq!(rel_time(10_000, 2_800), "2시간 전"); // 7200초
-        assert_eq!(rel_time(200_000, 27_200), "2일 전"); // 172800초
-        assert_eq!(rel_time(1000, 2000), "방금"); // 미래(시계 역전)도 방금
+        assert_eq!(rel_time(1000, 1000, Lang::Ko), "방금");
+        assert_eq!(rel_time(1000, 970, Lang::Ko), "방금"); // 30초
+        assert_eq!(rel_time(1000, 880, Lang::Ko), "2분 전"); // 120초
+        assert_eq!(rel_time(10_000, 2_800, Lang::Ko), "2시간 전"); // 7200초
+        assert_eq!(rel_time(200_000, 27_200, Lang::Ko), "2일 전"); // 172800초
+        assert_eq!(rel_time(1000, 2000, Lang::Ko), "방금"); // 미래(시계 역전)도 방금
+                                                            // 영어도 같은 경계로 갈린다 (개발 42).
+        assert_eq!(rel_time(1000, 1000, Lang::En), "just now");
+        assert_eq!(rel_time(1000, 880, Lang::En), "2m ago");
+        assert_eq!(rel_time(10_000, 2_800, Lang::En), "2h ago");
+        assert_eq!(rel_time(200_000, 27_200, Lang::En), "2d ago");
     }
 
     #[test]
     fn status_ko_maps_known_and_passthrough() {
-        assert_eq!(status_ko("sent"), "보냄");
-        assert_eq!(status_ko("settled"), "정산됨");
-        assert_eq!(status_ko("weird"), "weird");
+        assert_eq!(status_label("sent", Lang::Ko), "보냄");
+        assert_eq!(status_label("settled", Lang::Ko), "정산됨");
+        assert_eq!(status_label("sent", Lang::En), "sent");
+        assert_eq!(status_label("settle_failed", Lang::En), "settlement failed");
+        // 모르는 코드는 그대로 통과한다(언어와 무관).
+        assert_eq!(status_label("weird", Lang::Ko), "weird");
+        assert_eq!(status_label("weird", Lang::En), "weird");
     }
 }

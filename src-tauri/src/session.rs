@@ -10,6 +10,7 @@
 //   - 한도 초과·ETH 송금은 자율 불가 → 항상 사람 비번(기존 모달). 자율 한도 0 = 자율 꺼짐(=기존 동작).
 //   - 자율 승인도 do_send_usdc/do_sign_x402 를 그대로 거치므로 긴급잠금·단일/일일 한도·내역이 동일 적용.
 
+use crate::i18n::ts;
 use alloy::primitives::U256;
 use alloy::signers::local::PrivateKeySigner;
 use serde::Serialize;
@@ -88,7 +89,10 @@ pub(crate) fn unlock_session(
     let w = read_encrypted()?;
     let phrase = decrypt_wallet(&w, &password)?; // 비번 검증(틀리면 GCM 실패)
     crate::wallet::maybe_upgrade_kdf(&w, &phrase, &password); // 옛 KDF(v2)면 v3로 강화
-    let mut g = session.0.lock().map_err(|_| "세션 상태 잠금 실패".to_string())?;
+    let mut g = session
+        .0
+        .lock()
+        .map_err(|_| ts!("세션 상태 잠금 실패", "Couldn't read the session state").to_string())?;
     *g = Some(SessionInner {
         mnemonic: phrase,
         last_active: now_secs(),
@@ -129,7 +133,11 @@ pub(crate) fn session_status(session: tauri::State<'_, SessionKey>) -> SessionSt
                     *g = None; // 유휴 → 자동 잠금
                     (false, 0)
                 } else {
-                    let rem = if idle > 0 { idle.saturating_sub(elapsed) } else { 0 };
+                    let rem = if idle > 0 {
+                        idle.saturating_sub(elapsed)
+                    } else {
+                        0
+                    };
                     (true, rem)
                 }
             }
@@ -152,9 +160,16 @@ pub(crate) async fn auto_approve_payment(
     id: String,
     session: tauri::State<'_, SessionKey>,
 ) -> Result<PaymentResult, String> {
-    let req = read_request().ok_or("대기 중인 결제 요청이 없습니다")?;
+    let req = read_request().ok_or(ts!(
+        "대기 중인 결제 요청이 없습니다",
+        "There's no payment request waiting"
+    ))?;
     if req.id != id {
-        return Err("요청 ID가 일치하지 않습니다".into());
+        return Err(ts!(
+            "요청 ID가 일치하지 않습니다",
+            "That request ID doesn't match"
+        )
+        .into());
     }
     crate::ipc::ensure_request_chain(&req)?; // 요청 시점 체인 ≠ 현재 체인이면 거부(자율 경로도 동일)
 
@@ -162,7 +177,8 @@ pub(crate) async fn auto_approve_payment(
     // 음수 한도는 0(자율 꺼짐)으로, 음수 금액은 오류로 — 거대 U256 둔갑 함정 차단(parse_usdc_nonneg).
     let dec = active_chain().usdc_decimals;
     let settings = read_settings();
-    let auto_limit: U256 = parse_usdc_nonneg(&settings.auto_approve_usdc, dec).unwrap_or(U256::ZERO);
+    let auto_limit: U256 =
+        parse_usdc_nonneg(&settings.auto_approve_usdc, dec).unwrap_or(U256::ZERO);
     let amount: U256 = parse_usdc_nonneg(&req.amount, dec)?;
     if !within_auto_limit(&req.token, amount, auto_limit) {
         return Err(NEEDS_PASSWORD.into());

@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import { AlertTriangle, ShieldAlert, X, ArrowUpCircle } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { enter } from "@/components/ui";
+import { t } from "@/lib/i18n";
 
 export function BackupNag({ onBackup }: { onBackup: () => void }) {
   return (
@@ -18,7 +19,10 @@ export function BackupNag({ onBackup }: { onBackup: () => void }) {
     >
       <AlertTriangle size={16} className="shrink-0 text-amber-600 dark:text-amber-500" />
       <p className="flex-1 min-w-0 text-[12px] leading-snug text-amber-800 dark:text-amber-300">
-        시드 12단어를 아직 백업 안 했어요. 비번을 잊으면 복구 못 해요.
+        {t(
+          "시드 12단어를 아직 백업 안 했어요. 비번을 잊으면 복구 못 해요.",
+          "You haven't backed up your 12 words yet. If you forget your password, there's no way back in.",
+        )}
       </p>
       <button
         type="button"
@@ -29,7 +33,7 @@ export function BackupNag({ onBackup }: { onBackup: () => void }) {
           "transition-colors duration-[var(--duration-base)]",
         )}
       >
-        백업하기
+        {t("백업하기", "Back up")}
       </button>
     </motion.div>
   );
@@ -65,7 +69,14 @@ export function UpdateBanner({
     >
       <ArrowUpCircle size={16} className="shrink-0 text-[var(--color-accent)]" />
       <p className="flex-1 min-w-0 text-[12px] leading-snug text-[var(--color-ink-500)]">
-        새 버전 <span className="num font-mono">{version}</span> 이 나왔어요.
+        {t(
+          <>
+            새 버전 <span className="num font-mono">{version}</span> 이 나왔어요.
+          </>,
+          <>
+            Version <span className="num font-mono">{version}</span> is available.
+          </>,
+        )}
       </p>
       <button
         type="button"
@@ -76,12 +87,12 @@ export function UpdateBanner({
           "transition-colors duration-[var(--duration-base)]",
         )}
       >
-        살펴보기
+        {t("살펴보기", "See what's new")}
       </button>
       <button
         type="button"
         onClick={onHide}
-        aria-label="업데이트 알림 접기"
+        aria-label={t("업데이트 알림 접기", "Dismiss update notice")}
         className={cn(
           "shrink-0 h-8 w-8 flex items-center justify-center rounded-[var(--radius-pill)]",
           "text-[var(--color-ink-300)] hover:text-[var(--color-ink-500)]",
@@ -107,7 +118,10 @@ export function LockBanner({ onUnlock }: { onUnlock: () => void }) {
     >
       <ShieldAlert size={16} className="shrink-0 text-red-600 dark:text-red-500" />
       <p className="flex-1 min-w-0 text-[12px] leading-snug text-red-800 dark:text-red-300">
-        긴급 잠금이 켜져 있어요. 모든 송금이 차단돼요.
+        {t(
+          "긴급 잠금이 켜져 있어요. 모든 송금이 차단돼요.",
+          "Emergency lock is on. Every payment is blocked.",
+        )}
       </p>
       <button
         type="button"
@@ -118,7 +132,7 @@ export function LockBanner({ onUnlock }: { onUnlock: () => void }) {
           "transition-colors duration-[var(--duration-base)]",
         )}
       >
-        해제
+        {t("해제", "Turn off")}
       </button>
     </motion.div>
   );

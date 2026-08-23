@@ -8,6 +8,7 @@
 //   · 승인 대기 중에는 blur 로 창을 숨기지 않는다(hold). 비번 입력 중 다른 창을 클릭해 팝오버가
 //     사라지면 승인 자체를 못 하게 되기 때문.
 
+use crate::i18n::ts;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -269,7 +270,10 @@ fn position_at_tray<R: Runtime>(app: &AppHandle<R>, win: &WebviewWindow<R>, grow
         WINDOW_W * scale,
         fit_height(WINDOW_H * scale, work.map(|(_, _, _, wh)| wh), scale),
     );
-    let cur = win.outer_size().ok().map(|s| (s.width as f64, s.height as f64));
+    let cur = win
+        .outer_size()
+        .ok()
+        .map(|s| (s.width as f64, s.height as f64));
     let (win_w, win_h) = target_size(cur, want, grow);
 
     // 너비까지 함께 비교해야 한다 — 높이만 보면, 배율이 다른 화면으로 옮겨 목표 높이가
@@ -364,18 +368,41 @@ pub(crate) fn refresh_icon<R: Runtime>(app: &AppHandle<R>) {
         // 아이콘과 템플릿 지정을 한 번에 — 따로 하면 macOS 에서 한 프레임 깜빡인다.
         let _ = tray.set_icon_with_as_template(Some(icon), true);
         let _ = tray.set_tooltip(Some(if locked {
-            "Kura — 긴급 잠금"
+            ts!("Kura — 긴급 잠금", "Kura — emergency lock")
         } else {
             "Kura"
         }));
     }
 }
 
+/// 우클릭 메뉴 — 언어가 바뀌면 통째로 다시 만든다(항목 핸들을 들고 있지 않아도 되게).
+/// 메뉴 이벤트 핸들러는 트레이 쪽에 붙어 있고 id 는 그대로라, 바꿔 껴도 동작이 유지된다.
+fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let open_i = MenuItem::with_id(
+        app,
+        "open",
+        ts!("Kura 열기", "Open Kura"),
+        true,
+        None::<&str>,
+    )?;
+    let quit_i = MenuItem::with_id(app, "quit", ts!("종료", "Quit"), true, None::<&str>)?;
+    Menu::with_items(app, &[&open_i, &quit_i])
+}
+
+/// 언어를 바꾼 뒤 메뉴바의 글자를 새 언어로 갈아 끼운다 (개발 42).
+/// 실패해도 조용히 넘어간다 — 메뉴 글자 하나 때문에 언어 변경 자체를 실패로 돌릴 이유가 없다.
+pub(crate) fn retitle<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        if let Ok(m) = menu(app) {
+            let _ = tray.set_menu(Some(m));
+        }
+    }
+    refresh_icon(app); // 툴팁도 언어를 탄다
+}
+
 /// 메뉴바 아이콘을 만든다. 좌클릭 = 팝오버 토글, 우클릭 = 메뉴.
 pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    let open_i = MenuItem::with_id(app, "open", "Kura 열기", true, None::<&str>)?;
-    let quit_i = MenuItem::with_id(app, "quit", "종료", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_i, &quit_i])?;
+    let menu = menu(app)?;
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(Image::from_bytes(ICON_NORMAL)?)
@@ -461,11 +488,20 @@ mod tests {
         // 모니터 기준 최대 x = 1440-420-8 = 1012. 그 사이(950)에 놓이는 트레이를 고른다 —
         // 옛 정책(작업영역으로 가로 클램프)이었다면 912 로 끌려갔을 자리.
         let work_with_side_dock = Some((0.0, 24.0, 1340.0, 876.0));
-        let (x, _) =
-            popover_origin(Some((1148.0, 0.0, 24.0, 24.0)), W, H, SCREEN, work_with_side_dock, 1.0)
-                .unwrap();
+        let (x, _) = popover_origin(
+            Some((1148.0, 0.0, 24.0, 24.0)),
+            W,
+            H,
+            SCREEN,
+            work_with_side_dock,
+            1.0,
+        )
+        .unwrap();
         assert_eq!(x, 950.0, "아이콘 중앙(950)을 유지해야 한다");
-        assert!(x > 1340.0 - W - SCREEN_MARGIN, "작업영역 클램프였다면 912 로 밀렸다");
+        assert!(
+            x > 1340.0 - W - SCREEN_MARGIN,
+            "작업영역 클램프였다면 912 로 밀렸다"
+        );
     }
 
     // 트레이 위치를 못 얻으면 메뉴바가 있는 오른쪽 위로.
@@ -502,9 +538,15 @@ mod tests {
     fn scales_with_display() {
         let screen = Some((0.0, 0.0, 2880.0, 1800.0));
         let work = Some((0.0, 48.0, 2880.0, 1752.0));
-        let (x, y) =
-            popover_origin(Some((1400.0, 0.0, 48.0, 48.0)), W * 2.0, H * 2.0, screen, work, 2.0)
-                .unwrap();
+        let (x, y) = popover_origin(
+            Some((1400.0, 0.0, 48.0, 48.0)),
+            W * 2.0,
+            H * 2.0,
+            screen,
+            work,
+            2.0,
+        )
+        .unwrap();
         assert_eq!(y, 48.0, "레티나에서도 메뉴바에 딱 붙는다");
         assert_eq!(x, 1400.0 + 24.0 - W); // 트레이 중심 - 창 절반(= W*2/2)
     }
@@ -532,13 +574,23 @@ mod tests {
     // 가용 높이가 0 이하인 비정상 입력은 이 보장 밖 — absurd_work_area_leaves_size_alone 참고.
     #[test]
     fn fits_inside_any_usable_work_area() {
-        for wh in [SCREEN_MARGIN * 2.0 + 1.0, 300.0_f64, 500.0, 660.0, 876.0, 1200.0] {
+        for wh in [
+            SCREEN_MARGIN * 2.0 + 1.0,
+            300.0_f64,
+            500.0,
+            660.0,
+            876.0,
+            1200.0,
+        ] {
             let work = Some((0.0, 24.0, 1440.0, wh));
             let h = fit_height(H, Some(wh), 1.0);
-            let (_, y) = popover_origin(Some((700.0, 0.0, 24.0, 24.0)), W, h, SCREEN, work, 1.0)
-                .unwrap();
+            let (_, y) =
+                popover_origin(Some((700.0, 0.0, 24.0, 24.0)), W, h, SCREEN, work, 1.0).unwrap();
             assert!(y >= 24.0, "메뉴바를 침범하면 안 된다 (wh={wh})");
-            assert!(y + h <= 24.0 + wh, "창 아래가 작업 영역을 넘으면 안 된다 (wh={wh})");
+            assert!(
+                y + h <= 24.0 + wh,
+                "창 아래가 작업 영역을 넘으면 안 된다 (wh={wh})"
+            );
         }
     }
 
@@ -551,7 +603,10 @@ mod tests {
     // 레티나에서도 물리 기준으로 맞춘다(여백에 배율 적용).
     #[test]
     fn fits_height_on_retina() {
-        assert_eq!(fit_height(H * 2.0, Some(1000.0), 2.0), 1000.0 - SCREEN_MARGIN * 2.0 * 2.0);
+        assert_eq!(
+            fit_height(H * 2.0, Some(1000.0), 2.0),
+            1000.0 - SCREEN_MARGIN * 2.0 * 2.0
+        );
         // 레티나에서도 "항상 들어간다" 보장이 성립한다.
         let work = Some((0.0, 48.0, 2880.0, 1000.0));
         let h = fit_height(H * 2.0, Some(1000.0), 2.0);

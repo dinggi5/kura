@@ -59,12 +59,12 @@ fn selected_chain_id() -> u64 {
         .filter(|s| !s.is_empty())
     {
         let id = v.parse::<u64>().unwrap_or_else(|_| {
-            eprintln!("KURA_CHAIN_ID 값이 정수가 아니에요: {v:?}");
+            eprintln!("KURA_CHAIN_ID is not an integer: {v:?}");
             std::process::exit(1);
         });
         if id != BASE_SEPOLIA.chain_id && id != BASE_MAINNET.chain_id {
             eprintln!(
-                "KURA_CHAIN_ID={id} 는 지원하지 않는 체인이에요(지원: {} / {}).",
+                "KURA_CHAIN_ID={id} is not a supported chain (supported: {} / {}).",
                 BASE_SEPOLIA.chain_id, BASE_MAINNET.chain_id
             );
             std::process::exit(1);

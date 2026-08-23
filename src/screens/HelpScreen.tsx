@@ -7,6 +7,7 @@ import { ExternalLink, HelpCircle } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { GITHUB_URL, HELP_SECTIONS } from "@/lib/helpContent";
 import { cardBase, shell } from "@/components/ui";
+import { t } from "@/lib/i18n";
 
 export function HelpScreen({ onClose }: { onClose: () => void }) {
   return (
@@ -14,14 +15,14 @@ export function HelpScreen({ onClose }: { onClose: () => void }) {
       <header className="w-full max-w-md flex items-center justify-between text-[12px] text-[var(--color-ink-500)]">
         <span className="flex items-center gap-2">
           <HelpCircle size={12} className="text-[var(--color-accent)]" />
-          도움말
+          {t("도움말", "Help")}
         </span>
         <button
           type="button"
           onClick={onClose}
           className="hover:text-[var(--color-ink-900)] dark:hover:text-[#E8E5DD] transition-colors"
         >
-          닫기
+          {t("닫기", "Close")}
         </button>
       </header>
 
@@ -56,7 +57,7 @@ export function HelpScreen({ onClose }: { onClose: () => void }) {
           className="mt-1 inline-flex items-center justify-center gap-1.5 text-[12px] text-[var(--color-ink-500)] hover:text-[var(--color-accent)] transition-colors"
         >
           <ExternalLink size={12} />
-          GitHub에서 전체 문서 보기
+          {t("GitHub에서 전체 문서 보기", "Read the full docs on GitHub")}
         </button>
       </div>
     </main>

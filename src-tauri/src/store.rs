@@ -1,6 +1,7 @@
 // 공용 저장 유틸 — ~/.jigap 디렉터리, 원자적 파일 쓰기, 시간 헬퍼.
 // 도메인 파일 경로(wallet.enc, settings.json 등)는 각 도메인 모듈이 정의한다.
 
+use crate::i18n::{tf, ts};
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
@@ -8,7 +9,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// ~/.jigap 디렉터리 경로.
 pub(crate) fn jigap_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("홈 디렉터리를 찾을 수 없습니다")?;
+    let home = dirs::home_dir().ok_or(ts!(
+        "홈 디렉터리를 찾을 수 없습니다",
+        "Couldn't find your home folder"
+    ))?;
     Ok(home.join(".jigap"))
 }
 
@@ -34,8 +38,12 @@ pub(crate) fn current_day() -> u64 {
 /// **권한은 내용을 쓰기 "전"에** 좁힌다: 디렉터리는 생성 직후 chmod, 임시 파일은 0600 으로 생성 →
 /// umask 가 느슨해도 평문 직전 데이터(wallet.tmp 의 salt/nonce/ciphertext 등)가 잠깐도 넓게 노출되지 않게.
 pub(crate) fn write_atomic(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
-    let dir = path.parent().ok_or("경로에 부모 디렉터리가 없습니다")?;
-    fs::create_dir_all(dir).map_err(|e| format!("디렉터리 생성 실패: {e}"))?;
+    let dir = path.parent().ok_or(ts!(
+        "경로에 부모 디렉터리가 없습니다",
+        "That path has no parent folder"
+    ))?;
+    fs::create_dir_all(dir)
+        .map_err(|e| tf!("디렉터리 생성 실패: {e}", "Couldn't create the folder: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -44,7 +52,7 @@ pub(crate) fn write_atomic(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     }
     let tmp = path.with_extension("tmp");
     write_file_private(&tmp, bytes)?;
-    fs::rename(&tmp, path).map_err(|e| format!("파일 교체 실패: {e}"))
+    fs::rename(&tmp, path).map_err(|e| tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}"))
 }
 
 /// 임시 파일을 처음부터 0600 으로 생성해 내용을 쓴다 (생성 후 chmod 사이의 노출 창 제거).
@@ -58,19 +66,21 @@ fn write_file_private(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
         .truncate(true)
         .mode(0o600)
         .open(path)
-        .map_err(|e| format!("파일 저장 실패: {e}"))?;
+        .map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))?;
     // 기존 tmp 가 느슨한 권한으로 남아 있던 경우(create 시 mode 미적용)까지 보장.
     let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
-    f.write_all(bytes).map_err(|e| format!("파일 저장 실패: {e}"))
+    f.write_all(bytes)
+        .map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))
 }
 
 #[cfg(not(unix))]
 fn write_file_private(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
-    fs::write(path, bytes).map_err(|e| format!("파일 저장 실패: {e}"))
+    fs::write(path, bytes).map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))
 }
 
 pub(crate) fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(value).map_err(|e| format!("직렬화 실패: {e}"))?;
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|e| tf!("직렬화 실패: {e}", "Couldn't serialize the data: {e}"))?;
     write_atomic(&path, json.as_bytes())
 }
 

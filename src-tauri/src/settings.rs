@@ -1,5 +1,6 @@
 // 사용자 설정 (Session 7~) — 한도·자율 결제·RPC·잠금 동작. ~/.jigap/settings.json 영속화.
 
+use crate::i18n::ts;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -98,6 +99,14 @@ pub(crate) struct Settings {
     /// 사용자라, 그 동작을 보존한다(신규 기본만 바꾼다). 신규는 `Settings::default()`.
     #[serde(default = "default_true")]
     pub(crate) auto_check_update: bool,
+
+    /// 화면 언어 (개발 42). `None` = 아직 안 고름 → 시스템 언어를 따라간다(i18n::init).
+    ///
+    /// **기본을 "ko" 로 박지 않는다** — 그러면 영어 맥에서 첫 실행이 한국어로 열리고,
+    /// 사용자가 언어를 고르지도 않았는데 "골랐다"로 기록돼 시스템 언어를 영영 안 따라간다.
+    /// 폼에서 오는 값이 아니라 앱 관리 필드다(set_lang 이 따로 저장 — preserve_managed).
+    #[serde(default)]
+    pub(crate) lang: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -132,8 +141,9 @@ impl Default for Settings {
             // 없는 기존 지갑"은 conservative()(테스트넷)가 따로 맡는다 — 여기는
             // **진짜 신규**(지갑도 설정도 없는 첫 실행)만.
             chain_id: BASE_MAINNET.chain_id,
-            autostart: None, // 아직 모름 → 첫 실행에서 OS 상태를 채택
+            autostart: None,          // 아직 모름 → 첫 실행에서 OS 상태를 채택
             auto_check_update: false, // 신규 기본 꺼짐 (개발 39) — 필드 doc 참고
+            lang: None,               // 아직 안 고름 → 시스템 언어 (개발 42)
         }
     }
 }
@@ -318,10 +328,44 @@ pub(crate) fn get_settings() -> Settings {
 pub(crate) fn set_auto_check_update(enabled: bool) -> Result<(), String> {
     // 해석 안 되는 파일 위에 기본값을 쓰지 않는다(read_settings_for_update 주석 참고).
     // 여기서 Err 를 내면 프론트가 토글을 원복하는데, 실제로 아무것도 안 바뀌었으니 맞는 표시다.
-    let mut s = read_settings_for_update()
-        .ok_or("설정 파일을 읽지 못해서 저장하지 않았어요")?;
+    let mut s = read_settings_for_update().ok_or(ts!(
+        "설정 파일을 읽지 못해서 저장하지 않았어요",
+        "Couldn't read the settings file, so nothing was saved."
+    ))?;
     s.auto_check_update = enabled;
     save_settings(&s)
+}
+
+/// 화면 언어를 고른다 (개발 42). 앱 관리 필드라 "저장하고 닫기"와 무관하게 즉시 적용된다.
+///
+/// 저장에 실패하면 전역 언어도 **안 바꾼다** — 화면만 영어로 바뀌고 다음 실행에 한국어로
+/// 돌아오면, 사용자는 자기가 뭘 잘못했는지 알 수 없다. 실패는 실패로 보이는 쪽이 낫다.
+#[tauri::command]
+pub(crate) fn set_lang(app: tauri::AppHandle, lang: String) -> Result<(), String> {
+    let parsed = crate::i18n::parse(&lang);
+    let mut s = read_settings_for_update().ok_or_else(|| {
+        crate::i18n::ts!(
+            ts!(
+                "설정 파일을 읽지 못해서 저장하지 않았어요",
+                "Couldn't read the settings file, so nothing was saved."
+            ),
+            "Couldn't read the settings file, so nothing was saved."
+        )
+        .to_string()
+    })?;
+    s.lang = Some(crate::i18n::code(parsed).to_string());
+    save_settings(&s)?;
+    crate::i18n::set(parsed);
+    // 트레이 메뉴는 앱이 시작할 때 만들어져 있다 — 새 언어로 다시 붙인다(개발 42).
+    crate::tray::retitle(&app);
+    Ok(())
+}
+
+/// 현재 화면 언어 코드("ko"/"en"). 프론트가 첫 화면을 그리기 전에 물어본다 —
+/// 설정에 값이 없으면 i18n::init 이 시작할 때 정한 **시스템 언어**가 나온다.
+#[tauri::command]
+pub(crate) fn get_lang() -> String {
+    crate::i18n::code(crate::i18n::lang()).to_string()
 }
 
 /// 한도 설정을 저장한다. 모든 값이 십진수로 파싱되는지 검증 후 기록.
@@ -331,40 +375,75 @@ pub(crate) fn set_settings(mut settings: Settings) -> Result<(), String> {
     // 저장 전 활성 체인(active_chain) 기준으로 검증하면, 다른 decimals 의 체인으로 토글하는 저장에서
     // 한도 의미가 어긋난다(현재 두 체인 다 6자리라 무해하나, 미래 체인 대비 원자성 — 코덱스 개발20 리뷰).
     let dec = chain_by_id(settings.chain_id)
-        .ok_or("지원하지 않는 체인입니다")?
+        .ok_or(ts!(
+            "지원하지 않는 체인입니다",
+            "That chain isn't supported"
+        ))?
         .usdc_decimals;
     // 음수 거부(parse_*_nonneg) — 음수 한도가 거대 U256 = "사실상 무제한"으로 둔갑해 가드레일이
     // 조용히 무력화되는 함정 차단. 0 은 정상(=무제한 의도).
-    parse_usdc_nonneg(&settings.single_usdc, dec)
-        .map_err(|_| "단일 USDC 한도가 올바르지 않습니다 (음수 불가)".to_string())?;
-    parse_usdc_nonneg(&settings.daily_usdc, dec)
-        .map_err(|_| "일일 USDC 한도가 올바르지 않습니다 (음수 불가)".to_string())?;
-    parse_eth_nonneg(&settings.single_eth)
-        .map_err(|_| "단일 ETH 한도가 올바르지 않습니다 (음수 불가)".to_string())?;
-    parse_eth_nonneg(&settings.daily_eth)
-        .map_err(|_| "일일 ETH 한도가 올바르지 않습니다 (음수 불가)".to_string())?;
-    parse_usdc_nonneg(&settings.auto_approve_usdc, dec)
-        .map_err(|_| "자율 결제 한도가 올바르지 않습니다 (음수 불가)".to_string())?;
-    settings
-        .auto_lock_mins
-        .trim()
-        .parse::<u64>()
-        .map_err(|_| "자동 잠금(분)은 정수로 입력하세요".to_string())?;
+    parse_usdc_nonneg(&settings.single_usdc, dec).map_err(|_| {
+        ts!(
+            "단일 USDC 한도가 올바르지 않습니다 (음수 불가)",
+            "The per-payment USDC limit isn't valid (no negatives)"
+        )
+        .to_string()
+    })?;
+    parse_usdc_nonneg(&settings.daily_usdc, dec).map_err(|_| {
+        ts!(
+            "일일 USDC 한도가 올바르지 않습니다 (음수 불가)",
+            "The daily USDC limit isn't valid (no negatives)"
+        )
+        .to_string()
+    })?;
+    parse_eth_nonneg(&settings.single_eth).map_err(|_| {
+        ts!(
+            "단일 ETH 한도가 올바르지 않습니다 (음수 불가)",
+            "The per-payment ETH limit isn't valid (no negatives)"
+        )
+        .to_string()
+    })?;
+    parse_eth_nonneg(&settings.daily_eth).map_err(|_| {
+        ts!(
+            "일일 ETH 한도가 올바르지 않습니다 (음수 불가)",
+            "The daily ETH limit isn't valid (no negatives)"
+        )
+        .to_string()
+    })?;
+    parse_usdc_nonneg(&settings.auto_approve_usdc, dec).map_err(|_| {
+        ts!(
+            "자율 결제 한도가 올바르지 않습니다 (음수 불가)",
+            "The autopay limit isn't valid (no negatives)"
+        )
+        .to_string()
+    })?;
+    settings.auto_lock_mins.trim().parse::<u64>().map_err(|_| {
+        ts!(
+            "자동 잠금(분)은 정수로 입력하세요",
+            "Auto-lock minutes must be a whole number"
+        )
+        .to_string()
+    })?;
     let rpc = settings.rpc_url.trim();
     if !(rpc.is_empty() || rpc.starts_with("http://") || rpc.starts_with("https://")) {
-        return Err("RPC 주소는 http(s):// 로 시작해야 합니다".into());
+        return Err(ts!(
+            "RPC 주소는 http(s):// 로 시작해야 합니다",
+            "An RPC address has to start with http:// or https://"
+        )
+        .into());
     }
     // 앱 관리 필드는 클라이언트가 보낸 값을 버리고 디스크 값을 지킨다.
-    // 프론트 Settings 타입엔 이 셋이 없어서 폼 저장은 항상 기본값(None/true)을 실어 보낸다 —
+    // 프론트 Settings 타입엔 이것들이 없어서 폼 저장은 항상 기본값(None/true)을 실어 보낸다 —
     // 그대로 쓰면 "저장하고 닫기" 한 번에 자동 시작 희망값이 지워진다(=고치려던 버그의 재발).
     preserve_managed(&mut settings, &read_settings());
     save_settings(&settings)
 }
 
-/// 앱이 관리하는 필드(자동 시작 희망값·자동 업데이트 확인)를 `from` 에서 가져온다.
+/// 앱이 관리하는 필드(자동 시작 희망값·자동 업데이트 확인·화면 언어)를 `from` 에서 가져온다.
 fn preserve_managed(settings: &mut Settings, from: &Settings) {
     settings.autostart = from.autostart;
     settings.auto_check_update = from.auto_check_update;
+    settings.lang = from.lang.clone();
 }
 
 #[cfg(test)]
@@ -394,11 +473,17 @@ mod tests {
     #[test]
     fn read_fallbacks_split_new_vs_corrupt() {
         // 파일 없음 + 지갑 없음 = 진짜 신규 → 메인넷 기본.
-        assert_eq!(settings_for_read(None, false).chain_id, BASE_MAINNET.chain_id);
+        assert_eq!(
+            settings_for_read(None, false).chain_id,
+            BASE_MAINNET.chain_id
+        );
         // 🔴 파일 없음 + 지갑 있음 = 개발 31 이전 설치(저장을 눌러야만 settings.json 이
         // 생겼다) → 테스트넷 보수. 여기가 메인넷이면 기존 지갑이 조용히 실돈 체인으로
         // 옮겨진다(코덱스 개발 39 P1).
-        assert_eq!(settings_for_read(None, true).chain_id, BASE_SEPOLIA.chain_id);
+        assert_eq!(
+            settings_for_read(None, true).chain_id,
+            BASE_SEPOLIA.chain_id
+        );
         // 🔴 그 시절 ETH 한도(0.05/0.2)도 그대로 — 낮아진 새 기본을 못박으면 되던 송금이
         // 말없이 막힌다(코덱스 2차 P2). USDC 는 변경 없음(5/20).
         assert_eq!(settings_for_read(None, true).single_eth, "0.05");
@@ -410,8 +495,10 @@ mod tests {
         assert!(!c.auto_check_update);
         // 정상 JSON 은 그대로.
         let ok = settings_for_read(
-            Some(r#"{"single_usdc":"7","daily_usdc":"30",
-            "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#),
+            Some(
+                r#"{"single_usdc":"7","daily_usdc":"30",
+            "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#,
+            ),
             true,
         );
         assert_eq!(ok.chain_id, 8453);
@@ -433,8 +520,8 @@ mod tests {
         assert!(s.notify_auto); // 알림은 기본 켜짐 (끄는 쪽이 명시적 선택)
         assert!(s.auto_trusted_only); // 신뢰 주소 가드도 기본 켜짐 (안전 쪽 디폴트)
         assert_eq!(s.chain_id, BASE_SEPOLIA.chain_id); // 옛 파일엔 chain_id 없음 → 테스트넷
-        // 개발 31 필드도 옛 파일에서 안전하게 온다. autostart 기본은 **None**(false 아님) —
-        // false 면 자동 시작을 켜 둔 기존 사용자가 "끔을 원했다"로 기록돼 복구 대상에서 빠진다.
+                                                       // 개발 31 필드도 옛 파일에서 안전하게 온다. autostart 기본은 **None**(false 아님) —
+                                                       // false 면 자동 시작을 켜 둔 기존 사용자가 "끔을 원했다"로 기록돼 복구 대상에서 빠진다.
         assert_eq!(s.autostart, None);
         // 필드 없는 옛 파일은 켜짐 유지 — 그 사용자는 지금까지 켜진 채 써 왔다(동작 보존).
         // 신규(파일 없음)만 꺼짐이 기본이다(개발 39, default_settings_values 참고).
@@ -451,21 +538,27 @@ mod tests {
     fn corrupt_settings_are_never_overwritten() {
         // 파일 없음 + 지갑 없음 = 진짜 신규 → 메인넷 기본에서 시작해 만들어도 안전.
         assert_eq!(
-            settings_for_update(None, false).expect("신규인데 None").chain_id,
+            settings_for_update(None, false)
+                .expect("신규인데 None")
+                .chain_id,
             BASE_MAINNET.chain_id
         );
         // 🔴 파일 없음 + 지갑 있음 = 설정 파일이 없던 시절의 기존 사용자 → 테스트넷
         // 보수 기본을 저장해 못박는다. 메인넷을 저장하면 기존 지갑이 조용히 실돈
         // 체인으로 옮겨진다(코덱스 개발 39 P1).
         assert_eq!(
-            settings_for_update(None, true).expect("레거시인데 None").chain_id,
+            settings_for_update(None, true)
+                .expect("레거시인데 None")
+                .chain_id,
             BASE_SEPOLIA.chain_id
         );
 
         // 정상 JSON → 그대로 읽힌다.
         let ok = settings_for_update(
-            Some(r#"{"single_usdc":"7","daily_usdc":"30",
-            "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#),
+            Some(
+                r#"{"single_usdc":"7","daily_usdc":"30",
+            "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#,
+            ),
             true,
         );
         assert_eq!(ok.expect("정상 JSON 인데 None").chain_id, 8453);
@@ -533,7 +626,10 @@ mod tests {
             ..Default::default()
         };
         let err = set_settings(bad).unwrap_err();
-        assert!(err.contains("지원하지 않는 체인"), "체인 검증 메시지가 아님: {err}");
+        assert!(
+            err.contains("지원하지 않는 체인"),
+            "체인 검증 메시지가 아님: {err}"
+        );
     }
 
     // URL(경로의 API 키)이 에러 메시지에서 통째로 가려져야 한다.
@@ -544,15 +640,22 @@ mod tests {
             "RPC 연결 실패: [RPC]",
         );
         // reqwest 처럼 괄호 안에 URL 이 박힌 경우 — 키는 사라지고 뒤 메시지는 남는다.
-        let red = redact_urls("error sending request for url (https://h/v2/KEY): connection closed");
+        let red =
+            redact_urls("error sending request for url (https://h/v2/KEY): connection closed");
         assert!(!red.contains("KEY"), "키가 남음: {red}");
-        assert!(red.contains("[RPC]") && red.contains("connection closed"), "형태 깨짐: {red}");
+        assert!(
+            red.contains("[RPC]") && red.contains("connection closed"),
+            "형태 깨짐: {red}"
+        );
     }
 
     // 코덱스 리뷰: host 대소문자 정규화·query 콤마 뒤 키·ws/wss 우회를 막아야 한다.
     #[test]
     fn redact_handles_case_subdelims_and_ws() {
-        assert_eq!(redact_urls("x HTTPS://BASE.g.ALCHEMY.com/v2/KEY y"), "x [RPC] y"); // 대소문자
+        assert_eq!(
+            redact_urls("x HTTPS://BASE.g.ALCHEMY.com/v2/KEY y"),
+            "x [RPC] y"
+        ); // 대소문자
         let red = redact_urls("https://rpc.example/rpc?x=a,api_key=SECRET done");
         assert!(!red.contains("SECRET"), "콤마 뒤 키가 남음: {red}");
         assert_eq!(red, "[RPC] done");
@@ -562,8 +665,14 @@ mod tests {
     // URL 아닌 텍스트·빈 scheme 은 그대로 둔다(멀티바이트 안전).
     #[test]
     fn redact_leaves_non_urls() {
-        assert_eq!(redact_urls("주소 파싱 실패: bad input"), "주소 파싱 실패: bad input");
+        assert_eq!(
+            redact_urls("주소 파싱 실패: bad input"),
+            "주소 파싱 실패: bad input"
+        );
         assert_eq!(redact_urls("just :// floating"), "just :// floating");
-        assert_eq!(redact_urls("잔액 조회 실패: https://x/y 입니다"), "잔액 조회 실패: [RPC] 입니다");
+        assert_eq!(
+            redact_urls("잔액 조회 실패: https://x/y 입니다"),
+            "잔액 조회 실패: [RPC] 입니다"
+        );
     }
 }

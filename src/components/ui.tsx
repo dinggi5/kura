@@ -2,6 +2,7 @@
 
 import { Bot, X } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
 
 // 메뉴바 팝오버 셸(개발 26) — 창이 고정 크기·투명이라 배경과 둥근 모서리를 여기서 칠하고,
 // 넘치는 내용은 바깥이 아니라 이 안에서 스크롤한다. justify-between 은 내용이 넘칠 때
@@ -130,7 +131,7 @@ export function CloseButton({ onClose }: { onClose: () => void }) {
         "hover:bg-[var(--color-ivory-200)] dark:hover:bg-[var(--color-night-700)]",
         "transition-colors duration-[var(--duration-base)]",
       )}
-      aria-label="닫기"
+      aria-label={t("닫기", "Close")}
     >
       <X size={14} />
     </button>
@@ -273,8 +274,14 @@ export function AgentBadge({
 }) {
   const name = prettyClient(client);
   const title = connected
-    ? `${name}가 이 지갑에 연결돼 있어요. 결제를 요청하면 승인 팝업이 떠요.`
-    : "연결된 AI 에이전트가 없어요. 누르면 연결 방법이 열려요.";
+    ? t(
+        `${name}가 이 지갑에 연결돼 있어요. 결제를 요청하면 승인 팝업이 떠요.`,
+        `${name} is connected to this wallet. When it asks to pay, an approval window opens.`,
+      )
+    : t(
+        "연결된 AI 에이전트가 없어요. 누르면 연결 방법이 열려요.",
+        "No AI agent is connected. Tap to see how to connect one.",
+      );
   const className = cn(
     "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full",
     "text-[11px] tracking-tight border select-none",
@@ -289,14 +296,14 @@ export function AgentBadge({
       <Bot size={12} />
       {connected ? (
         <>
-          <span>{name} 연결됨</span>
+          <span>{t(`${name} 연결됨`, `${name} connected`)}</span>
           <span className="relative flex w-1.5 h-1.5" aria-hidden>
             <span className="absolute inline-flex w-full h-full rounded-full bg-[var(--color-accent)] opacity-60 animate-ping" />
             <span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" />
           </span>
         </>
       ) : (
-        <span>AI 연결 안 됨</span>
+        <span>{t("AI 연결 안 됨", "No AI connected")}</span>
       )}
     </>
   );

@@ -7,6 +7,7 @@ import { cn } from "@/lib/cn";
 import { fmtAmount, fmtCountdown } from "@/lib/format";
 import type { SessionStatus } from "@/lib/types";
 import { enter, modalCard, modalOverlay, primaryBtn, secondaryBtn, PwInput } from "@/components/ui";
+import { t } from "@/lib/i18n";
 
 /** 메인 화면의 자율 결제 상태 표시 + 잠금 해제/잠그기. 자율 한도가 설정돼 있을 때만 보인다. */
 export function SessionBar({
@@ -33,12 +34,26 @@ export function SessionBar({
         <Zap size={16} className="shrink-0 text-[var(--color-accent)]" />
         <div className="flex-1 min-w-0">
           <p className="text-[12px] leading-snug tracking-tight text-[var(--color-ink-900)] dark:text-[#E8E5DD]">
-            자율 결제 켜짐 · 한도 <span className="num">{limit}</span> USDC
+            {t(
+              <>
+                자율 결제 켜짐 · 한도 <span className="num">{limit}</span> USDC
+              </>,
+              <>
+                Autopay on · up to <span className="num">{limit}</span> USDC
+              </>,
+            )}
           </p>
           {session.remaining_secs > 0 && (
             <p className="mt-0.5 flex items-center gap-1 text-[11px] text-[var(--color-ink-300)]">
               <Clock size={10} />
-              <span className="num">{fmtCountdown(session.remaining_secs)}</span> 후 자동 잠금
+              {t(
+                <>
+                  <span className="num">{fmtCountdown(session.remaining_secs)}</span> 후 자동 잠금
+                </>,
+                <>
+                  Locks in <span className="num">{fmtCountdown(session.remaining_secs)}</span>
+                </>,
+              )}
             </p>
           )}
         </div>
@@ -53,7 +68,7 @@ export function SessionBar({
             "transition-colors duration-[var(--duration-base)]",
           )}
         >
-          잠그기
+          {t("잠그기", "Lock")}
         </button>
       </motion.div>
     );
@@ -70,7 +85,16 @@ export function SessionBar({
     >
       <Zap size={16} className="shrink-0 text-[var(--color-ink-300)]" />
       <p className="flex-1 min-w-0 text-[12px] leading-snug text-[var(--color-ink-500)] dark:text-[#B5AFA2]">
-        자율 결제 잠김 — 해제하면 <span className="num">{limit}</span> USDC까지 AI가 비번 없이 결제해요.
+        {t(
+          <>
+            자율 결제 잠김 — 해제하면 <span className="num">{limit}</span> USDC까지 AI가 비번 없이
+            결제해요.
+          </>,
+          <>
+            Autopay is locked — unlock it and AI can pay up to <span className="num">{limit}</span>{" "}
+            USDC without your password.
+          </>,
+        )}
       </p>
       <button
         type="button"
@@ -82,7 +106,7 @@ export function SessionBar({
         )}
       >
         <Unlock size={12} />
-        잠금 해제
+        {t("잠금 해제", "Unlock")}
       </button>
     </motion.div>
   );
@@ -132,22 +156,34 @@ export function UnlockSessionModal({
       >
         <span className="flex items-center gap-1.5 text-[11px] tracking-[0.04em] text-[var(--color-accent)]">
           <Zap size={13} />
-          자율 결제 잠금 해제
+          {t("자율 결제 잠금 해제", "Unlock autopay")}
         </span>
         <p className="mt-4 text-[13px] leading-relaxed text-[var(--color-ink-700)] dark:text-[#B5AFA2]">
-          비밀번호를 한 번 입력하면, <span className="num">{fmtAmount(autoLimit, 2)}</span> USDC 이하의 AI 결제는
-          비번 없이 자동 승인돼요.
+          {t(
+            <>
+              비밀번호를 한 번 입력하면, <span className="num">{fmtAmount(autoLimit, 2)}</span> USDC
+              이하의 AI 결제는 비번 없이 자동 승인돼요.
+            </>,
+            <>
+              Enter your password once, and AI payments of{" "}
+              <span className="num">{fmtAmount(autoLimit, 2)}</span> USDC or less go through without
+              asking again.
+            </>,
+          )}
         </p>
         <p className="mt-2 flex items-center gap-1.5 text-[11px] text-[var(--color-ink-300)]">
           <Clock size={11} />
-          앱 종료·긴급 잠금·유휴 시간이 지나면 자동으로 다시 잠겨요.
+          {t(
+            "앱 종료·긴급 잠금·유휴 시간이 지나면 자동으로 다시 잠겨요.",
+            "It locks again when you quit the app, hit emergency lock, or leave it idle.",
+          )}
         </p>
 
         <div className="mt-5">
           <PwInput
             value={pw}
             onChange={setPw}
-            placeholder="비밀번호로 잠금 해제"
+            placeholder={t("비밀번호로 잠금 해제", "Password to unlock")}
             autoFocus
             onEnter={submit}
           />
@@ -157,11 +193,11 @@ export function UnlockSessionModal({
 
         <div className="mt-5 grid grid-cols-[1fr_1.8fr] gap-2">
           <button type="button" onClick={onClose} disabled={busy} className={cn(secondaryBtn, "w-full")}>
-            취소
+            {t("취소", "Cancel")}
           </button>
           <button type="button" onClick={submit} disabled={!pw || busy} className={primaryBtn}>
             {busy ? <Loader2 size={15} className="animate-spin" /> : <Unlock size={15} />}
-            잠금 해제
+            {t("잠금 해제", "Unlock")}
           </button>
         </div>
       </motion.section>

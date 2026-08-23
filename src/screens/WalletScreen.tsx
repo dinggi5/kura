@@ -40,6 +40,7 @@ import { HelpScreen } from "@/screens/HelpScreen";
 import { HistoryScreen } from "@/screens/HistoryScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
 import { WelcomeTour } from "@/screens/WelcomeTour";
+import { t } from "@/lib/i18n";
 
 type Mode = "balance" | "receive" | "send";
 
@@ -418,12 +419,16 @@ export function WalletScreen({
             >
               {chain.name}
             </span>
-            <HeaderIconButton onClick={() => setShowHelp(true)} label="도움말">
+            <HeaderIconButton onClick={() => setShowHelp(true)} label={t("도움말", "Help")}>
               <HelpCircle size={14} />
             </HeaderIconButton>
             <HeaderIconButton
               onClick={toggleLock}
-              label={locked ? "긴급 잠금 해제" : "긴급 잠금 (모든 송금 차단)"}
+              label={
+                locked
+                  ? t("긴급 잠금 해제", "Turn off emergency lock")
+                  : t("긴급 잠금 (모든 송금 차단)", "Emergency lock (blocks every payment)")
+              }
               tone={locked ? "danger" : "default"}
             >
               {locked ? <ShieldAlert size={14} /> : <ShieldCheck size={14} />}
@@ -433,18 +438,18 @@ export function WalletScreen({
                 loadHistory();
                 setShowHistory(true);
               }}
-              label="거래 내역"
+              label={t("거래 내역", "History")}
             >
               <History size={14} />
             </HeaderIconButton>
             <HeaderIconButton
               onClick={() => setShowBackup(true)}
-              label="시드 백업"
+              label={t("시드 백업", "Back up your words")}
               tone={backedUp ? "default" : "warn"}
             >
               <KeyRound size={14} />
             </HeaderIconButton>
-            <HeaderIconButton onClick={() => setShowSettings(true)} label="설정">
+            <HeaderIconButton onClick={() => setShowSettings(true)} label={t("설정", "Settings")}>
               <SettingsIcon size={14} />
             </HeaderIconButton>
           </div>
@@ -520,13 +525,13 @@ export function WalletScreen({
       <div className="w-full max-w-md grid grid-cols-2 gap-3">
         <ActionButton
           icon={<ArrowDownLeft size={16} />}
-          label="받기"
+          label={t("받기", "Receive")}
           onClick={() => setMode(mode === "receive" ? "balance" : "receive")}
           active={mode === "receive"}
         />
         <ActionButton
           icon={<ArrowUpRight size={16} />}
-          label="보내기"
+          label={t("보내기", "Send")}
           onClick={() => setMode(mode === "send" ? "balance" : "send")}
           active={mode === "send"}
           disabled={locked}

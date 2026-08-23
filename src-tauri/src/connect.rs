@@ -8,6 +8,7 @@
 // 연결이 살아 있다는 뜻은 아니므로, 연결 여부의 최종 진실은 ipc::get_agent_status
 // (메인 화면 배지)다 — 이 화면은 그 옆에서 "연결까지 남은 단계"를 보여주는 역할.
 
+use crate::i18n::{tf, ts};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Command;
@@ -242,24 +243,43 @@ pub(crate) fn connect_claude_desktop(app: tauri::AppHandle) -> Result<(), String
     use tauri::path::BaseDirectory;
     use tauri::Manager;
     if !desktop_installed() {
-        return Err("Claude 데스크톱이 설치돼 있지 않아요. claude.ai/download 에서 먼저 설치하세요.".into());
+        return Err(ts!(
+            "Claude 데스크톱이 설치돼 있지 않아요. claude.ai/download 에서 먼저 설치하세요.",
+            "The Claude desktop app isn't installed. Get it from claude.ai/download first."
+        )
+        .into());
     }
     let mcpb = app
         .path()
         .resolve("kura.mcpb", BaseDirectory::Resource)
-        .map_err(|e| format!("동봉된 확장을 찾지 못했어요: {e}"))?;
+        .map_err(|e| {
+            tf!(
+                "동봉된 확장을 찾지 못했어요: {e}",
+                "Couldn't find the bundled extension: {e}"
+            )
+        })?;
     if !mcpb.is_file() {
-        return Err("동봉된 확장(kura.mcpb)이 이 빌드에 없어요. 앱을 다시 설치해 보세요.".into());
+        return Err(ts!(
+            "동봉된 확장(kura.mcpb)이 이 빌드에 없어요. 앱을 다시 설치해 보세요.",
+            "This build has no bundled extension (kura.mcpb). Try reinstalling the app."
+        )
+        .into());
     }
     // /usr/bin/open 절대경로 — PATH 의 가짜 open 을 타지 않게 (mcpb 런처와 같은 원칙).
     let out = Command::new("/usr/bin/open")
         .args(["-b", CLAUDE_DESKTOP_BUNDLE_ID])
         .arg(&mcpb)
         .output()
-        .map_err(|e| format!("Claude 데스크톱을 열지 못했어요: {e}"))?;
+        .map_err(|e| {
+            tf!(
+                "Claude 데스크톱을 열지 못했어요: {e}",
+                "Couldn't open the Claude desktop app: {e}"
+            )
+        })?;
     if !out.status.success() {
-        return Err(format!(
+        return Err(tf!(
             "Claude 데스크톱을 열지 못했어요: {}",
+            "Couldn't open the Claude desktop app: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
@@ -273,20 +293,31 @@ pub(crate) fn connect_claude_desktop(app: tauri::AppHandle) -> Result<(), String
 #[tauri::command]
 pub(crate) fn connect_claude_code() -> Result<(), String> {
     let Some(cli) = find_claude_cli() else {
-        return Err("claude 명령을 찾지 못했어요. 아래 수동 등록 명령을 터미널에서 실행하세요.".into());
+        return Err(ts!(
+            "claude 명령을 찾지 못했어요. 아래 수동 등록 명령을 터미널에서 실행하세요.",
+            "Couldn't find the claude command. Run the manual command below in a terminal."
+        )
+        .into());
     };
     let (mcp, temp) = registerable_mcp_path();
     let Some(mcp) = mcp else {
         if temp {
             // 임시 경로(Translocation·DMG)를 등록하면 마운트 해제·재실행 순간 Claude 가
             // 서버를 못 띄우는 등록이 남는다(코덱스 개발35 3차) — 등록하느니 거부가 낫다.
-            return Err(
+            return Err(ts!(
                 "앱이 임시 위치(디스크 이미지 등)에서 실행 중이라 등록할 경로가 없어요. \
-                 Kura 를 응용 프로그램 폴더로 옮겨서 실행한 뒤 다시 연결하세요."
-                    .into(),
-            );
+                 Kura 를 응용 프로그램 폴더로 옮겨서 실행한 뒤 다시 연결하세요.",
+                "The app is running from a temporary location (a disk image, for example), so \
+                 there's no path worth registering. Move Kura to your Applications folder, open \
+                 it from there, and connect again."
+            )
+            .into());
         }
-        return Err("이 빌드에 kura-mcp 가 없어요. 앱을 다시 설치해 보세요.".into());
+        return Err(ts!(
+            "이 빌드에 kura-mcp 가 없어요. 앱을 다시 설치해 보세요.",
+            "This build has no kura-mcp. Try reinstalling the app."
+        )
+        .into());
     };
     // 멱등 재등록: 같은 이름이 이미 있으면 add 가 "already exists" 로 거부하는데,
     // 그걸 성공으로 치면 옛 경로를 가리키는 등록이 영영 안 고쳐진다(코덱스 개발35 1차).
@@ -305,11 +336,12 @@ pub(crate) fn connect_claude_code() -> Result<(), String> {
         .output()
     {
         Ok(out) if out.status.success() => return Ok(()),
-        Ok(out) => format!(
+        Ok(out) => tf!(
             "등록 실패: {}",
+            "Registration failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ),
-        Err(e) => format!("claude 실행 실패: {e}"),
+        Err(e) => tf!("claude 실행 실패: {e}", "Couldn't run claude: {e}"),
     };
     let restore_note = match old_entry {
         Some(old) => {
@@ -319,9 +351,12 @@ pub(crate) fn connect_claude_code() -> Result<(), String> {
                 .output()
                 .is_ok_and(|o| o.status.success());
             if restored {
-                " 기존 등록은 그대로 되돌려 놨어요."
+                ts!(
+                    " 기존 등록은 그대로 되돌려 놨어요.",
+                    " Your previous entry was put back."
+                )
             } else {
-                " 기존 kura 등록을 복원하지 못했어요 — 아래 명령으로 직접 등록하세요."
+                ts!(" 기존 kura 등록을 복원하지 못했어요 — 아래 명령으로 직접 등록하세요.", " Couldn't restore your previous kura entry — register it yourself with the command below.")
             }
         }
         None => "",
@@ -355,10 +390,15 @@ mod tests {
             None
         );
         // command 없는 항목(HTTP 서버 등)은 경로 대조가 불가 → None.
-        assert_eq!(claude_json_kura_command(r#"{"mcpServers":{"kura":{}}}"#), None);
+        assert_eq!(
+            claude_json_kura_command(r#"{"mcpServers":{"kura":{}}}"#),
+            None
+        );
         // 프로젝트 범위에만 있는 건 등록으로 안 친다.
         assert_eq!(
-            claude_json_kura_command(r#"{"projects":{"/a":{"mcpServers":{"kura":{"command":"x"}}}}}"#),
+            claude_json_kura_command(
+                r#"{"projects":{"/a":{"mcpServers":{"kura":{"command":"x"}}}}}"#
+            ),
             None
         );
         assert_eq!(claude_json_kura_command("{}"), None);
@@ -374,7 +414,10 @@ mod tests {
         assert_eq!(entry["command"], "/a/kura-mcp");
         assert_eq!(entry["type"], "stdio");
         assert!(claude_json_kura_entry(r#"{"mcpServers":{"kura":{}}}"#).is_some());
-        assert_eq!(claude_json_kura_entry(r#"{"mcpServers":{"kura":null}}"#), None);
+        assert_eq!(
+            claude_json_kura_entry(r#"{"mcpServers":{"kura":null}}"#),
+            None
+        );
         assert_eq!(claude_json_kura_entry(r#"{"mcpServers":{}}"#), None);
         assert_eq!(claude_json_kura_entry("{}"), None);
     }
