@@ -18,7 +18,7 @@ Kura는 개인키를 다루는 지갑이에요. 취약점을 발견하셨다면 
 | 최신 릴리스 | ✅ |
 | 그 이전 | ❌ — 최신으로 올려주세요 |
 
-0.1.x 초기 버전이라 보안 수정은 **최신 릴리스에만** 반영해요. 아직 앱 안에 자동 업데이트가 없어서, Homebrew를 쓰거나 [Releases](https://github.com/dinggi5/kura/releases)를 Watch 해두시길 권해요.
+0.x 초기 버전이라 보안 수정은 **최신 릴리스에만** 반영해요. 앱이 스스로 업데이트를 확인하지만(설정 → 정보 → 시작할 때 확인 — 끌 수 있어요) 설치는 사람이 눌러야 하니, 확인을 꺼 두셨다면 Homebrew를 쓰거나 [Releases](https://github.com/dinggi5/kura/releases)를 Watch 해두시길 권해요.
 
 ## 관심 있는 취약점
 
@@ -89,3 +89,7 @@ Security fixes land on the **latest release only** (0.1.x).
 **Out of scope:** an already-compromised Mac; forgotten password with no 12-word backup (there is no recovery path by design); payments the user approved; what the RPC provider and the public chain can observe; third-party wallets, exchanges, or x402 counterparties.
 
 **Verify a build:** Team ID must be `74ZAMXKVXN` and `spctl -a -vv` must report `accepted / source=Notarized Developer ID`. Kura ships only via GitHub Releases and the `dinggi5/tap` Homebrew tap.
+
+**Updates (since 0.1.1):** Kura updates itself, which means the update signing key is a second root of trust — whoever holds it could push arbitrary code into wallets that are already installed and trusted. So: signature verification cannot be turned off (a download installs only if it verifies against the minisign public key baked into the app); nothing installs silently (only the *check* is automatic — downloading and installing start when a human presses the button after reading the version and the notes); the webview has no updater permission; an install is refused while a payment is awaiting approval; and the check itself can be turned off in Settings → About → Check at startup. The signing key lives on the developer's Mac under a passphrase and never goes into CI, and the release script aborts if an artifact's signature wasn't made with the key baked into the app. To verify this yourself, compare the signature in the release's `latest.json` against `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` — both are public.
+
+The app and the CLI speak Korean and English; the MCP server is English-only (an LLM reads it). Language is chosen in Settings → App → Language and defaults to your macOS language.

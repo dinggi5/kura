@@ -8,6 +8,8 @@ Mac에서 Claude 같은 AI가 인터넷 결제(x402)를 할 때, 사람이 비�
 - AI가 결제를 **요청** → 사람이 **비밀번호로 승인** → 실행
 - 체인은 **Base**(이더리움 L2, 수수료 거의 0). 기본은 메인넷 — 연습용 테스트넷(Base Sepolia)으로 설정에서 전환할 수 있어요
 
+In English: **[README.en.md](README.en.md)**
+
 ---
 
 ## 한눈에 보기
@@ -49,7 +51,7 @@ brew install --cask dinggi5/tap/kura
 ```bash
 git clone https://github.com/dinggi5/kura.git
 cd kura
-git checkout v0.1.1   # 배포본과 같은 소스. 빼면 개발 중인 최신 코드가 받아져요
+git checkout v0.2.1   # 배포본과 같은 소스. 빼면 개발 중인 최신 코드가 받아져요
 npm ci                # package-lock.json 그대로 설치 (install 은 버전이 올라갈 수 있어요)
 
 # 개발 모드로 바로 실행
@@ -233,6 +235,14 @@ npx tsc --noEmit && npx vite build  # 프론트
 | AI 연결 | MCP 서버 (rmcp) |
 
 구조: `[Rust 코어(src-tauri)] ← MCP / CLI 어댑터(kura-mcp)`. 키 접근(서명)은 GUI 프로세스만 — 그게 최종 방어선이에요.
+
+### 언어
+
+앱은 **한국어·영어** 두 벌이에요. **설정 → 앱 → 언어**에서 고르고, 고른 적 없으면 macOS 시스템 언어를 따라가요. 고르면 창이 그 언어로 다시 열려요.
+
+CLI(`kura`)도 같은 설정을 따라가요 — 한 번만 다르게 쓰려면 `KURA_LANG=en`.
+
+MCP 서버는 일부러 **영어 한 벌**이에요. 그 글을 읽는 건 사람이 아니라 모델이고(에이전트는 당신 언어로 답해요), 도구 설명이 컴파일 타임 상수라 런타임 전환이 안 돼요.
 
 ---
 
