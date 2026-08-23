@@ -353,7 +353,7 @@ pub(crate) fn on_blur<R: Runtime>(win: &Window<R>) {
     }
 }
 
-/// 긴급 잠금 상태를 메뉴바 아이콘에 반영한다 (평상시 = 곳간 / 잠김 = 자물쇠).
+/// 긴급 잠금 상태를 메뉴바 아이콘에 반영한다 (평상시 = 열쇠구멍 동전 / 잠김 = 자물쇠).
 pub(crate) fn refresh_icon<R: Runtime>(app: &AppHandle<R>) {
     let locked = crate::lock::read_lock();
     let bytes = if locked { ICON_LOCKED } else { ICON_NORMAL };

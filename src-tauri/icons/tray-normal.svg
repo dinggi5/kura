@@ -1,7 +1,13 @@
-<!-- 메뉴바 아이콘 (평상시) — 곳간/금고 문. macOS 템플릿 이미지라 색은 검정 + 알파만 쓴다
-     (시스템이 메뉴바 밝기에 맞춰 자동 반전). 44x44 = 22pt @2x. -->
+<!-- 메뉴바 아이콘 (평상시) — 열쇠구멍 동전. 앱 아이콘(icon.svg)과 같은 모티프의 메뉴바판이다.
+     macOS 템플릿 이미지라 색은 검정 + 알파만 쓴다(시스템이 메뉴바 밝기에 맞춰 자동 반전).
+     윤곽선 판(빈 원 + 가운데 점)은 22px 에서 열쇠구멍의 아랫단이 사라져 표적/카메라로
+     읽혔다 — 채운 동전에 구멍을 뚫는 쪽이 1x 에서 살아남는다(개발 41 실측).
+     44x44 = 22pt @2x. 수정 시 rsvg-convert -w 44 -h 44 로 PNG 재생성. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
-  <rect x="8.6" y="8.6" width="26.8" height="26.8" rx="7.6"
-        fill="none" stroke="#000" stroke-width="3.2" stroke-linejoin="round"/>
-  <circle cx="22" cy="22" r="3.4" fill="#000"/>
+  <mask id="keyhole">
+    <rect width="44" height="44" fill="#fff"/>
+    <circle cx="22" cy="19.2" r="3.3" fill="#000"/>
+    <path d="M22 19.2 L18.4 28.6 H25.6 Z" fill="#000"/>
+  </mask>
+  <circle cx="22" cy="22" r="13.6" fill="#000" mask="url(#keyhole)"/>
 </svg>
