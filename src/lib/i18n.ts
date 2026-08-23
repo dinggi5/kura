@@ -25,11 +25,25 @@ function cached(): Lang | null {
   }
 }
 
-function remember(l: Lang): void {
+/** 캐시에 적었는가. **실패를 삼키면 안 된다** — 리로드로 언어를 적용하는 구조라,
+ *  저장이 안 되는 환경에서 그대로 리로드하면 같은 불일치를 매번 다시 만나 무한 리로드가 된다
+ *  (코덱스 개발 42 2차 P2). 그래서 성공 여부를 돌려주고, 실패하면 URL 로 나른다. */
+function remember(l: Lang): boolean {
   try {
     localStorage.setItem(CACHE_KEY, l);
+    return true;
   } catch {
-    /* 저장 불가(프라이빗 모드 등)여도 동작엔 지장 없음 — 매번 백엔드가 알려준다 */
+    return false;
+  }
+}
+
+/** 리로드를 건너뛰어도 살아남는 두 번째 통로. 저장이 막힌 환경에서만 쓴다. */
+function fromUrl(): Lang | null {
+  try {
+    const v = new URLSearchParams(location.search).get("lang");
+    return v === "ko" || v === "en" ? v : null;
+  } catch {
+    return null;
   }
 }
 
@@ -47,7 +61,7 @@ function detect(): Lang {
  * 비동기 왕복을 기다리지 않고 **동기적으로** 정한다: 캐시 → 시스템 언어.
  * 백엔드 설정과 어긋나는 드문 경우는 `initLang()` 이 뒤늦게 바로잡는다.
  */
-let current: Lang = cached() ?? detect();
+let current: Lang = fromUrl() ?? cached() ?? detect();
 
 export function lang(): Lang {
   return current;
@@ -81,8 +95,18 @@ export async function initLang(): Promise<void> {
     remember(current);
     return;
   }
-  remember(backend);
-  window.location.reload();
+  if (remember(backend)) {
+    window.location.reload();
+    return;
+  }
+  // 저장이 막힌 환경 — URL 에 실어 한 번만 다시 읽는다. 이미 실어 온 길이면 그만두고
+  // 이번 세션은 메모리 값으로 간다(이미 그려진 상수는 옛 언어로 남지만, 무한 리로드보다 낫다).
+  if (fromUrl()) {
+    current = backend;
+    document.documentElement.lang = current;
+    return;
+  }
+  location.search = `?lang=${backend}`;
 }
 
 /**
@@ -92,6 +116,10 @@ export async function initLang(): Promise<void> {
 export async function chooseLang(next: Lang): Promise<void> {
   if (next === current) return;
   await invoke("set_lang", { lang: next });
-  remember(next);
-  window.location.reload();
+  if (remember(next)) {
+    window.location.reload();
+  } else {
+    // 캐시가 막혔으면 URL 이 그 자리를 대신한다(이것도 리로드를 일으킨다).
+    location.search = `?lang=${next}`;
+  }
 }

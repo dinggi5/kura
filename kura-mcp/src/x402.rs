@@ -159,7 +159,8 @@ pub fn pick_requirement(pr: &PaymentRequired) -> Result<Requirement, String> {
                 .collect()
         })
         .unwrap_or_default();
-    Err(format!(
+    Err(tf!(
+        "지원하는 결제 요구가 없어요. 우리는 exact·Base(USDC)만 지원합니다. 서버 제시: [{}]",
         "No supported payment requirement. Kura supports the exact scheme on Base with USDC only. Server offered: [{}]",
         offered.join(", ")
     ))
