@@ -22,7 +22,7 @@ import {
 import { cn } from "@/lib/cn";
 import { GITHUB_URL } from "@/lib/helpContent";
 import { useCopy } from "@/lib/useCopy";
-import type { AgentStatus, ConnectStatus } from "@/lib/types";
+import type { AgentStatus, ConnectError, ConnectStatus } from "@/lib/types";
 import { cardBase, enter, primaryBtn, secondaryBtn, shell } from "@/components/ui";
 import { t } from "@/lib/i18n";
 
@@ -34,6 +34,29 @@ function CodeBox({ text }: { text: string }) {
     <div className="px-3 py-2 rounded-[10px] bg-[var(--color-ivory-100)] dark:bg-[var(--color-night-900)] border border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] font-mono text-[11px] leading-relaxed text-[var(--color-ink-900)] dark:text-[#E8E5DD] select-all break-all">
       {text}
     </div>
+  );
+}
+
+/** 임시 실행(디스크 이미지 등) + 설치본이 다른 버전일 때의 인라인 경고
+ *  (코덱스 개발38 2차 P2). 등록될 kura-mcp 는 **설치본** 안의 것이라, 지금 이 화면을
+ *  그리는 앱과 AI 에 실제로 붙을 바이너리가 갈린다 — 파일 IPC 가 어긋날 수 있다.
+ *  막지는 않는다(설치본 경로가 어차피 오래 갈 유일한 경로다). 말해 줄 뿐. */
+function StaleInstallNote({ installed, running }: { installed: string; running: string }) {
+  return (
+    <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+      {t(
+        <>
+          지금 이 앱은 <b>{running}</b>인데, 등록될 경로는 이미 설치돼 있는 <b>{installed}</b>{" "}
+          쪽이에요. AI에는 설치본이 붙어요 — 이 앱을 <b>응용 프로그램</b> 폴더에 덮어써서 두
+          버전을 맞춘 뒤 연결하는 게 좋아요.
+        </>,
+        <>
+          This app is <b>{running}</b>, but the path being registered belongs to the installed{" "}
+          <b>{installed}</b>. The AI will talk to that installed copy — copy this app over the one
+          in <b>Applications</b> first so the two match, then connect.
+        </>,
+      )}
+    </p>
   );
 }
 
@@ -81,12 +104,13 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
   const [status, setStatus] = useState<ConnectStatus | null>(null);
   const [copied, copy] = useCopy();
   const [pathCopied, copyPath] = useCopy();
+  const [restoreCopied, copyRestore] = useCopy();
   // Claude 데스크톱: 열기 시도 결과 — 성공하면 "설치 창에서 '설치'를 누르라"는 다음 단계 안내.
   const [desktopBusy, setDesktopBusy] = useState(false);
   const [desktopMsg, setDesktopMsg] = useState<{ ok: boolean; text: string } | null>(null);
   // Claude Code: 등록 대행 결과.
   const [cliBusy, setCliBusy] = useState(false);
-  const [cliError, setCliError] = useState<string | null>(null);
+  const [cliError, setCliError] = useState<ConnectError | null>(null);
 
   const refresh = useCallback(() => {
     invoke<ConnectStatus>("get_connect_status").then(setStatus).catch(() => {});
@@ -124,7 +148,15 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
       await invoke("connect_claude_code");
       refresh(); // 등록 직후 상태 태그가 바로 "등록됨"으로 바뀌게.
     } catch (e) {
-      setCliError(String(e));
+      // 백엔드는 ConnectError 객체를 준다. 직렬화가 어긋나거나 invoke 자체가 던지면
+      // 문자열일 수 있으니(그때 String(e) 는 "[object Object]" 가 아니라 진짜 메시지),
+      // 모양을 보고 갈라 받는다 — 사용자에게 [object Object] 를 보여주지 않으려고.
+      const err = e as Partial<ConnectError> | undefined;
+      setCliError(
+        typeof err?.message === "string"
+          ? { message: err.message, restore_command: err.restore_command ?? null }
+          : { message: String(e), restore_command: null },
+      );
     } finally {
       setCliBusy(false);
     }
@@ -143,6 +175,13 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
   // 임시 위치(디스크 이미지·Translocation) 실행 + 설치본 없음 — 등록할 유효 경로 자체가
   // 없다. 이 상태에선 모든 클라이언트 카드가 경로 대신 "옮기기" 안내를 보여준다.
   const tempNoPath = !!status?.temp_location && !status.mcp_path;
+  // 임시 실행이라 설치본 경로를 등록하는데, 그 설치본이 이 앱과 다른 버전인 경우
+  // (코덱스 개발38 2차 P2). 등록 자체는 막지 않는다 — 설치본 경로가 어차피 오래 갈
+  // 유일한 경로다. 다만 지금 AI 에 붙을 바이너리가 이 화면과 다른 버전이라는 건 말한다.
+  const staleInstall = status?.installed_version_mismatch ?? null;
+  // 대행 실패 때 백엔드가 준 "옛 등록 되살리기" 명령. 지역 const 로 받아야 JSX 안에서
+  // 좁혀진다(상태 변수는 콜백 안에서 다시 null 일 수 있다고 본다).
+  const restoreCmd = cliError?.restore_command ?? null;
 
   return (
     <main className={shell}>
@@ -322,6 +361,9 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                       "One button registers it. From the next claude run on, it works in any folder.",
                     )}
               </p>
+              {staleInstall && status && (
+                <StaleInstallNote installed={staleInstall} running={status.app_version} />
+              )}
               <button
                 type="button"
                 onClick={() => void connectCode()}
@@ -338,7 +380,7 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
               </button>
               {cliError && (
                 <div className="space-y-2">
-                  <p className="text-[11px] leading-relaxed text-red-500/90">{cliError}</p>
+                  <p className="text-[11px] leading-relaxed text-red-500/90">{cliError.message}</p>
                   {/* 대행이 실패한 사람에게 남은 길 = 수동 등록. 에러 문구가 "아래 명령"을
                       가리키므로 여기서 실제로 보여준다. */}
                   <CodeBox text={reRegisterCommand} />
@@ -349,6 +391,34 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                   >
                     {copied ? <Check size={13} /> : <Copy size={13} />} {t("명령 복사", "Copy command")}
                   </button>
+                  {/* 🔴 위 시퀀스의 remove 는 우리가 방금 되돌려 놓은 옛 등록도 지운다.
+                      대행이 실패한 환경에서는 손으로 쳐도 add 가 또 실패하기 쉬워서,
+                      그대로 두면 멀쩡하던 등록만 잃는다 (코덱스 개발38 2차 P2). */}
+                  {restoreCmd && (
+                    <div className="space-y-2 pt-1">
+                      <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                        {t(
+                          <>
+                            위 명령의 <b>remove</b>는 되돌려 둔 기존 kura 등록도 지워요. 뒤의 add가
+                            또 실패하면 아래 명령으로 원래대로 되돌릴 수 있어요.
+                          </>,
+                          <>
+                            The <b>remove</b> above also deletes the kura entry we put back. If the
+                            add after it fails again, this command restores it.
+                          </>,
+                        )}
+                      </p>
+                      <CodeBox text={restoreCmd} />
+                      <button
+                        type="button"
+                        onClick={() => copyRestore(restoreCmd)}
+                        className={cn(secondaryBtn, "w-full")}
+                      >
+                        {restoreCopied ? <Check size={13} /> : <Copy size={13} />}{" "}
+                        {t("되돌리기 명령 복사", "Copy restore command")}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -398,6 +468,9 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                 "Any app that speaks MCP can use this. Register this path as the server:",
               )}
             </p>
+            {staleInstall && status && (
+              <StaleInstallNote installed={staleInstall} running={status.app_version} />
+            )}
             <CodeBox text={mcpPath} />
             <div className="flex items-center justify-between gap-2">
               <button

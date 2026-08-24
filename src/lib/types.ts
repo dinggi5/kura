@@ -97,4 +97,23 @@ export type ConnectStatus = {
   mcp_path: string | null;
   /** 임시 위치(App Translocation·DMG)에서 실행 중 — mcp_path 까지 없으면 이전 안내. */
   temp_location: boolean;
+  /** 지금 실행 중인 이 앱의 버전. */
+  app_version: string;
+  /**
+   * 임시 위치 실행이라 **설치본** 경로를 등록하게 되는데 그 설치본이 이 앱과 다른
+   * 버전일 때, 그 설치본 버전. AI 에 붙을 kura-mcp 는 설치본 안의 것이라 화면과
+   * 실물이 갈린다 (코덱스 개발38 2차 P2). 같거나 못 읽으면 null.
+   */
+  installed_version_mismatch: string | null;
+};
+
+/** connect_claude_code 가 실패할 때 주는 모양 (코덱스 개발38 2차 P2). */
+export type ConnectError = {
+  message: string;
+  /**
+   * 옛 kura 등록을 되살리는 `claude mcp add-json …` 명령. 화면이 안내하는 수동
+   * 재등록은 `remove; add` 라서, add 가 또 실패하면 원복해 둔 등록까지 지운다 —
+   * 그때 되돌릴 손잡이. 지우기 전에 옛 항목이 있었을 때만 채워진다.
+   */
+  restore_command: string | null;
 };

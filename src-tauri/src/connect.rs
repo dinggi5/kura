@@ -42,6 +42,36 @@ pub(crate) struct ConnectStatus {
     /// 이때 설치본마저 없으면 mcp_path 가 None — 프론트가 "응용 프로그램 폴더로
     /// 옮겨 실행" 안내를 띄운다(임시 경로를 등록해 주는 것보다 낫다).
     pub(crate) temp_location: bool,
+    /// 지금 실행 중인 이 앱의 버전.
+    pub(crate) app_version: String,
+    /// 임시 위치에서 실행 중이라 **설치본** 경로를 등록하게 되는데, 그 설치본이 지금
+    /// 실행 중인 이 앱과 **다른 버전**일 때 그 버전 문자열 (코덱스 개발38 2차 P2).
+    /// 등록될 kura-mcp 는 그 설치본 안의 것이라, 사용자가 보고 있는 화면(이 앱)과
+    /// 실제로 AI 에 붙을 바이너리가 갈린다 — 파일 IPC(~/.jigap)가 어긋날 수 있다.
+    /// 같거나·임시 실행이 아니거나·버전을 못 읽으면 None.
+    pub(crate) installed_version_mismatch: Option<String>,
+}
+
+/// 등록 대행 실패를 프론트에 넘기는 모양 (코덱스 개발38 2차 P2).
+///
+/// 문자열 하나로 넘기던 걸 쪼갠 이유: 실패 화면이 안내하는 수동 명령은
+/// `claude mcp remove …; claude mcp add …` 시퀀스다(bare add 는 "already exists" 로
+/// 거부되므로). 그런데 대행이 실패한 환경에서는 손으로 쳐도 add 가 또 실패하기 쉽고,
+/// 그러면 remove 만 성공해서 **우리가 방금 원복해 둔 옛 등록까지 날아간다.**
+/// 되돌릴 명령을 같이 줘야 그 구멍이 막힌다.
+#[derive(Serialize)]
+pub(crate) struct ConnectError {
+    /// 사람이 읽는 실패 사유 (+ 원복 결과 한 줄).
+    pub(crate) message: String,
+    /// 옛 kura 등록을 그대로 되살리는 `claude mcp add-json …` 명령.
+    /// 지우기 전에 옛 항목이 있었을 때만 Some — 없었으면 잃을 게 없다.
+    pub(crate) restore_command: Option<String>,
+}
+
+/// 셸에 그대로 붙여넣을 수 있게 작은따옴표로 감싼다(안의 ' 는 '\'' 로 탈출).
+/// 프론트가 경로에 하는 것과 같은 처리 — 여기서는 JSON 이라 따옴표가 반드시 들어간다.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// 임시 실행 위치인가 — App Translocation(/private/var/folders/…)과 DMG 마운트.
@@ -105,6 +135,41 @@ fn registerable_mcp_path() -> (Option<PathBuf>, bool) {
     }
     let p = exe.parent().map(|d| d.join("kura-mcp"));
     (p.filter(|p| p.is_file()), false)
+}
+
+/// 앱 번들의 CFBundleShortVersionString. `/usr/bin/plutil` 로 읽는다 — Info.plist 가
+/// 텍스트든 바이너리든 같은 답을 주고, 절대경로라 PATH 에 가짜를 둔 환경을 안 탄다
+/// (mcpb 런처와 같은 원칙). 못 읽으면 None — 버전을 모른다고 사용자를 막지는 않는다.
+fn bundle_short_version(app: &std::path::Path) -> Option<String> {
+    let out = Command::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleShortVersionString", "raw", "-o", "-"])
+        .arg(app.join("Contents/Info.plist"))
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+/// 임시 실행 → 설치본 등록 조합에서 버전이 갈리는가 (코덱스 개발38 2차 P2).
+/// 순수 심장부: 설치본 버전을 읽는 함수를 주입받아 없는 경로로도 테스트한다.
+///
+/// mcp_path 는 `…/Kura.app/Contents/MacOS/kura-mcp` 라서 조상 셋을 올라가면 번들이다.
+/// 임시 실행이 아니면 볼 것도 없다 — 그때 mcp_path 는 지금 이 앱 자신의 사이드카다.
+fn classify_installed_mismatch(
+    temp_location: bool,
+    mcp_path: Option<&std::path::Path>,
+    running_version: &str,
+    read_version: impl Fn(&std::path::Path) -> Option<String>,
+) -> Option<String> {
+    if !temp_location {
+        return None;
+    }
+    let app = mcp_path?.parent()?.parent()?.parent()?;
+    let installed = read_version(app)?;
+    (installed != running_version).then_some(installed)
 }
 
 /// Claude 데스크톱 설치 여부. 표준 폴더 둘을 먼저 보고(비용 0), 없을 때만 Spotlight 로
@@ -219,6 +284,13 @@ fn registered_cli_entry() -> Option<serde_json::Value> {
 #[tauri::command]
 pub(crate) fn get_connect_status() -> ConnectStatus {
     let (mcp, temp_location) = registerable_mcp_path();
+    let app_version = env!("CARGO_PKG_VERSION").to_string();
+    let installed_version_mismatch = classify_installed_mismatch(
+        temp_location,
+        mcp.as_deref(),
+        &app_version,
+        bundle_short_version,
+    );
     let mcp_path = mcp.map(|p| p.to_string_lossy().into_owned());
     let registered_cmd = registered_cli_command();
     let matches = match (&registered_cmd, &mcp_path) {
@@ -233,6 +305,8 @@ pub(crate) fn get_connect_status() -> ConnectStatus {
         cli_registered_other: registered_cmd.is_some() && !matches,
         mcp_path,
         temp_location,
+        app_version,
+        installed_version_mismatch,
     }
 }
 
@@ -291,33 +365,44 @@ pub(crate) fn connect_claude_desktop(app: tauri::AppHandle) -> Result<(), String
 /// --scope user 인 이유: 기본(local)은 "지금 폴더"에만 살아서, GUI 앱이 대신 등록하면
 /// 앱의 cwd 라는 아무 데도 아닌 곳에 등록된다. 지갑은 어느 폴더에서든 쓰는 도구다.
 #[tauri::command]
-pub(crate) fn connect_claude_code() -> Result<(), String> {
+pub(crate) fn connect_claude_code() -> Result<(), ConnectError> {
+    // 아직 아무것도 안 지운 실패들 — 되돌릴 게 없으니 restore_command 도 없다.
+    let bare = |message: String| ConnectError {
+        message,
+        restore_command: None,
+    };
     let Some(cli) = find_claude_cli() else {
-        return Err(ts!(
-            "claude 명령을 찾지 못했어요. 아래 수동 등록 명령을 터미널에서 실행하세요.",
-            "Couldn't find the claude command. Run the manual command below in a terminal."
-        )
-        .into());
+        return Err(bare(
+            ts!(
+                "claude 명령을 찾지 못했어요. 아래 수동 등록 명령을 터미널에서 실행하세요.",
+                "Couldn't find the claude command. Run the manual command below in a terminal."
+            )
+            .into(),
+        ));
     };
     let (mcp, temp) = registerable_mcp_path();
     let Some(mcp) = mcp else {
         if temp {
             // 임시 경로(Translocation·DMG)를 등록하면 마운트 해제·재실행 순간 Claude 가
             // 서버를 못 띄우는 등록이 남는다(코덱스 개발35 3차) — 등록하느니 거부가 낫다.
-            return Err(ts!(
-                "앱이 임시 위치(디스크 이미지 등)에서 실행 중이라 등록할 경로가 없어요. \
-                 Kura 를 응용 프로그램 폴더로 옮겨서 실행한 뒤 다시 연결하세요.",
-                "The app is running from a temporary location (a disk image, for example), so \
-                 there's no path worth registering. Move Kura to your Applications folder, open \
-                 it from there, and connect again."
-            )
-            .into());
+            return Err(bare(
+                ts!(
+                    "앱이 임시 위치(디스크 이미지 등)에서 실행 중이라 등록할 경로가 없어요. \
+                     Kura 를 응용 프로그램 폴더로 옮겨서 실행한 뒤 다시 연결하세요.",
+                    "The app is running from a temporary location (a disk image, for example), so \
+                     there's no path worth registering. Move Kura to your Applications folder, \
+                     open it from there, and connect again."
+                )
+                .into(),
+            ));
         }
-        return Err(ts!(
-            "이 빌드에 kura-mcp 가 없어요. 앱을 다시 설치해 보세요.",
-            "This build has no kura-mcp. Try reinstalling the app."
-        )
-        .into());
+        return Err(bare(
+            ts!(
+                "이 빌드에 kura-mcp 가 없어요. 앱을 다시 설치해 보세요.",
+                "This build has no kura-mcp. Try reinstalling the app."
+            )
+            .into(),
+        ));
     };
     // 멱등 재등록: 같은 이름이 이미 있으면 add 가 "already exists" 로 거부하는데,
     // 그걸 성공으로 치면 옛 경로를 가리키는 등록이 영영 안 고쳐진다(코덱스 개발35 1차).
@@ -343,25 +428,38 @@ pub(crate) fn connect_claude_code() -> Result<(), String> {
         ),
         Err(e) => tf!("claude 실행 실패: {e}", "Couldn't run claude: {e}"),
     };
-    let restore_note = match old_entry {
+    let (restore_note, restore_command) = match old_entry {
         Some(old) => {
+            let old_json = old.to_string();
             let restored = Command::new(&cli)
                 .args(["mcp", "add-json", "--scope", "user", "kura"])
-                .arg(old.to_string())
+                .arg(&old_json)
                 .output()
                 .is_ok_and(|o| o.status.success());
-            if restored {
+            let note = if restored {
                 ts!(
                     " 기존 등록은 그대로 되돌려 놨어요.",
                     " Your previous entry was put back."
                 )
             } else {
                 ts!(" 기존 kura 등록을 복원하지 못했어요 — 아래 명령으로 직접 등록하세요.", " Couldn't restore your previous kura entry — register it yourself with the command below.")
-            }
+            };
+            // 원복이 성공했든 실패했든 이 명령을 준다. 성공했어도 아래 수동 시퀀스의
+            // remove 가 그걸 다시 지울 수 있으니, 되돌릴 손잡이는 손에 쥐고 있어야 한다.
+            (
+                note,
+                Some(format!(
+                    "claude mcp add-json --scope user kura {}",
+                    shell_single_quote(&old_json)
+                )),
+            )
         }
-        None => "",
+        None => ("", None),
     };
-    Err(format!("{failure}{restore_note}"))
+    Err(ConnectError {
+        message: format!("{failure}{restore_note}"),
+        restore_command,
+    })
 }
 
 #[cfg(test)]
@@ -459,6 +557,76 @@ mod tests {
             Path::new("/Users/a/프로젝트/지갑지갑/src-tauri/target/debug/kura"),
             rw,
         ));
+    }
+
+    // 임시 실행 중 설치본 버전 대조 (코덱스 개발38 2차 P2). 등록될 kura-mcp 는 설치본
+    // 안의 것이라, 그게 지금 화면을 그리는 이 앱과 다른 버전이면 사용자에게 알려야 한다.
+    #[test]
+    fn installed_version_mismatch_detection() {
+        use std::path::{Path, PathBuf};
+        let mcp: PathBuf = "/Applications/Kura.app/Contents/MacOS/kura-mcp".into();
+        let reads = |v: &'static str| move |_: &Path| Some(v.to_string());
+
+        // 임시 실행이 아니면 볼 것도 없다 — mcp_path 는 이 앱 자신의 사이드카다.
+        assert_eq!(
+            classify_installed_mismatch(false, Some(&mcp), "0.2.1", reads("0.2.0")),
+            None
+        );
+        // 임시 실행 + 설치본 버전이 다름 → 그 버전을 알린다.
+        assert_eq!(
+            classify_installed_mismatch(true, Some(&mcp), "0.2.1", reads("0.2.0")),
+            Some("0.2.0".to_string())
+        );
+        // 같은 버전이면 조용히.
+        assert_eq!(
+            classify_installed_mismatch(true, Some(&mcp), "0.2.1", reads("0.2.1")),
+            None
+        );
+        // 설치본이 아예 없어 등록할 경로가 없는 상태(프론트는 "옮기기" 안내를 띄운다).
+        assert_eq!(
+            classify_installed_mismatch(true, None, "0.2.1", reads("0.2.0")),
+            None
+        );
+        // 버전을 못 읽으면 막지 않는다 — 모르는 걸 경고로 바꾸지 않는다.
+        assert_eq!(
+            classify_installed_mismatch(true, Some(&mcp), "0.2.1", |_: &Path| None),
+            None
+        );
+        // 조상 셋을 못 올라가는 짧은 경로 → None (패닉이 아니라).
+        assert_eq!(
+            classify_installed_mismatch(true, Some(Path::new("/kura-mcp")), "0.2.1", reads("0.2.0")),
+            None
+        );
+    }
+
+    // 실물 plutil 스모크: 이 맥에 깔린 Kura.app 이 있으면 버전 문자열이 나와야 하고,
+    // 없는 번들은 None 이어야 한다(못 읽는다고 패닉하지 않는다).
+    #[test]
+    fn bundle_version_smoke() {
+        use std::path::Path;
+        assert_eq!(bundle_short_version(Path::new("/no/such/App.app")), None);
+        let installed = Path::new("/Applications/Kura.app");
+        if installed.is_dir() {
+            let v = bundle_short_version(installed).expect("설치된 앱은 버전이 읽혀야 한다");
+            assert!(
+                v.chars().next().is_some_and(|c| c.is_ascii_digit()),
+                "버전 같지 않은 값: {v}"
+            );
+        }
+    }
+
+    // 원복 명령의 셸 인용: JSON 은 따옴표를 반드시 물고 있고, 값 안에 작은따옴표가
+    // 들어와도 명령이 쪼개지면 안 된다.
+    #[test]
+    fn restore_command_quoting() {
+        assert_eq!(
+            shell_single_quote(r#"{"command":"/a/kura-mcp"}"#),
+            r#"'{"command":"/a/kura-mcp"}'"#
+        );
+        assert_eq!(
+            shell_single_quote("/Users/a/it's here/kura-mcp"),
+            r#"'/Users/a/it'\''s here/kura-mcp'"#
+        );
     }
 
     // 실물 statfs 스모크: 루트 볼륨(쓰기 가능한 데이터 볼륨에 병합 마운트)은 이 판정에서

@@ -10,7 +10,8 @@
 #
 # 순서: 릴리스(release.sh --publish)가 끝난 뒤에 돌린다. 자산이 없으면 여기서 죽는다.
 # 발행 계정: 네임스페이스 io.github.dinggi5 는 GitHub 로그인(dinggi5)으로 증명한다.
-#   mcp-publisher login github   ← 최초 1회 (브라우저 기기 인증)
+# 로그인은 **이 스크립트가 발행 직전에 직접** 한다 (개발 44) — 토큰 수명이 5분뿐이라
+# 사람이 먼저 로그인해 두면 그사이 다른 걸 하다 만료된다(개발 40·43 이 연속으로 밟았다).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -111,10 +112,50 @@ if [[ -n "$REMOTE_SHA" ]]; then
   exit 0
 fi
 
-[[ -f "$HOME/.config/mcp-publisher/token.json" ]] || die \
-  "레지스트리 로그인이 없다. 먼저:  mcp-publisher login github  (브라우저에서 dinggi5 로 인증)"
+# ── 로그인 — 발행 직전에, 스크립트가 직접 (개발 44) ────────────────────────
+# 토큰은 JWT 고 수명이 5분이다(exp - iat 실측). 개발 40 이 "발행 직전에 로그인"으로
+# 정리했는데 개발 43 이 또 밟았다 — 로그인해 두고 그사이 앱 확인을 하나 끼웠더니 만료.
+# 사람이 두 명령 사이에 아무것도 안 끼우기를 바라는 대신, 여기서 붙여 버린다.
+#
+# 만료를 "발행이 실패하면 안다"로 두지 않고 **미리 재는** 이유: 발행은 되돌릴 수 없는
+# 원격 부작용이라, 만료된 토큰으로 절반쯤 나가는 것보다 쏘기 전에 아는 게 낫다.
+TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/mcp-publisher/token.json"
+
+# 남은 수명(초). 파일이 없거나 모양이 다르면 0 = "없는 것으로 친다" → 로그인시킨다.
+token_seconds_left() {
+  [[ -f "$TOKEN_FILE" ]] || { echo 0; return; }
+  python3 - "$TOKEN_FILE" <<'EOF' 2>/dev/null || echo 0
+import base64, json, sys, time
+try:
+    tok = json.load(open(sys.argv[1]))["token"]
+    payload = tok.split(".")[1]
+    payload += "=" * (-len(payload) % 4)          # base64url 패딩 복원
+    exp = json.loads(base64.urlsafe_b64decode(payload))["exp"]
+except Exception:
+    print(0)
+else:
+    print(max(0, int(exp - time.time())))
+EOF
+}
+
+# 발행 왕복(네트워크 + 사후 검증)에 쓸 여유. 5분짜리 토큰에서 2분은 넉넉한 마진이다.
+NEED_SECONDS=120
+LEFT="$(token_seconds_left)"
+if [[ "$LEFT" -lt "$NEED_SECONDS" ]]; then
+  if [[ "$LEFT" -eq 0 ]]; then
+    info "레지스트리 로그인이 없거나 만료됐다 — 지금 로그인한다 (브라우저에서 dinggi5 로 인증)"
+  else
+    info "토큰이 ${LEFT}초 뒤 만료된다 — 발행 전에 다시 로그인한다"
+  fi
+  mcp-publisher login github || die "로그인 실패. 브라우저에서 dinggi5 로 인증할 것"
+  LEFT="$(token_seconds_left)"
+  [[ "$LEFT" -ge "$NEED_SECONDS" ]] || die \
+    "로그인은 끝났는데 토큰 수명이 ${LEFT}초뿐이다 — 발행을 시작하지 않는다. 다시 돌릴 것"
+fi
+ok "레지스트리 토큰 유효 (${LEFT}초 남음)"
+
 mcp-publisher publish server.json || die \
-  "발행 실패. 토큰이 만료됐으면:  mcp-publisher login github"
+  "발행 실패. 토큰이 만료됐으면 다시 돌릴 것 (이 스크립트가 로그인부터 다시 한다)"
 
 # ── 사후 검증: 레지스트리가 실제로 이 버전을 광고하는지 (우리 손 밖 API 기준) ──
 REMOTE_SHA="$(fetch_remote_sha || true)"

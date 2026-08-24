@@ -29,6 +29,8 @@ cd "$REPO_ROOT"
 # (gh 는 기본적으로 원격에서 리포를 알아내는데, --publish 는 --repo 로 못 박고
 #  origin 이 정말 이 리포인지도 사전 점검에서 확인한다.)
 GH_REPO_SLUG="dinggi5/kura"
+# 캐스크가 사는 tap 리포. 캐스크를 밀면 여기서 brew test-bot 이 돈다 (아래 8-5).
+TAP_REPO_SLUG="dinggi5/homebrew-tap"
 
 # ── 출력 도우미 ──────────────────────────────────────────────────────────────
 step() { printf '\n\033[1;34m▸ %s\033[0m\n' "$*"; }
@@ -345,7 +347,7 @@ if [[ $PUBLISH -eq 1 ]]; then
     [[ $n -gt 0 ]] || die "$1 원격 URL 이 하나도 없다 ($2)"
   }
   check_remote_urls "origin" "$REPO_ROOT" "$GH_REPO_SLUG"
-  check_remote_urls "tap" "$TAP_DIR" "dinggi5/homebrew-tap"
+  check_remote_urls "tap" "$TAP_DIR" "$TAP_REPO_SLUG"
 
   # tap 이 origin 보다 앞서 있으면(=밀리지 않은 커밋) 이번 캐스크 커밋과 함께 딸려 나간다.
   # 반대로 앞선 커밋이 이미 있는 상태를 그냥 통과시키면, 8-4 가 "바뀐 게 없다"며 push 를
@@ -533,8 +535,13 @@ fi
 # ── 3. 빌드 (서명 + 앱 공증 + 앱 스테이플까지 Tauri 가 처리) ────────────────
 step "빌드 · 서명"
 
-BUILD_ARGS=(--bundles app,dmg)
+# 빌드를 컴파일(A)과 번들(B) 두 번으로 나눠 부른다 — 자격증명 격리(아래 주석). 두 단계가
+# 같은 타깃을 봐야 하므로 인자 배열도 나란히 만든다. 빈 배열을 "${a[@]}" 로 펴면 bash 3.2
+# + set -u 에서 unbound variable 로 죽으므로, 두 배열 다 원소가 항상 하나는 있게 둔다.
+COMPILE_ARGS=(--no-bundle)
+BUNDLE_ARGS=(--bundles app,dmg)
 BUNDLE_DIR="src-tauri/target/release/bundle"
+APP_BIN="src-tauri/target/release/kura"
 if [[ $UNIVERSAL -eq 1 ]]; then
   # 인텔 호스트에는 x86_64 타깃이 기본으로 있으니 그것만 보면 통과시켜 놓고, 정작 없는
   # aarch64 때문에 빌드 한참 뒤에 죽는다. 유니버설은 두 쪽이 다 있어야 한다.
@@ -543,8 +550,10 @@ if [[ $UNIVERSAL -eq 1 ]]; then
     grep -q "^$t\$" <<<"$INSTALLED_TARGETS" || die \
       "유니버설 빌드에는 $t 타깃이 필요하다:  rustup target add $t"
   done
-  BUILD_ARGS+=(--target universal-apple-darwin)
+  COMPILE_ARGS+=(--target universal-apple-darwin)
+  BUNDLE_ARGS+=(--target universal-apple-darwin)
   BUNDLE_DIR="src-tauri/target/universal-apple-darwin/release/bundle"
+  APP_BIN="src-tauri/target/universal-apple-darwin/release/kura"
 fi
 
 # 사이드카(kura-mcp · kura-cli)를 **자격증명을 싣기 전에** 만든다 (개발 34).
@@ -566,23 +575,50 @@ fi
 # Kura.app 을 서명 확인 후 exec 한다.
 ./scripts/build-mcpb.sh || die "확장(.mcpb) 빌드 실패"
 
-# 자격증명은 이 빌드 한 번에만 넘긴다(위 0번 주석 참고). 사전 점검에서 한 세트가
-# 온전한지 이미 확인했으므로 여기서는 있는 쪽을 그대로 싣는다.
-BUILD_ENV=("APPLE_SIGNING_IDENTITY=$CRED_IDENTITY" "KURA_SIDECARS_STRICT=1")
+# ── 자격증명 격리 (개발 44 — 개발 30 보류 P1, 코덱스가 P0 으로 올린 것) ──────
+# 빌드를 두 번으로 쪼갠다. 자격증명은 **B 에만** 실린다.
+#
+#   A) tauri build --no-bundle   컴파일 전부. beforeBuildCommand(npm run sidecars ·
+#      mcpb · tsc · vite)와 src-tauri 의존성들의 build.rs 가 여기서 돈다.
+#      → 이 단계 환경에 비밀이 하나도 없다.
+#   B) tauri bundle              .app/.dmg 패키징 + 서명 + 공증 + 업데이트 tar·서명.
+#      → 여기서 도는 남의 코드는 Tauri 번들러 자신과 codesign · notarytool 뿐이다.
+#
+# 왜 필요했나: 지금까지는 한 번의 `tauri build` 에 전부 실었다. 그러면 npm 의존성 하나,
+# 크레이트 build.rs 하나가 환경에서 **업데이트 서명 개인키**를 그대로 읽을 수 있다.
+# 그 키가 새면 이미 깔린 지갑들에 우리 이름으로 업데이트를 밀어 넣을 수 있다 —
+# 이 리포에서 제일 아픈 유출이라, 앱 암호보다 이쪽이 이 격리의 진짜 이유다.
+#
+# 🔴 tauri.conf.json 에 `beforeBundleCommand` 를 넣으면 그 명령은 B 에서 돌아 이 격리가
+# 그만큼 깨진다. 지금은 없다 — 넣게 되면 "이 명령은 비밀을 본다"는 걸 알고 넣을 것.
+# (사이드카를 미리 빌드해 두는 아래 순서도 같은 목적의 장치였다. 이제 A 가 그걸 덮는다.)
+
+# ── A. 컴파일 — 환경에 자격증명 없음 ────────────────────────────────────────
+rm -rf "$BUNDLE_DIR/macos" "$BUNDLE_DIR/dmg"
+OWNS_OUTPUT=1   # 폴더를 비웠으니 이제부터 그 안에 있는 건 전부 이번 실행이 만든 것
+env KURA_SIDECARS_STRICT=1 npm run tauri build -- "${COMPILE_ARGS[@]}"
+
+# B 는 A 가 남긴 실행 파일을 집어 든다. 없으면 --no-bundle 이 우리가 생각한 자리에
+# 안 놨다는 뜻이고, 그대로 두면 자격증명을 실은 채 엉뚱한 실패를 본다 → 먼저 멈춘다.
+[[ -f "$APP_BIN" ]] || die \
+  "컴파일은 끝났는데 실행 파일이 없다: $APP_BIN
+     tauri build --no-bundle 의 산출 위치가 바뀐 것 같다. 자격증명을 싣기 전에 멈춘다."
+
+# ── B. 번들·서명·공증 — 자격증명은 여기서만 ─────────────────────────────────
+# 사전 점검에서 한 세트가 온전한지 이미 확인했으므로 여기서는 있는 쪽을 그대로 싣는다.
+BUNDLE_ENV=("APPLE_SIGNING_IDENTITY=$CRED_IDENTITY")
 if [[ $NOTARIZE -eq 1 ]]; then
   if [[ -n "$CRED_API_KEY" ]]; then
-    BUILD_ENV+=("APPLE_API_KEY=$CRED_API_KEY" "APPLE_API_ISSUER=$CRED_API_ISSUER" "APPLE_API_KEY_PATH=$CRED_API_KEY_PATH")
+    BUNDLE_ENV+=("APPLE_API_KEY=$CRED_API_KEY" "APPLE_API_ISSUER=$CRED_API_ISSUER" "APPLE_API_KEY_PATH=$CRED_API_KEY_PATH")
   else
-    BUILD_ENV+=("APPLE_ID=$CRED_APPLE_ID" "APPLE_PASSWORD=$CRED_PASSWORD" "APPLE_TEAM_ID=$CRED_TEAM_ID")
+    BUNDLE_ENV+=("APPLE_ID=$CRED_APPLE_ID" "APPLE_PASSWORD=$CRED_PASSWORD" "APPLE_TEAM_ID=$CRED_TEAM_ID")
   fi
 fi
 if [[ $PLAIN_DMG -eq 1 ]]; then
-  BUILD_ENV+=("CI=true")   # bundle_dmg.sh 의 Finder 단계를 건너뛰게 하는 Tauri 쪽 스위치
+  BUNDLE_ENV+=("CI=true")   # bundle_dmg.sh 의 Finder 단계를 건너뛰게 하는 Tauri 쪽 스위치
 fi
-# 업데이트 서명 키(개발 31). 번들러가 .app.tar.gz 를 만들면서 직접 서명하므로 빌드에 넘길
-# 수밖에 없다 — 즉 **개발 30 보류 P1(자격증명이 빌드 전체에 상속된다)이 이 키에도 그대로
-# 적용된다.** beforeBuildCommand·Cargo build script·npm 의존성이 이 값을 읽을 수 있다.
-# 격리 세션에서 애플 자격증명과 함께 손볼 것(DEVLOG 개발 31 "다음").
+# 업데이트 서명 키(개발 31). 번들러가 .app.tar.gz 를 만들면서 직접 서명하므로 번들 단계에
+# 넘길 수밖에 없다 — 넘기는 범위를 이 한 단계로 좁힌 게 위 격리다.
 #
 # 🔴 번들러가 읽는 변수는 `TAURI_SIGNING_PRIVATE_KEY` **하나뿐**이다.
 # `TAURI_SIGNING_PRIVATE_KEY_PATH` 는 `tauri signer sign` 하위명령 전용이라 빌드에서는
@@ -598,12 +634,10 @@ if [[ -n "$CRED_UPDATER_KEY_PATH" ]]; then
 else
   UPDATER_KEY_VALUE="$CRED_UPDATER_KEY"
 fi
-BUILD_ENV+=("TAURI_SIGNING_PRIVATE_KEY=$UPDATER_KEY_VALUE")
-BUILD_ENV+=("TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$CRED_UPDATER_PASS")
+BUNDLE_ENV+=("TAURI_SIGNING_PRIVATE_KEY=$UPDATER_KEY_VALUE")
+BUNDLE_ENV+=("TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$CRED_UPDATER_PASS")
 
-rm -rf "$BUNDLE_DIR/macos" "$BUNDLE_DIR/dmg"
-OWNS_OUTPUT=1   # 폴더를 비웠으니 이제부터 그 안에 있는 건 전부 이번 실행이 만든 것
-env "${BUILD_ENV[@]}" npm run tauri build -- "${BUILD_ARGS[@]}"
+env "${BUNDLE_ENV[@]}" npm run tauri bundle -- "${BUNDLE_ARGS[@]}"
 
 # 빌드 전에 한 번 본 것으로는 부족하다. 빌드·공증은 몇 분씩 걸리고 그 사이에 편집기가
 # 저장을 하거나 cargo 가 lockfile 을 갱신할 수 있는데, 그러면 "태그 = 배포본 소스" 라는
@@ -867,8 +901,32 @@ if [[ $NOTARIZE -eq 1 ]]; then
   info "DMG 티켓 확인"
 
   # 받는 사람의 맥이 실제로 통과시키는지 — Gatekeeper 판단을 그대로 물어본다.
-  spctl -a -t open --context context:primary-signature -vvv "$DMG_PATH" 2>&1 | sed 's/^/  /' \
-    || die "Gatekeeper 가 DMG 를 거부했다 — 위 사유 참고"
+  #
+  # 🔴 갓 만든 파일에는 com.apple.quarantine 이 없다. 브라우저로 받은 파일에는 붙어 있고,
+  # **경고 창을 띄우는 건 그 딱지**다. 그래서 그냥 물어보면 "받는 사람 상태"가 아니다 —
+  # 개발 28 이 손으로 딱지를 붙여 재현했던 그 검사를 여기 굳혀 둔다 (개발 44).
+  # 다른 맥에서 실제로 열어보는 것의 대역이다(그건 여전히 안 해 본 항목).
+  #
+  # 딱지는 **사본**에 붙인다. 내보낼 DMG 에 직접 붙였다가 그 사이에 죽으면, 딱지가 붙은
+  # 채로 배포되는 파일이 남는다.
+  QDMG="$(mktemp -d)/$(basename "$DMG_PATH")"
+  cp "$DMG_PATH" "$QDMG" || die "Gatekeeper 재현용 사본을 못 만들었다"
+  # 사파리로 내려받은 것과 같은 모양의 값 (플래그;시각;앱;UUID).
+  xattr -w com.apple.quarantine "0083;00000000;Safari;$(uuidgen)" "$QDMG" \
+    || die "quarantine 딱지를 못 붙였다"
+  GK_OUT="$(spctl -a -t open --context context:primary-signature -vv "$QDMG" 2>&1)" || {
+    printf '%s\n' "$GK_OUT" | sed 's/^/  /'
+    rm -rf "$(dirname "$QDMG")"
+    die "Gatekeeper 가 DMG 를 거부했다 — 받는 사람 맥에서 경고 없이 안 열린다"
+  }
+  rm -rf "$(dirname "$QDMG")"
+  # 종료 코드만 보면 부족하다: "왜 통과했는지"가 공증 때문이어야 한다. 이 문구가 없으면
+  # 공증이 아니라 다른 이유로 통과한 것이고, 그건 다른 맥에서 재현되지 않는다.
+  grep -q "source=Notarized Developer ID" <<<"$GK_OUT" || {
+    printf '%s\n' "$GK_OUT" | sed 's/^/  /'
+    die "Gatekeeper 는 통과시켰는데 근거가 공증이 아니다 — 위 source 를 볼 것"
+  }
+  info "Gatekeeper 재현 통과 (quarantine 붙인 사본 · source=Notarized Developer ID)"
 fi
 
 # ── 6. latest.json (개발 31) ────────────────────────────────────────────────
@@ -1250,6 +1308,7 @@ EOF
 
   # 8-4. Homebrew 캐스크 ----------------------------------------------------
   step "Homebrew 캐스크"
+  TAP_PUSHED=0   # 이번 실행이 tap 에 뭔가 밀었는가 (8-5 의 CI 를 볼지 가른다)
   # 원격·브랜치를 명시한다 — 추적 정보 설정에 기대면 clone 방식에 따라 그냥 실패한다(실측).
   git -C "$TAP_DIR" pull --ff-only -q origin main || die "tap 을 최신으로 못 받았다: $TAP_DIR"
   [[ -z "$(git -C "$TAP_DIR" status --porcelain)" ]] || die "tap 에 변경이 생겼다: $TAP_DIR"
@@ -1324,6 +1383,7 @@ PY
     git -C "$TAP_DIR" add Casks/kura.rb || die "tap add 실패"
     git -C "$TAP_DIR" commit -q -m "kura $VERSION_CONF" || die "tap 커밋 실패"
     git -C "$TAP_DIR" push -q origin main || die "tap 푸시 실패 (커밋은 로컬에 남아 있다: $TAP_DIR)"
+    TAP_PUSHED=1
     info "캐스크 $VERSION_CONF 푸시됨 ($TAP_DIR)"
   else
     info "캐스크는 이미 $VERSION_CONF 다 — 커밋할 것 없음"
@@ -1336,13 +1396,56 @@ PY
   if [[ "$TAP_AHEAD_END" != "0" ]]; then
     git -C "$TAP_DIR" push -q origin main || die \
       "tap 에 안 밀린 커밋이 $TAP_AHEAD_END 개 남았는데 푸시하지 못했다: $TAP_DIR"
+    TAP_PUSHED=1
     info "tap 의 안 밀린 커밋 $TAP_AHEAD_END 개를 밀었다"
+  fi
+
+  # 8-5. tap CI (개발 44) --------------------------------------------------
+  # 캐스크를 밀면 tap 에서 brew test-bot 이 돈다. 개발 36·40 은 **빨간 채로 지나가서**
+  # 나중에 메일로 알았고, 개발 43 은 손으로 `gh run watch` 를 쳐서 봤다. 손으로 하는 건
+  # 잊으니 여기에 붙인다.
+  #
+  # 🔴 실패해도 die 하지 않는다. 여기까지 왔으면 태그·릴리스·캐스크가 **이미 다 나갔다** —
+  # 되돌릴 수 없는 일이 끝난 뒤에 0 아닌 종료코드를 내면 "배포가 실패했다"로 읽히고,
+  # 실제로 실패한 배포와 구분이 안 된다. 대신 아래 "배포 완료" 요약에 상태를 박는다.
+  TAP_CI="안 봄 (캐스크에 밀 게 없었다)"
+  if [[ $TAP_PUSHED -eq 1 ]]; then
+    step "tap CI"
+    TAP_HEAD="$(git -C "$TAP_DIR" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -z "$TAP_HEAD" ]]; then
+      TAP_CI="확인 못 함 (tap HEAD 를 못 읽었다)"
+      warn "$TAP_CI"
+    else
+      # 푸시 직후에는 런이 아직 안 생겼을 수 있다 — 최대 90초까지 기다린다.
+      TAP_RUN=""
+      for _ in $(seq 1 18); do
+        TAP_RUN="$(gh run list --repo "$TAP_REPO_SLUG" --commit "$TAP_HEAD" --limit 1 \
+          --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)"
+        [[ -n "$TAP_RUN" ]] && break
+        sleep 5
+      done
+      if [[ -z "$TAP_RUN" ]]; then
+        TAP_CI="런을 못 찾음 — 손으로 볼 것: https://github.com/$TAP_REPO_SLUG/actions"
+        warn "$TAP_CI"
+      else
+        info "런 $TAP_RUN 을 붙어서 본다 (Ctrl-C 로 빠져나와도 배포는 이미 끝났다)"
+        # --exit-status: 런이 실패로 끝나면 0 아닌 값. 실패는 여기서 삼키고 요약에 남긴다.
+        if gh run watch "$TAP_RUN" --repo "$TAP_REPO_SLUG" --exit-status; then
+          TAP_CI="초록"
+          info "tap CI 통과"
+        else
+          TAP_CI="🔴 빨강 — https://github.com/$TAP_REPO_SLUG/actions/runs/$TAP_RUN"
+          warn "tap CI 가 실패했다. 캐스크는 이미 밀렸다 — 위 런을 열어 볼 것"
+        fi
+      fi
+    fi
   fi
 
   step "배포 완료"
   cat <<EOF
   릴리스   https://github.com/$GH_REPO_SLUG/releases/tag/$VERSION_TAG
   캐스크   brew upgrade --cask kura   (새로 깔 사람은 brew install --cask dinggi5/tap/kura)
+  tap CI   $TAP_CI
 
   다음 단계 (개발 37): MCP 공식 레지스트리에 이 버전을 발행할 것
     ./scripts/publish-registry.sh    (server.json 갱신분은 커밋)
