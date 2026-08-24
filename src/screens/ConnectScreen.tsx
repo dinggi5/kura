@@ -37,26 +37,39 @@ function CodeBox({ text }: { text: string }) {
   );
 }
 
-/** 임시 실행(디스크 이미지 등) + 설치본이 다른 버전일 때의 인라인 경고
- *  (코덱스 개발38 2차 P2). 등록될 kura-mcp 는 **설치본** 안의 것이라, 지금 이 화면을
- *  그리는 앱과 AI 에 실제로 붙을 바이너리가 갈린다 — 파일 IPC 가 어긋날 수 있다.
- *  막지는 않는다(설치본 경로가 어차피 오래 갈 유일한 경로다). 말해 줄 뿐. */
+/** 임시 실행(디스크 이미지 등) + 설치본이 다른 버전일 때의 경고
+ *  (코덱스 개발38 2차 P2 · 자리는 개발44 2차 P2).
+ *
+ *  🔴 클라이언트 카드 **안**에 두면 안 된다. 처음엔 "등록 안 된 Claude Code" 와
+ *  "다른 AI 앱" 두 갈래에만 넣었는데, 정작 흔한 경우들이 다 빠졌다:
+ *    - 이미 등록돼 있으면(cli_registered) 그 카드는 "등록돼 있어요" 한 줄로 끝난다.
+ *    - Claude 데스크톱은 확장 런처가 **설치본**의 kura-mcp 를 찾아 exec 하므로
+ *      똑같이 영향을 받는데 그 카드에는 아예 안 그렸다.
+ *  버전이 갈린다는 건 특정 클라이언트가 아니라 **이 맥의 상태**다 → 화면 위에 한 번. */
 function StaleInstallNote({ installed, running }: { installed: string; running: string }) {
   return (
-    <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
-      {t(
-        <>
-          지금 이 앱은 <b>{running}</b>인데, 등록될 경로는 이미 설치돼 있는 <b>{installed}</b>{" "}
-          쪽이에요. AI에는 설치본이 붙어요 — 이 앱을 <b>응용 프로그램</b> 폴더에 덮어써서 두
-          버전을 맞춘 뒤 연결하는 게 좋아요.
-        </>,
-        <>
-          This app is <b>{running}</b>, but the path being registered belongs to the installed{" "}
-          <b>{installed}</b>. The AI will talk to that installed copy — copy this app over the one
-          in <b>Applications</b> first so the two match, then connect.
-        </>,
+    <div
+      className={cn(
+        "px-4 py-3 rounded-[var(--radius-card)]",
+        "bg-amber-50 dark:bg-amber-950/30",
+        "border border-amber-200 dark:border-amber-900/50",
       )}
-    </p>
+    >
+      <p className="text-[12px] leading-relaxed text-amber-800 dark:text-amber-300">
+        {t(
+          <>
+            지금 이 앱은 <b>{running}</b>인데, 이 맥에 설치된 Kura는 <b>{installed}</b>이에요.
+            어느 쪽으로 연결하든 AI는 <b>설치본</b>의 MCP를 실행해요 — 이 앱을{" "}
+            <b>응용 프로그램</b> 폴더에 덮어써서 두 버전을 맞춘 뒤 쓰는 게 좋아요.
+          </>,
+          <>
+            This app is <b>{running}</b>, but the Kura installed on this Mac is <b>{installed}</b>.
+            However you connect, the AI runs the MCP from the <b>installed</b> copy — copy this app
+            over the one in <b>Applications</b> so the two match, then connect.
+          </>,
+        )}
+      </p>
+    </div>
   );
 }
 
@@ -238,6 +251,11 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
           )}
         </section>
 
+        {/* 이 맥의 상태 경고 — 클라이언트와 무관하므로 카드 밖, 한 번만 */}
+        {staleInstall && status && (
+          <StaleInstallNote installed={staleInstall} running={status.app_version} />
+        )}
+
         {/* Claude 데스크톱 — 동봉 확장(.mcpb) 열기 = 설치 다이얼로그 직행 */}
         <ClientCard
           icon={<MessageSquare size={14} />}
@@ -361,9 +379,6 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                       "One button registers it. From the next claude run on, it works in any folder.",
                     )}
               </p>
-              {staleInstall && status && (
-                <StaleInstallNote installed={staleInstall} running={status.app_version} />
-              )}
               <button
                 type="button"
                 onClick={() => void connectCode()}
@@ -468,9 +483,6 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                 "Any app that speaks MCP can use this. Register this path as the server:",
               )}
             </p>
-            {staleInstall && status && (
-              <StaleInstallNote installed={staleInstall} running={status.app_version} />
-            )}
             <CodeBox text={mcpPath} />
             <div className="flex items-center justify-between gap-2">
               <button
