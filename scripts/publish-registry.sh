@@ -119,7 +119,12 @@ fi
 #
 # 만료를 "발행이 실패하면 안다"로 두지 않고 **미리 재는** 이유: 발행은 되돌릴 수 없는
 # 원격 부작용이라, 만료된 토큰으로 절반쯤 나가는 것보다 쏘기 전에 아는 게 낫다.
-TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/mcp-publisher/token.json"
+# 🔴 XDG_CONFIG_HOME 을 존중하면 **안 된다**. mcp-publisher 1.8.1 은 그 변수를 무시하고
+# 언제나 ~/.config/mcp-publisher/token.json 을 읽고 쓴다(코덱스 1차 P2 — 임시 HOME·XDG 로
+# 실측해 보였다: XDG 쪽에만 토큰을 두면 "not authenticated" + "token storage moved to
+# ~/.config/mcp-publisher/" 를 뱉는다). XDG 를 쓰는 환경에서 이 경로를 XDG 로 잡으면,
+# 로그인은 성공하는데 우리가 엉뚱한 파일을 다시 재서 0 이 나오고 **발행이 영영 막힌다.**
+TOKEN_FILE="$HOME/.config/mcp-publisher/token.json"
 
 # 남은 수명(초). 파일이 없거나 모양이 다르면 0 = "없는 것으로 친다" → 로그인시킨다.
 token_seconds_left() {

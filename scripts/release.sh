@@ -1434,8 +1434,25 @@ PY
           TAP_CI="초록"
           info "tap CI 통과"
         else
-          TAP_CI="🔴 빨강 — https://github.com/$TAP_REPO_SLUG/actions/runs/$TAP_RUN"
-          warn "tap CI 가 실패했다. 캐스크는 이미 밀렸다 — 위 런을 열어 볼 것"
+          # watch 가 0 아닌 값을 내는 이유는 둘이다: 런이 실패로 끝났거나, watch 자체가
+          # (네트워크·checks:read 권한) 죽었거나. 후자를 "빨강"이라 부르면 멀쩡한 배포에
+          # 거짓 경보를 단다 (코덱스 1차 P2) → GitHub 에 결론을 직접 물어보고,
+          # **GitHub 이 실패라고 말할 때만** 빨강이라 쓴다.
+          TAP_URL="https://github.com/$TAP_REPO_SLUG/actions/runs/$TAP_RUN"
+          TAP_CONCL="$(gh run view "$TAP_RUN" --repo "$TAP_REPO_SLUG" \
+            --json status,conclusion --jq '"\(.status)/\(.conclusion)"' 2>/dev/null || true)"
+          case "$TAP_CONCL" in
+            completed/success)
+              TAP_CI="초록 (watch 는 끊겼지만 런은 성공)"
+              info "$TAP_CI" ;;
+            completed/*)
+              TAP_CI="🔴 ${TAP_CONCL#completed/} — $TAP_URL"
+              warn "tap CI 가 실패했다. 캐스크는 이미 밀렸다 — 위 런을 열어 볼 것" ;;
+            *)
+              # 아직 안 끝났거나 조회조차 실패 — 모르는 걸 빨강이라 하지 않는다.
+              TAP_CI="확인 못 함 (${TAP_CONCL:-조회 실패}) — $TAP_URL"
+              warn "tap CI 결과를 확인하지 못했다: $TAP_URL" ;;
+          esac
         fi
       fi
     fi
