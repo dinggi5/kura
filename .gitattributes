@@ -1,0 +1,2 @@
+# GitHub 언어 통계에서 배포 스크립트 제외 (제품 코드 = Rust + TypeScript)
+scripts/* linguist-vendored
