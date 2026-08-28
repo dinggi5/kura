@@ -273,8 +273,8 @@ export const HELP_SECTIONS: HelpSection[] = [
           다른 표준 지갑(BIP-39)에 넣으면 돼요.
         </p>
         <p>
-          <b className={em}>12단어 없이 지갑 파일을 지우면 자산을 영영 잃어요.</b> 종이나
-          비밀번호 관리자에 안전하게 적어두세요.
+          <b className={em}>12단어 없이 지갑 파일을 지우면 자산을 영영 잃어요.</b> 종이에
+          적어 안전한 곳에 보관하세요.
         </p>
         <p className="text-[var(--color-ink-300)]">
           헤더의 열쇠 버튼에서 언제든 다시 볼 수 있어요.
@@ -293,7 +293,7 @@ export const HELP_SECTIONS: HelpSection[] = [
         </p>
         <p>
           <b className={em}>Delete the wallet file without those words and the funds are gone for
-          good.</b> Write them on paper or keep them in a password manager.
+          good.</b> Write them on paper and keep it somewhere safe.
         </p>
         <p className="text-[var(--color-ink-300)]">
           The key button in the header shows them again any time.

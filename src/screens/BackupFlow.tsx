@@ -5,14 +5,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { motion } from "framer-motion";
-import { ArrowLeft, Check, Copy, Eye, EyeOff, KeyRound, Loader2 } from "lucide-react";
+import { ArrowLeft, Check, Eye, EyeOff, KeyRound, Loader2 } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { useCopy } from "@/lib/useCopy";
 import {
   cardBase,
   enter,
   primaryBtn,
-  secondaryBtn,
   shell,
   FlowIcon,
   PwInput,
@@ -59,7 +57,6 @@ export function BackupFlow({
   const [error, setError] = useState<string | null>(null);
   const [words, setWords] = useState<string[] | null>(null);
   const [revealed, setRevealed] = useState(false);
-  const [copied, copy] = useCopy();
   const [challenges, setChallenges] = useState<Challenge[] | null>(null);
 
   const reveal = useCallback(async (password: string) => {
@@ -170,7 +167,7 @@ export function BackupFlow({
               )}
             </p>
             <ul className="mt-5 space-y-2 text-[12px] leading-relaxed text-[var(--color-ink-500)]">
-              <li>{t("• 종이에 적거나 비밀번호 관리자에 저장하세요.", "• Write them on paper or keep them in a password manager.")}</li>
+              <li>{t("• 종이에 적어 안전한 곳에 보관하세요.", "• Write them on paper and keep it somewhere safe.")}</li>
               <li>{t("• 누구에게도 보여주지 마세요 — 단어 = 자산.", "• Never show them to anyone — the words are the money.")}</li>
               <li>{t("• 스크린샷·캡처는 피하세요.", "• Avoid screenshots and screen recordings.")}</li>
             </ul>
@@ -198,19 +195,23 @@ export function BackupFlow({
               </button>
             </div>
 
+            {/* 클립보드 경로를 두지 않는다 (개발 46) — 복사 버튼은 물론 드래그 선택도 막는다
+                (select-none 상시). 클립보드에 들어간 시드는 클립보드 매니저가 디스크에 평문으로
+                남기고, 유니버설 클립보드로 근처 아이폰·아이패드에 자동 전파된다 — "키는 이 맥을
+                안 떠난다"는 약속이 조용히 깨지는 경로라 경고가 아니라 경로 제거로 막는다. */}
             <div className="relative mt-4">
-              <div className={cn("grid grid-cols-2 gap-2 transition-all", !revealed && "blur-sm select-none")}>
+              <div className={cn("grid grid-cols-2 gap-2 transition-all select-none", !revealed && "blur-sm")}>
                 {words.map((w, i) => (
                   <div
                     key={i}
                     className={cn(
-                      "flex items-center gap-2.5 h-10 px-3 rounded-[10px]",
+                      "flex items-center gap-2.5 h-11 px-3 rounded-[10px]",
                       "bg-[var(--color-ivory-100)] dark:bg-[var(--color-night-900)]",
                       "border border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)]",
                     )}
                   >
                     <span className="w-4 text-right num text-[11px] text-[var(--color-ink-300)]">{i + 1}</span>
-                    <span className="font-mono text-[13px] text-[var(--color-ink-900)] dark:text-[#E8E5DD]">{w}</span>
+                    <span className="font-mono text-[14px] text-[var(--color-ink-900)] dark:text-[#E8E5DD]">{w}</span>
                   </div>
                 ))}
               </div>
@@ -227,21 +228,10 @@ export function BackupFlow({
               )}
             </div>
 
-            <button type="button" onClick={() => copy(words.join(" "))} className={cn(secondaryBtn, "mt-4 w-full")}>
-              {copied ? (
-                <>
-                  <Check size={13} className="text-[var(--color-accent)]" /> {t("복사됨", "Copied")}
-                </>
-              ) : (
-                <>
-                  <Copy size={13} /> {t("12단어 복사", "Copy the 12 words")}
-                </>
-              )}
-            </button>
-            <p className="mt-2 text-center text-[11px] text-[var(--color-ink-300)]">
+            <p className="mt-4 text-center text-[11px] leading-relaxed text-[var(--color-ink-300)]">
               {t(
-                "클립보드는 다른 앱이 읽을 수 있어요. 저장 후 지우는 걸 권장해요.",
-                "Other apps can read the clipboard. Clear it once you've saved them.",
+                "번호 순서대로 종이에 적어 주세요 — 복구엔 순서까지 맞아야 해요.",
+                "Write them on paper in numbered order — recovery needs the order too.",
               )}
             </p>
 

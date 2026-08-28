@@ -35,7 +35,7 @@ import { chooseLang, lang, t, type Lang } from "@/lib/i18n";
 const RPC_CUSTOM = "__custom__";
 
 // Settings 의 boolean 필드만 — toggle() 이 실수로 문자열/숫자 필드를 뒤집지 못하게 좁힌다(코덱스 리뷰 low).
-type BoolSettingKey = "lock_on_blur" | "notify_auto" | "auto_trusted_only";
+type BoolSettingKey = "lock_on_blur" | "notify_auto" | "notify_hide_amount" | "auto_trusted_only";
 
 // RPC 프리셋은 활성 체인에 따라 달라진다(공식·PublicNode URL이 체인별로 다름).
 // ①공식 ②로그 안 남긴다 표방하는 대체 공개 RPC ③직접 입력(본인 키/노드 = 진짜 프라이버시).
@@ -334,6 +334,19 @@ export function SettingsScreen({
                   checked={s.notify_auto}
                   onToggle={() => toggle("notify_auto")}
                 />
+                {/* 알림 금액 숨기기 (개발 46) — macOS 알림은 잠금 화면·화면 공유에도 뜬다.
+                    알림이 꺼져 있으면 의미 없는 토글이라 행 자체를 접는다. */}
+                {s.notify_auto && (
+                  <ToggleRow
+                    title={t("알림에 금액 숨기기", "Hide amounts in notifications")}
+                    desc={t(
+                      "잠금 화면·화면 공유에 금액이 보이지 않게 「자율 결제」로만 알려줘요.",
+                      "Notifications say just “Autopay,” so amounts don't show on the lock screen or a shared screen.",
+                    )}
+                    checked={s.notify_hide_amount}
+                    onToggle={() => toggle("notify_hide_amount")}
+                  />
+                )}
                 {/* 자율 결제 화이트리스트 (Session 16) — 처음 보는 주소는 자율 대상에서 제외 */}
                 <ToggleRow
                   title={t("자율 결제 화이트리스트", "Autopay allowlist")}

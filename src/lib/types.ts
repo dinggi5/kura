@@ -25,6 +25,8 @@ export type Settings = {
   lock_on_blur: boolean;
   /** 자율 결제 알림: 비번 없이 자동 승인된 결제를 OS 알림으로 사후 통지. */
   notify_auto: boolean;
+  /** 알림에서 금액 숨기기 (개발 46) — 켜면 알림 제목이 금액 없이 「자율 결제」로만 뜬다. */
+  notify_hide_amount: boolean;
   /** 자율 결제는 신뢰 주소(비번으로 승인한 적 있는 주소)만. */
   auto_trusted_only: boolean;
   /** 활성 체인 ID — 84532=Base Sepolia(테스트넷) / 8453=Base 메인넷. 체인별 데이터 파일 분리. */

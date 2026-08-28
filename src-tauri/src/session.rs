@@ -196,7 +196,14 @@ pub(crate) async fn auto_approve_payment(
 
     // 실제 처리 — 긴급잠금·단일/일일 한도·내역·누적은 do_* 가 송금과 동일하게 적용.
     // 여기서 Err(잠금·한도 등)이면 요청을 치우지 않는다 → 프론트가 모달로 사람에게 넘긴다.
-    let notice = auto_pay_notice(&req.kind, &req.token, &req.amount, &req.to, &req.resource);
+    let notice = auto_pay_notice(
+        &req.kind,
+        &req.token,
+        &req.amount,
+        &req.to,
+        &req.resource,
+        settings.notify_hide_amount,
+    );
     let result = match req.kind.as_str() {
         "x402" => {
             let payment = do_sign_x402(&signer, req.to.clone(), req.amount.clone(), None).await?;

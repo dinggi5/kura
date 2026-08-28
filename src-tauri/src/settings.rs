@@ -67,6 +67,11 @@ pub(crate) struct Settings {
     /// (자율 = 보호자가 모르는 새 돈이 나가는 유일한 경로라, 끄는 쪽이 명시적 선택이어야 함).
     #[serde(default = "default_true")]
     pub(crate) notify_auto: bool,
+    /// 자율 결제 알림에서 금액 숨기기 (개발 46, 프라이버시). macOS 알림은 잠금 화면에도
+    /// 뜨고 화면 공유·녹화에도 잡힌다 — 켜면 제목이 금액 없이 "자율 결제"로만 나간다.
+    /// 기본 꺼짐(기존 동작 보존 — 금액이 한눈에 보이는 쪽이 사후 인지엔 더 낫다).
+    #[serde(default)]
+    pub(crate) notify_hide_amount: bool,
     /// 자율 결제는 신뢰 주소(비번으로 승인한 적 있는 받는 주소)만. 기본 켜짐 —
     /// 끄면 한도 이하 금액이면 처음 보는 주소에도 비번 없이 나간다.
     #[serde(default = "default_true")]
@@ -133,6 +138,7 @@ impl Default for Settings {
             rpc_url: String::new(), // 빈 값 = 활성 체인 공식 RPC 따라감 (effective_rpc 가 해석)
             lock_on_blur: false,
             notify_auto: true,
+            notify_hide_amount: false,
             auto_trusted_only: true,
             // 신규 기본 = 메인넷 (개발 39, 사장 지시). 이 지갑의 용도가 "AI 가 실제 결제를
             // 하는 지갑"이라 첫 화면부터 진짜 지갑이어야 한다. 실돈 안전은 체인이 아니라
@@ -519,6 +525,7 @@ mod tests {
         assert!(s.rpc_url.is_empty()); // 옛 파일엔 RPC 없음 → 빈 값(=공식 폴백)
         assert!(!s.lock_on_blur);
         assert!(s.notify_auto); // 알림은 기본 켜짐 (끄는 쪽이 명시적 선택)
+        assert!(!s.notify_hide_amount); // 금액 숨기기는 기본 꺼짐 (개발 46 — 기존 동작 보존)
         assert!(s.auto_trusted_only); // 신뢰 주소 가드도 기본 켜짐 (안전 쪽 디폴트)
         assert_eq!(s.chain_id, BASE_SEPOLIA.chain_id); // 옛 파일엔 chain_id 없음 → 테스트넷
                                                        // 개발 31 필드도 옛 파일에서 안전하게 온다. autostart 기본은 **None**(false 아님) —
