@@ -27,6 +27,7 @@ RPC로 잔액을 조회하며, 결제는 GUI 앱에 "요청"만 한다. **비밀
 | 거래 내역 | `get_history` | `kura history [--limit N]` | 불필요 |
 | 송금 요청 | `request_payment` | `kura pay <주소> <금액> [--token USDC\|ETH] [--memo "사유"]` | **GUI 승인** |
 | x402 유료 리소스 | `x402_fetch` | `kura fetch <URL> [--memo "사유"]` | **GUI 승인** |
+| 에이전트 신원 조회 | `lookup_agent` | (CLI 없음 — `kura fetch --agent N` 으로 대조) | 불필요 |
 
 읽기 명령은 즉시. 결제 명령(`pay`/`fetch`)은 지갑 앱이 팝업으로 사람 승인을 받아야만
 실행된다(최대 5분 대기). 단일/일일 한도·긴급잠금·화이트리스트는 GUI 가 강제한다.
@@ -50,6 +51,7 @@ kura balance --json                    # 스크립트용 JSON (MCP 와 동일 �
 # 결제 — 지갑 앱이 떠 있어야 하고, 팝업에서 비번 승인 필요
 kura pay 0xRecipient... 1.5 --memo "데이터 API"
 kura fetch https://example.com/paid --memo "리포트 1건"
+kura fetch https://example.com/paid --agent 1   # ERC-8004 번호를 함께 넘겨 승인 창에서 대조
 ```
 
 `--json` 은 모든 명령에서 기계가 읽는 출력을 준다(읽기는 구조체, 결제는 MCP 와 동일 JSON).

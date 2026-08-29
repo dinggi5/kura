@@ -51,7 +51,7 @@ You'll need [Rust](https://rustup.rs), [Node.js](https://nodejs.org) (20.19+ or 
 ```bash
 git clone https://github.com/dinggi5/kura.git
 cd kura
-git checkout v0.2.1   # the same source as the release. Omit it to get the latest development code
+git checkout v0.3.0   # the same source as the release. Omit it to get the latest development code
 npm ci                # installs exactly what package-lock.json says (install may bump versions)
 
 # run it in development mode
