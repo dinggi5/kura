@@ -96,8 +96,9 @@ export type AgentTrust = {
   /** 실제 결제 리소스의 도메인. */
   resource_domain: string;
   domain_check: CheckResult;
-  /** 피드백을 남긴 주소 수. 누구나 남길 수 있다(시빌 가능). */
-  feedback_clients: number;
+  /** 피드백을 남긴 주소 수. 누구나 남길 수 있다(시빌 가능).
+   *  null = 못 읽음(0 과 구별 — 0 은 "아무도 안 남겼다", null 은 "모른다"). */
+  feedback_clients: number | null;
 };
 
 export type PaymentRequest = {

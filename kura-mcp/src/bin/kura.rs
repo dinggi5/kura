@@ -77,7 +77,7 @@ struct Cli {
 }
 
 /// 값을 받는 옵션들(`--key value` 또는 `--key=value`). 나머지 `--flag` 는 불리언.
-const VALUE_OPTS: [&str; 3] = ["token", "memo", "limit"];
+const VALUE_OPTS: [&str; 4] = ["token", "memo", "limit", "agent"];
 
 enum Parsed {
     Run(Cli),
@@ -759,6 +759,21 @@ mod tests {
             parse(&["pay".into(), "--help".into()]),
             Parsed::Help
         ));
+    }
+
+    /// `--agent` 는 값을 받는 옵션이다 — VALUE_OPTS 에 없으면 두 형태 모두 "알 수 없는 옵션"
+    /// 으로 튕겨서, 사용법에 적어 둔 명령이 통째로 죽는다(코덱스 개발47 1차 P1 — 실제로 죽어 있었다).
+    #[test]
+    fn parse_agent_option_both_forms() {
+        for a in [
+            vec!["fetch".into(), "u".into(), "--agent".into(), "7".into()],
+            vec!["fetch".into(), "u".into(), "--agent=7".into()],
+        ] {
+            match parse(&a) {
+                Parsed::Run(c) => assert_eq!(c.opts.get("agent").map(String::as_str), Some("7")),
+                _ => panic!("Run 이어야 한다: {a:?}"),
+            }
+        }
     }
 
     #[test]

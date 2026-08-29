@@ -26,6 +26,7 @@ use base64::{
     Engine,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::chain::active_chain;
 use crate::wallet::{effective_rpc, jigap_dir, redact_urls};
@@ -37,6 +38,12 @@ const MAX_URI_BYTES: usize = 64 * 1024;
 
 /// 표시용 이름 상한(문자). MCP 결과로만 나가지만 길이는 여기서 끊는다.
 const MAX_NAME_CHARS: usize = 120;
+
+/// 조회 전체에 거는 상한. **결제 흐름 앞에 끼는 선택 기능**이라 느린 RPC 가 결제를 무한정
+/// 붙잡으면 안 된다 — alloy 기본 HTTP 클라이언트엔 요청 타임아웃이 없어서, 연결은 되고
+/// eth_call 이 멎는 RPC 를 만나면 그대로 매달린다(코덱스 개발47 1차 P1).
+/// 넘기면 조회만 포기하고 결제는 그대로 진행된다(줄이 안 붙을 뿐).
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 sol! {
     #[sol(rpc)]
@@ -70,7 +77,9 @@ pub struct AgentRecord {
     /// 등록 문서가 스스로 밝힌 이름(data: URI 일 때만). **승인 창엔 쓰지 않는다.**
     pub declared_name: String,
     /// 피드백을 남긴 클라이언트 주소 수. 누구나 남길 수 있다(시빌 가능).
-    pub feedback_clients: u32,
+    /// `None` = 못 읽었다(조회 실패) — **0 과 구별한다**. 0 은 "아무도 안 남겼다"는 사실이고,
+    /// None 은 "모른다"다. 못 읽은 걸 0 으로 적으면 없는 사실을 지어내는 셈이 된다.
+    pub feedback_clients: Option<u32>,
 }
 
 /// 승인 창에 실어 보내는 **대조 결과**. 각 항목은 판정이 아니라 비교의 결과다.
@@ -86,7 +95,8 @@ pub struct AgentTrust {
     pub uri_domain: String,
     pub resource_domain: String,
     pub domain_check: String,
-    pub feedback_clients: u32,
+    /// `None` = 못 읽음(0 과 구별 — AgentRecord 쪽 주석 참고).
+    pub feedback_clients: Option<u32>,
 }
 
 /// settings.json 에서 ERC-8004 조회 스위치만 읽는 가벼운 뷰(다른 필드 무시).
@@ -282,6 +292,18 @@ pub fn trust_from(rec: &AgentRecord, pay_to: &str, resource: &str) -> AgentTrust
 /// 활성 체인의 레지스트리에서 에이전트 기록을 읽는다(읽기 전용 RPC 호출 4번).
 /// 레지스트리가 없는 체인이면 Err — 호출자가 "이 네트워크엔 없음"으로 안내한다.
 pub async fn lookup(agent_id: u64) -> Result<AgentRecord, String> {
+    tokio::time::timeout(LOOKUP_TIMEOUT, lookup_inner(agent_id))
+        .await
+        .map_err(|_| {
+            ts!(
+                "에이전트 조회가 시간 안에 끝나지 않았어요(10초).",
+                "The agent lookup didn't finish in time (10s)."
+            )
+            .to_string()
+        })?
+}
+
+async fn lookup_inner(agent_id: u64) -> Result<AgentRecord, String> {
     let chain = active_chain();
     let identity = chain.erc8004_identity.ok_or_else(|| {
         ts!(
@@ -320,7 +342,7 @@ pub async fn lookup(agent_id: u64) -> Result<AgentRecord, String> {
                     token_uri: String::new(),
                     uri_domain: String::new(),
                     declared_name: String::new(),
-                    feedback_clients: 0,
+                    feedback_clients: None,
                 });
             }
             return Err(tf!(
@@ -348,13 +370,32 @@ pub async fn lookup(agent_id: u64) -> Result<AgentRecord, String> {
         }
     );
 
-    let token_uri = uri.unwrap_or_default();
-    let wallet = wallet
-        .ok()
-        .filter(|w| *w != Address::ZERO)
-        .map(|w| w.to_string())
-        .unwrap_or_default();
-    let feedback_clients = clients.unwrap_or(0).min(u32::MAX as usize) as u32;
+    // ⚠️ 일시적 RPC 실패를 **빈 값으로 접지 않는다**(코덱스 개발47 1차 P1). 접으면
+    // "등록 지갑 없음"·"도메인 모름"이라는 **사실처럼 보이는 거짓**이 승인 창에 뜨고,
+    // 하필 그게 주소 불일치 경고를 덮어버린다. 등록된 에이전트라면 이 둘은 revert 하지
+    // 않으므로(미설정은 0x0 을 돌려준다 — Sepolia #1 실측), 여기서의 에러 = 통신 실패다.
+    let token_uri = uri.map_err(|e| {
+        tf!(
+            "에이전트 URI 조회 실패: {}",
+            "Couldn't read the agent URI: {}",
+            redact_urls(&e.to_string())
+        )
+    })?;
+    let wallet_addr = wallet.map_err(|e| {
+        tf!(
+            "등록 지갑 조회 실패: {}",
+            "Couldn't read the registered wallet: {}",
+            redact_urls(&e.to_string())
+        )
+    })?;
+    let wallet = if wallet_addr == Address::ZERO {
+        String::new() // 미설정 — 이건 진짜 "없음"이다(0x0 을 읽어냈다)
+    } else {
+        wallet_addr.to_string()
+    };
+    // 피드백은 못 읽어도 신원·대조는 살아 있으므로 조회를 실패시키지 않는다 — 대신 0 이 아니라
+    // "모름"으로 남긴다.
+    let feedback_clients = clients.ok().map(|n| n.min(u32::MAX as usize) as u32);
 
     Ok(AgentRecord {
         agent_id,
@@ -455,7 +496,7 @@ mod tests {
             token_uri: String::new(),
             uri_domain: domain.into(),
             declared_name: String::new(),
-            feedback_clients: 7,
+            feedback_clients: Some(7),
         }
     }
 
@@ -470,7 +511,7 @@ mod tests {
         assert_eq!(t.wallet_check, "match");
         assert_eq!(t.domain_check, "match");
         assert_eq!(t.resource_domain, "api.example.com");
-        assert_eq!(t.feedback_clients, 7);
+        assert_eq!(t.feedback_clients, Some(7));
     }
 
     /// 주소 바꿔치기 = 이 기능이 실제로 잡아야 하는 것.
@@ -536,7 +577,7 @@ mod tests {
         assert_eq!(rec.uri_domain, "clawnews.io");
         assert_eq!(rec.declared_name, "ClawNews");
         assert!(!rec.wallet.is_empty());
-        assert!(rec.feedback_clients > 0);
+        assert!(rec.feedback_clients.unwrap_or(0) > 0);
 
         // 같은 주소로 결제하면 "일치", 딴 주소면 "다름" — 이 기능이 실제로 하는 일.
         let ok = trust_from(&rec, &rec.wallet, "https://clawnews.io/paid");

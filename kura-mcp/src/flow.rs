@@ -276,7 +276,25 @@ pub async fn run_x402(
         })
         .unwrap_or_default();
 
-    // 3) ERC-8004 대조 (개발 47) — AI 가 번호를 준 경우에만. **여기서 실패해도 결제는 계속된다**:
+    // 3) 승인할 앱이 켜져 있는지 + single-flight. **조회보다 먼저** 본다 — 어차피 못 띄울
+    // 요청이면 레지스트리를 4번 읽어 봐야 결과를 버릴 뿐이고, 느린 RPC 만큼 즉시 줘야 할
+    // 안내가 늦어진다(코덱스 개발47 1차 P2).
+    if !payment::app_alive() {
+        return Err(ts!(
+            "지갑 앱이 실행 중이 아니에요. 앱을 켠 뒤 다시 시도하세요.",
+            "The wallet app isn't running. Open it and try again."
+        )
+        .into());
+    }
+    if payment::has_pending() {
+        return Err(ts!(
+            "이미 승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 다시 요청하세요.",
+            "A payment is already waiting for approval. Let the user handle it, then ask again."
+        )
+        .into());
+    }
+
+    // 4) ERC-8004 대조 (개발 47) — AI 가 번호를 준 경우에만. **여기서 실패해도 결제는 계속된다**:
     // 조회는 판단 재료를 하나 더 얹는 일이지 결제의 전제조건이 아니다. 못 읽으면 줄이 안 붙고,
     // 사용자는 예전과 똑같은 승인 창을 본다.
     let mut agent_note = String::new();
@@ -298,22 +316,6 @@ pub async fn run_x402(
             }
         },
     };
-
-    // 4) 승인할 앱이 켜져 있는지 + single-flight.
-    if !payment::app_alive() {
-        return Err(ts!(
-            "지갑 앱이 실행 중이 아니에요. 앱을 켠 뒤 다시 시도하세요.",
-            "The wallet app isn't running. Open it and try again."
-        )
-        .into());
-    }
-    if payment::has_pending() {
-        return Err(ts!(
-            "이미 승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 다시 요청하세요.",
-            "A payment is already waiting for approval. Let the user handle it, then ask again."
-        )
-        .into());
-    }
 
     // 5) GUI에 서명 요청 → 사람 승인 → 서명 페이로드 수신.
     let id = payment::write_x402_request(

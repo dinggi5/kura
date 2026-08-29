@@ -68,7 +68,8 @@ pub(crate) struct AgentTrust {
     pub(crate) uri_domain: String,
     pub(crate) resource_domain: String,
     pub(crate) domain_check: String,
-    pub(crate) feedback_clients: u32,
+    /// `None` = 못 읽음(0 과 구별한다 — 0 은 "아무도 안 남겼다"는 사실, None 은 "모른다").
+    pub(crate) feedback_clients: Option<u32>,
 }
 
 fn default_kind() -> String {
@@ -385,7 +386,7 @@ mod tests {
         assert_eq!(a.wallet_check, "match");
         assert_eq!(a.domain_check, "match");
         assert_eq!(a.uri_domain, "api.example.com");
-        assert_eq!(a.feedback_clients, 20);
+        assert_eq!(a.feedback_clients, Some(20));
     }
 
     /// 번호를 안 준 결제(대다수)는 `agent` 가 아예 없다 → None. 옛 요청 파일도 마찬가지.
