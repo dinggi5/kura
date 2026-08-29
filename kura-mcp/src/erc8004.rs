@@ -39,6 +39,9 @@ const MAX_URI_BYTES: usize = 64 * 1024;
 /// 표시용 이름 상한(문자). MCP 결과로만 나가지만 길이는 여기서 끊는다.
 const MAX_NAME_CHARS: usize = 120;
 
+/// 대조에 쓸 서비스 호스트 개수 상한(외부 입력이라 목록 길이를 묶어 둔다).
+const MAX_SERVICE_DOMAINS: usize = 16;
+
 /// 조회 전체에 거는 상한. **결제 흐름 앞에 끼는 선택 기능**이라 느린 RPC 가 결제를 무한정
 /// 붙잡으면 안 된다 — alloy 기본 HTTP 클라이언트엔 요청 타임아웃이 없어서, 연결은 되고
 /// eth_call 이 멎는 RPC 를 만나면 그대로 매달린다(코덱스 개발47 1차 P1).
@@ -72,8 +75,15 @@ pub struct AgentRecord {
     pub wallet: String,
     /// tokenURI 원문. 웹으로 가져오지 않는다 — 도메인만 읽는다.
     pub token_uri: String,
-    /// tokenURI 에서 읽은 **기재 도메인**(주장값). 없으면 빈 문자열.
+    /// 표시용 대표 도메인 = `service_domains` 의 첫 값(주장값). 없으면 빈 문자열.
     pub uri_domain: String,
+    /// 등록 문서가 밝힌 **서비스 호스트 전부**(주장값). 대조는 이 목록 전체와 한다 —
+    /// 등록엔 web·mcp·a2a 가 각각 다른 호스트로 올라오고(web=example.com,
+    /// x402=api.example.com), 대표 하나만 보면 **정상 결제가 「다름」으로 찍힌다**
+    /// (코덱스 개발47 3차 P2). 헛경고는 이제 자율 결제까지 막으므로 값이 비싸다.
+    /// 트레이드오프: 규격 참조용 링크(github.com 등)까지 들어와 일치 판정이 묽어질 수
+    /// 있다 — 다만 그건 "그 호스트로 실제 결제가 갈 때"만 성립해 실익이 없다.
+    pub service_domains: Vec<String>,
     /// 등록 문서가 스스로 밝힌 이름(data: URI 일 때만). **승인 창엔 쓰지 않는다.**
     pub declared_name: String,
     /// 피드백을 남긴 클라이언트 주소 수. 누구나 남길 수 있다(시빌 가능).
@@ -190,12 +200,22 @@ fn decode_data_uri(uri: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// 등록 JSON(EIP-8004 registration)에서 서비스 엔드포인트의 호스트를 고른다.
-/// `services[]` 중 name="web" 을 우선하고, 없으면 첫 http(s) 엔드포인트.
-fn domain_from_registration(json: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let services = v.get("services")?.as_array()?;
-    let pick = |web_only: bool| -> Option<String> {
+/// 등록 JSON(EIP-8004 registration)의 `services[]` 에서 http(s) 호스트를 **전부** 뽑는다.
+/// name="web" 을 앞에 둔다(표시용 대표가 되도록). 중복 제거, 개수 상한.
+fn service_domains_from_registration(json: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(services) = v.get("services").and_then(|s| s.as_array()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |h: String| {
+        if out.len() < MAX_SERVICE_DOMAINS && !out.contains(&h) {
+            out.push(h);
+        }
+    };
+    for web_only in [true, false] {
         for s in services {
             let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("");
             if web_only != name.eq_ignore_ascii_case("web") {
@@ -205,30 +225,34 @@ fn domain_from_registration(json: &str) -> Option<String> {
             let low = ep.to_ascii_lowercase();
             if low.starts_with("http://") || low.starts_with("https://") {
                 if let Some(h) = host_of(ep) {
-                    return Some(h);
+                    push(h);
                 }
             }
         }
-        None
-    };
-    pick(true).or_else(|| pick(false))
+    }
+    out
 }
 
-/// tokenURI 에서 **기재 도메인**을 읽는다. http(s) 면 그 호스트(문서는 안 가져온다),
-/// data: 면 온체인에 박힌 등록 JSON 을 파싱해 서비스 호스트를 쓴다. 그 외(ipfs: 등)는 None.
-pub fn domain_from_token_uri(uri: &str) -> Option<String> {
+/// tokenURI 에서 **기재 서비스 도메인들**을 읽는다.
+///
+/// - `data:` — 등록 JSON 이 온체인에 통째로 있다 → 파싱해서 서비스 호스트를 전부 쓴다.
+/// - `http(s)` — **빈 목록**을 돌려준다. 그 호스트는 "등록 문서가 어디 저장돼 있나"일
+///   뿐이지 에이전트의 서비스 도메인이 아니다(실측: 여러 에이전트가
+///   `marketplace.olas.network/...` 에 문서를 올려 둔다). 문서를 웹으로 가져오지 않기로
+///   한 이상 서비스 도메인은 알 수 없다 → **모름으로 남긴다**. 저장소 호스트를 도메인이라
+///   우기면 정상 결제가 「다름」으로 찍힌다(코덱스 개발47 3차 P2).
+/// - 그 외(ipfs: 등) — 빈 목록.
+pub fn domains_from_token_uri(uri: &str) -> Vec<String> {
     let s = uri.trim();
     if s.is_empty() || s.len() > MAX_URI_BYTES {
-        return None;
+        return Vec::new();
     }
-    let low = s.to_ascii_lowercase();
-    if low.starts_with("http://") || low.starts_with("https://") {
-        return host_of(s);
+    if !s.to_ascii_lowercase().starts_with("data:") {
+        return Vec::new();
     }
-    if low.starts_with("data:") {
-        return domain_from_registration(&decode_data_uri(s)?);
-    }
-    None
+    decode_data_uri(s)
+        .map(|json| service_domains_from_registration(&json))
+        .unwrap_or_default()
 }
 
 /// 등록 문서가 밝힌 이름(data: URI 일 때만). 제어문자를 걷어내고 길이를 끊는다.
@@ -271,14 +295,14 @@ pub fn trust_from(rec: &AgentRecord, pay_to: &str, resource: &str) -> AgentTrust
     };
 
     let resource_domain = host_of(resource).unwrap_or_default();
-    let domain_check = if !rec.registered || rec.uri_domain.is_empty() || resource_domain.is_empty()
-    {
-        "unknown"
-    } else if rec.uri_domain == resource_domain {
-        "match"
-    } else {
-        "differs"
-    };
+    let domain_check =
+        if !rec.registered || rec.service_domains.is_empty() || resource_domain.is_empty() {
+            "unknown"
+        } else if rec.service_domains.contains(&resource_domain) {
+            "match"
+        } else {
+            "differs"
+        };
 
     AgentTrust {
         agent_id: rec.agent_id,
@@ -345,6 +369,7 @@ async fn lookup_inner(agent_id: u64) -> Result<AgentRecord, String> {
                     wallet: String::new(),
                     token_uri: String::new(),
                     uri_domain: String::new(),
+                    service_domains: Vec::new(),
                     declared_name: String::new(),
                     feedback_clients: None,
                 });
@@ -401,12 +426,14 @@ async fn lookup_inner(agent_id: u64) -> Result<AgentRecord, String> {
     // "모름"으로 남긴다.
     let feedback_clients = clients.ok().map(|n| n.min(u32::MAX as usize) as u32);
 
+    let service_domains = domains_from_token_uri(&token_uri);
     Ok(AgentRecord {
         agent_id,
         chain_id: chain.chain_id,
         registered: true,
         owner: owner.to_string(),
-        uri_domain: domain_from_token_uri(&token_uri).unwrap_or_default(),
+        uri_domain: service_domains.first().cloned().unwrap_or_default(),
+        service_domains,
         declared_name: name_from_token_uri(&token_uri).unwrap_or_default(),
         token_uri,
         wallet,
@@ -438,15 +465,18 @@ mod tests {
         assert_eq!(host_of("https:// spaced.com"), None);
     }
 
+    /// http(s) tokenURI 의 호스트는 **문서가 놓인 곳**이지 에이전트의 서비스 도메인이 아니다.
+    /// 실측: 여러 에이전트가 marketplace.olas.network 에 문서를 올려 둔다 — 그걸 도메인이라
+    /// 우기면 그 마켓플레이스에서 산 정상 결제가 전부 「다름」이 된다(3차 P2).
     #[test]
-    fn domain_from_https_token_uri() {
-        assert_eq!(
-            domain_from_token_uri("https://marketplace.olas.network/erc8004/base/ai-agents/5").as_deref(),
-            Some("marketplace.olas.network")
+    fn https_token_uri_yields_no_claimed_domain() {
+        assert!(
+            domains_from_token_uri("https://marketplace.olas.network/erc8004/base/ai-agents/5")
+                .is_empty()
         );
-        // ipfs 등 우리가 해석 못 하는 스킴은 "모름"으로 남긴다(억지 추정 금지).
-        assert_eq!(domain_from_token_uri("ipfs://bafy…"), None);
-        assert_eq!(domain_from_token_uri(""), None);
+        // ipfs 등 해석 못 하는 스킴·빈 값도 마찬가지로 "모름".
+        assert!(domains_from_token_uri("ipfs://bafy…").is_empty());
+        assert!(domains_from_token_uri("").is_empty());
     }
 
     /// data: URI = 등록 JSON 이 온체인에 통째로 있다 → 웹 접속 없이 서비스 호스트를 읽는다.
@@ -457,26 +487,51 @@ mod tests {
             {"name":"OASF","endpoint":"https://github.com/agntcy/oasf/"},
             {"name":"web","endpoint":"https://clawnews.io"}]}"#;
         let uri = format!("data:application/json;base64,{}", B64.encode(json));
-        assert_eq!(domain_from_token_uri(&uri).as_deref(), Some("clawnews.io"));
+        // web 이 대표(첫 값)로 오되, 나머지 http(s) 호스트도 대조 대상으로 남는다.
+        assert_eq!(domains_from_token_uri(&uri), vec!["clawnews.io", "github.com"]);
         assert_eq!(name_from_token_uri(&uri).as_deref(), Some("ClawNews"));
     }
 
-    /// web 항목이 없으면 첫 http(s) 엔드포인트로 폴백한다.
+    /// web 항목이 없으면 http(s) 엔드포인트들이 그대로 목록이 된다(ipfs 등은 건너뜀).
     #[test]
-    fn domain_falls_back_to_first_http_service() {
+    fn domains_skip_non_http_endpoints() {
         let json = r#"{"services":[{"name":"a2a","endpoint":"ipfs://x"},
             {"name":"mcp","endpoint":"https://mcp.example.com/sse"}]}"#;
         let uri = format!("data:application/json;base64,{}", B64.encode(json));
-        assert_eq!(domain_from_token_uri(&uri).as_deref(), Some("mcp.example.com"));
+        assert_eq!(domains_from_token_uri(&uri), vec!["mcp.example.com"]);
+    }
+
+    /// 실제 결제가 가는 곳은 web 이 아니라 x402/mcp 엔드포인트인 경우가 흔하다 —
+    /// 대표 하나만 보면 정상 결제가 「다름」으로 찍히므로 **목록 전체**와 대조한다(3차 P2).
+    #[test]
+    fn trust_matches_any_registered_endpoint() {
+        let json = r#"{"services":[{"name":"web","endpoint":"https://example.com"},
+            {"name":"x402","endpoint":"https://api.example.com/pay"}]}"#;
+        let uri = format!("data:application/json;base64,{}", B64.encode(json));
+        let domains = domains_from_token_uri(&uri);
+        assert_eq!(domains, vec!["example.com", "api.example.com"]);
+
+        let mut r = rec("0x1", "example.com");
+        r.service_domains = domains;
+        // web 이 아닌 엔드포인트로 결제해도 일치.
+        assert_eq!(
+            trust_from(&r, "0x1", "https://api.example.com/pay/9").domain_check,
+            "match"
+        );
+        // 목록에 없는 곳이면 다름.
+        assert_eq!(
+            trust_from(&r, "0x1", "https://evil.example/pay").domain_check,
+            "differs"
+        );
     }
 
     /// 깨진 base64·JSON 아님·services 없음 → 조용히 "모름"(패닉·오탐 금지).
     #[test]
     fn broken_data_uri_is_unknown() {
-        assert_eq!(domain_from_token_uri("data:application/json;base64,!!!!"), None);
-        assert_eq!(domain_from_token_uri("data:text/plain,hello"), None);
+        assert!(domains_from_token_uri("data:application/json;base64,!!!!").is_empty());
+        assert!(domains_from_token_uri("data:text/plain,hello").is_empty());
         let uri = format!("data:application/json;base64,{}", B64.encode("{\"name\":\"x\"}"));
-        assert_eq!(domain_from_token_uri(&uri), None);
+        assert!(domains_from_token_uri(&uri).is_empty());
         assert_eq!(name_from_token_uri(&uri).as_deref(), Some("x"));
     }
 
@@ -499,6 +554,11 @@ mod tests {
             wallet: wallet.into(),
             token_uri: String::new(),
             uri_domain: domain.into(),
+            service_domains: if domain.is_empty() {
+                Vec::new()
+            } else {
+                vec![domain.to_string()]
+            },
             declared_name: String::new(),
             feedback_clients: Some(7),
         }
@@ -579,6 +639,7 @@ mod tests {
         assert_eq!(rec.chain_id, 8453, "KURA_CHAIN_ID=8453 로 실행할 것");
         assert!(rec.token_uri.starts_with("data:"), "{}", rec.token_uri);
         assert_eq!(rec.uri_domain, "clawnews.io");
+        assert!(rec.service_domains.contains(&"clawnews.io".to_string()));
         assert_eq!(rec.declared_name, "ClawNews");
         assert!(!rec.wallet.is_empty());
         assert!(rec.feedback_clients.unwrap_or(0) > 0);

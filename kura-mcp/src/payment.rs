@@ -236,6 +236,12 @@ fn write_request_kind(
     agent: Option<AgentTrust>,
 ) -> Result<String, String> {
     let id = new_id();
+    let chain_id = crate::chain::active_chain().chain_id;
+    // 조회 시점과 요청 각인 시점 사이(조회 상한 10초)에 사용자가 네트워크를 바꿨을 수 있다.
+    // 다른 체인에서 읽은 대조를 이번 체인 결제에 붙이면, GUI 는 request.chain_id 만 검사하므로
+    // **옛 체인 사실이 이번 결제의 사실인 양** 표시되고 자율 차단 판단에까지 쓰인다
+    // (코덱스 개발47 3차 P2). 그런 대조는 버린다 — 줄이 안 붙을 뿐 결제는 그대로 간다.
+    let agent = agent.filter(|a| a.chain_id == chain_id);
     let req = PaymentRequest {
         id: id.clone(),
         token: token.to_string(),
@@ -245,7 +251,7 @@ fn write_request_kind(
         created: now_secs(),
         kind: kind.to_string(),
         resource: resource.to_string(),
-        chain_id: crate::chain::active_chain().chain_id, // 요청 시점 활성 체인 각인(승인 시 GUI가 대조)
+        chain_id, // 요청 시점 활성 체인 각인(승인 시 GUI가 대조)
         agent,
     };
     let json = serde_json::to_string_pretty(&req)
@@ -417,6 +423,28 @@ mod tests {
         let p = r.x402.expect("x402 페이로드");
         assert_eq!(p.signature, "0xsig");
         assert_eq!(p.authorization.value, "10000");
+    }
+
+    /// 다른 체인에서 읽은 대조는 요청에 실리지 않는다 — 조회 도중 사용자가 네트워크를
+    /// 바꾼 경우, 옛 체인의 사실이 이번 체인 결제의 사실인 양 보이면 안 된다(3차 P2).
+    /// (테스트 환경의 활성 체인은 Base Sepolia 로 고정된다 — chain.rs 의 cfg(test).)
+    #[test]
+    fn agent_from_another_chain_is_dropped() {
+        let here = crate::chain::active_chain().chain_id;
+        let mk = |chain_id: u64| AgentTrust {
+            agent_id: 1,
+            chain_id,
+            registered: true,
+            wallet: "0xB0b".into(),
+            wallet_check: "match".into(),
+            uri_domain: "api.example.com".into(),
+            resource_domain: "api.example.com".into(),
+            domain_check: "match".into(),
+            feedback_clients: None,
+        };
+        // 같은 체인 = 그대로 실린다 / 다른 체인 = 버린다.
+        assert!(Some(mk(here)).filter(|a| a.chain_id == here).is_some());
+        assert!(Some(mk(here + 1)).filter(|a| a.chain_id == here).is_none());
     }
 
     /// 하트비트 신선도: 10초 이내면 살아있음, 넘으면 죽음.
