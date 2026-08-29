@@ -276,6 +276,10 @@ export function PaymentApprovalModal({
 /** 두 값의 대조 결과. `warn` 이면 **줄을 따로 세우고**(경고), 아니면 신원 줄 뒤에 짧게 붙인다.
  *  — 조용한 경우는 조용하게, 말할 게 생겼을 때만 자리를 차지한다.
  *
+ *  대조 상대는 서버가 402 본문에 적어 보낸 리소스 문자열이 아니라 **실제로 결제 헤더를
+ *  보내는 URL** 이다(kura-mcp flow.rs 참고) — 그렇지 않으면 공격자의 자기신고를 레지스트리와
+ *  맞춰 보는 꼴이 된다.
+ *
  *  왜 "검증됨"이라 안 쓰나: ERC-8004 등록은 무허가다. 누구나 아무 도메인이나 적어 등록할 수
  *  있어서, 일치는 "그 주장이 자기 자신과 앞뒤가 맞는다"는 뜻이지 안전을 뜻하지 않는다.
  *  반대로 **불일치는 강한 신호**다(받는 주소가 바꿔치기된 정황) → 그때만 색과 줄을 준다. */
@@ -303,7 +307,10 @@ function comparison(agent: AgentTrust): { warn: boolean; text: string } {
   if (d === "differs")
     return {
       warn: true,
-      text: t("기재 도메인이 이 리소스와 달라요", "The listed domain differs from this resource"),
+      text: t(
+        `기재 도메인이 실제 요청 주소(${agent.resource_domain})와 달라요`,
+        `The listed domain differs from the address actually being paid (${agent.resource_domain})`,
+      ),
     };
 
   // ── 같음·모름: 신원 줄 꼬리에 붙는 짧은 말
@@ -311,7 +318,10 @@ function comparison(agent: AgentTrust): { warn: boolean; text: string } {
     return { warn: false, text: t("주소·도메인 일치", "address and domain match") };
   if (w === "match") return { warn: false, text: t("주소 일치", "address matches") };
   if (w === "unset" && d === "match")
-    return { warn: false, text: t("도메인 일치 · 등록 지갑 없음", "domain matches · no wallet on record") };
+    return {
+      warn: false,
+      text: t("도메인 일치 · 등록 지갑 없음", "domain matches · no wallet on record"),
+    };
   if (w === "unset") return { warn: false, text: t("등록 지갑 없음", "no wallet on record") };
   if (d === "match") return { warn: false, text: t("도메인 일치", "domain matches") };
   return { warn: false, text: t("대조할 값 없음", "nothing to compare") };

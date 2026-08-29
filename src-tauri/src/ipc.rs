@@ -76,6 +76,25 @@ fn default_kind() -> String {
     "transfer".to_string()
 }
 
+/// AI 가 주장한 신원을 **온체인이 부정하는가** — 자율 승인(비번 없이 나가는 경로)을 막을 조건.
+///
+/// 왜 필요한가: 승인 창에 경고를 만들어 놓아도, 자율 결제는 그 창을 **띄우지 않고** 지나간다
+/// (`auto_approve_payment` 가 먼저 처리하고 성공하면 모달이 안 뜬다). 그러면 "받는 주소가
+/// 등록 지갑과 다르다"는 경고가 정작 사람 눈에 닿지 않는다 — 경고가 없는 것과 같다
+/// (코덱스 개발47 2차 P1).
+///
+/// 주장이 **없으면**(None) 막지 않는다. 이 규칙은 없던 결제를 새로 막는 게 아니라, 모순이
+/// 드러난 결제만 사람 앞으로 돌린다. 그래서 방향이 한쪽뿐이다 — 자율을 **열어 주는 일은
+/// 절대 없고**, 좁히기만 한다.
+pub(crate) fn agent_contradicts(agent: Option<&AgentTrust>) -> bool {
+    match agent {
+        None => false,
+        Some(a) => {
+            !a.registered || a.wallet_check == "differs" || a.domain_check == "differs"
+        }
+    }
+}
+
 /// 대기 요청이 만들어진 체인과 현재 활성 체인이 같은지 검사한다(코덱스 개발20 #2). 다르면 거부 —
 /// 승인/자율 경로 공용. chain_id 0 = 옛 미각인 요청이므로 검사를 건너뛴다(후방호환).
 pub(crate) fn ensure_request_chain(req: &PaymentRequest) -> Result<(), String> {
@@ -396,6 +415,35 @@ mod tests {
         let json = r#"{"id":"1","token":"USDC","to":"0xabc","amount":"1","memo":"","created":1}"#;
         let r: PaymentRequest = serde_json::from_str(json).unwrap();
         assert!(r.agent.is_none());
+    }
+
+    fn trust(registered: bool, wallet: &str, domain: &str) -> AgentTrust {
+        AgentTrust {
+            agent_id: 1,
+            chain_id: 8453,
+            registered,
+            wallet: "0xB0b".into(),
+            wallet_check: wallet.into(),
+            uri_domain: "api.example.com".into(),
+            resource_domain: "api.example.com".into(),
+            domain_check: domain.into(),
+            feedback_clients: None,
+        }
+    }
+
+    /// 자율 승인 차단 조건 — 모순이 드러난 경우만 막고, 주장이 없으면 예전 그대로 간다.
+    #[test]
+    fn agent_contradiction_blocks_only_when_contradicted() {
+        // 주장 없음 = 예전과 동일하게 자율 통과(이 기능이 기존 결제를 새로 막지 않는다).
+        assert!(!agent_contradicts(None));
+        // 일치·모름은 막지 않는다.
+        assert!(!agent_contradicts(Some(&trust(true, "match", "match"))));
+        assert!(!agent_contradicts(Some(&trust(true, "unset", "unknown"))));
+        assert!(!agent_contradicts(Some(&trust(true, "unknown", "unknown"))));
+        // 어긋난 것들은 사람 앞으로.
+        assert!(agent_contradicts(Some(&trust(true, "differs", "match"))));
+        assert!(agent_contradicts(Some(&trust(true, "match", "differs"))));
+        assert!(agent_contradicts(Some(&trust(false, "unknown", "unknown"))));
     }
 
     // 결제 요청 JSON 왕복 — MCP가 쓰는 형식과 호환돼야 한다 (memo 한글 포함).

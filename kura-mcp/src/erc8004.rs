@@ -93,6 +93,8 @@ pub struct AgentTrust {
     pub wallet: String,
     pub wallet_check: String,
     pub uri_domain: String,
+    /// **실제로 결제 헤더를 보내는 URL** 의 호스트. 서버가 402 본문에 적어 보낸 주장값이
+    /// 아니다 — 그걸 쓰면 공격자의 주장을 레지스트리와 맞춰 보는 꼴이 된다(2차 P1).
     pub resource_domain: String,
     pub domain_check: String,
     /// `None` = 못 읽음(0 과 구별 — AgentRecord 쪽 주석 참고).
@@ -254,7 +256,9 @@ fn same_addr(a: &str, b: &str) -> bool {
     !a.is_empty() && !b.is_empty() && a.eq_ignore_ascii_case(b)
 }
 
-/// 읽어온 기록을 실제 결제(받는 주소·리소스)와 **대조**한다 — 순수 함수(테스트 대상).
+/// 읽어온 기록을 실제 결제와 **대조**한다 — 순수 함수(테스트 대상).
+/// `resource` 에는 **실제 요청 URL**(402 를 낸 최종 URL)을 넘긴다. 서버가 주장한 리소스
+/// 문자열을 넘기면 안 된다 — 대조가 공격자의 자기신고를 검사하는 일이 되어 버린다.
 pub fn trust_from(rec: &AgentRecord, pay_to: &str, resource: &str) -> AgentTrust {
     let wallet_check = if !rec.registered {
         "unknown"

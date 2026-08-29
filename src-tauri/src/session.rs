@@ -190,6 +190,13 @@ pub(crate) async fn auto_approve_payment(
         return Err(NEEDS_PASSWORD.into());
     }
 
+    // ERC-8004 대조가 어긋난 결제는 자율 대상이 아니다 (개발 47, 코덱스 2차 P1).
+    // 승인 창에 경고를 만들어 두고 그 창을 건너뛰면 경고가 없는 것과 같다 → 사람 앞으로 돌린다.
+    // 주장이 없는 결제(대다수)는 이 조건에 걸리지 않아 예전 동작 그대로다.
+    if crate::ipc::agent_contradicts(req.agent.as_ref()) {
+        return Err(NEEDS_PASSWORD.into());
+    }
+
     // 세션이 잠금 해제돼 있어야 키가 메모리에 있다(유휴 타임아웃도 여기서 검사).
     let idle = auto_lock_secs(&settings);
     let signer = session_signer(&session, idle).ok_or_else(|| NEEDS_PASSWORD.to_string())?;

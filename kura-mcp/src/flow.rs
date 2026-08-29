@@ -308,8 +308,14 @@ pub async fn run_x402(
             .to_string();
             None
         }
+        // 🔴 대조 상대는 `resource` 가 **아니라** `final_url` 이다(코덱스 개발47 2차 P1).
+        // `resource` 는 402 를 낸 서버가 본문/헤더로 주장한 문자열이라, evil.example 이
+        // "resource: https://api.trusted.io/x" 라고 적어 두면 도메인 대조가 통과한다 —
+        // 공격자의 주장을 레지스트리와 맞춰 보는 셈이 되어 검사 의미가 사라진다.
+        // 우리가 서명한 결제 헤더를 실제로 받는 곳은 final_url 이므로 그쪽과 맞춘다.
+        // (`resource` 는 표시·프로토콜 제출용으로만 계속 쓴다.)
         Some(id) => match erc8004::lookup(id).await {
-            Ok(rec) => Some(erc8004::trust_from(&rec, req.pay_to.trim(), &resource)),
+            Ok(rec) => Some(erc8004::trust_from(&rec, req.pay_to.trim(), final_url.as_str())),
             Err(e) => {
                 agent_note = e;
                 None
@@ -318,6 +324,15 @@ pub async fn run_x402(
     };
 
     // 5) GUI에 서명 요청 → 사람 승인 → 서명 페이로드 수신.
+    // 조회가 최대 10초를 먹을 수 있어 3)의 확인이 낡았을 수 있다 → 쓰기 직전에 한 번 더 본다
+    // (코덱스 개발47 2차 P2). 승인할 UI 가 없는데 요청만 남기면 5분을 헛기다린다.
+    if !payment::app_alive() {
+        return Err(ts!(
+            "지갑 앱이 실행 중이 아니에요. 앱을 켠 뒤 다시 시도하세요.",
+            "The wallet app isn't running. Open it and try again."
+        )
+        .into());
+    }
     let id = payment::write_x402_request(
         req.pay_to.trim(),
         &amount_usdc,
