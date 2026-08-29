@@ -1,0 +1,573 @@
+// ERC-8004(Trustless Agents) **읽기 전용** 조회 (개발 47).
+//
+// 무엇을 하나: AI 가 "이 서비스는 에이전트 #123 이다"라고 알려주면, 지갑이 **온체인 레지스트리를
+// 직접 읽어** 그 번호의 등록 지갑·기재 도메인을 가져와 실제 받는 주소·결제 리소스와 **대조**한다.
+// 그 결과(사실)를 결제 요청에 실어 보내면 승인 창이 한 줄로 보여준다.
+//
+// 왜 이 방향인가 (착수 시 실측으로 뒤집힌 설계 — 개발 47):
+//   배포된 IdentityRegistry v2 에는 **주소 → 에이전트 역조회가 없다**(getAgentWallet 은 정방향뿐,
+//   agentWallet 을 담은 MetadataSet 이벤트도 indexed 토픽이 아니다). 우회로인 이벤트 스캔도
+//   공개 RPC 가 eth_getLogs 를 1만 블록으로 끊어 승인 경로에선 불가능하다. 그래서 "받는 주소만
+//   보고 자동 판별"은 원리상 불가 → **주장은 AI 가, 검증은 지갑이** 하는 구조로 뒤집었다.
+//
+// 지키는 선 (사장 확정):
+//   - **온체인 읽기만.** 웹 fetch 는 하지 않는다 — tokenURI 가 http(s) 면 그 **호스트만** 읽고
+//     문서를 가져오지 않는다. data: URI 면 등록 JSON 이 온체인에 통째로 들어 있으므로 그대로 파싱한다.
+//   - **판정하지 않는다.** "검증됨"·"안전" 같은 말을 만들지 않는다. 등록은 무허가라 누구나
+//     아무 도메인이나 적을 수 있고(피드백도 시빌 가능), 이 조회가 주는 건 **일치/다름/모름**뿐이다.
+//   - 이름(name)은 여기서 뽑아 **MCP 결과로만** 준다. 승인 창에는 절대 넣지 않는다 —
+//     자기신고 이름을 사람 눈앞에 크게 띄우는 순간 그게 사칭의 통로가 된다.
+
+use alloy::primitives::{Address, U256};
+use alloy::providers::ProviderBuilder;
+use alloy::sol;
+use base64::{
+    engine::general_purpose::{STANDARD as B64, STANDARD_NO_PAD as B64_NP},
+    Engine,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::chain::active_chain;
+use crate::wallet::{effective_rpc, jigap_dir, redact_urls};
+use crate::{tf, ts};
+
+/// tokenURI / 디코드된 등록 JSON 의 처리 상한(바이트). 체인에서 온 값은 외부 입력이라
+/// 파싱 전에 크기부터 끊는다. 정상 등록 문서는 수 KB 다(실측: mainnet #1 = 2,269바이트).
+const MAX_URI_BYTES: usize = 64 * 1024;
+
+/// 표시용 이름 상한(문자). MCP 결과로만 나가지만 길이는 여기서 끊는다.
+const MAX_NAME_CHARS: usize = 120;
+
+sol! {
+    #[sol(rpc)]
+    interface IIdentityRegistry {
+        function ownerOf(uint256 tokenId) external view returns (address);
+        function tokenURI(uint256 tokenId) external view returns (string);
+        function getAgentWallet(uint256 agentId) external view returns (address);
+    }
+
+    #[sol(rpc)]
+    interface IReputationRegistry {
+        function getClients(uint256 agentId) external view returns (address[]);
+    }
+}
+
+/// 레지스트리에서 읽어온 **사실 그대로**. 판정·점수는 없다.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct AgentRecord {
+    pub agent_id: u64,
+    pub chain_id: u64,
+    /// 이 번호가 온체인에 존재하는가(ownerOf 성공).
+    pub registered: bool,
+    /// NFT 소유자 주소. 미등록이면 빈 문자열.
+    pub owner: String,
+    /// 등록 지갑(agentWallet). 미설정(0x0)·미등록이면 빈 문자열.
+    pub wallet: String,
+    /// tokenURI 원문. 웹으로 가져오지 않는다 — 도메인만 읽는다.
+    pub token_uri: String,
+    /// tokenURI 에서 읽은 **기재 도메인**(주장값). 없으면 빈 문자열.
+    pub uri_domain: String,
+    /// 등록 문서가 스스로 밝힌 이름(data: URI 일 때만). **승인 창엔 쓰지 않는다.**
+    pub declared_name: String,
+    /// 피드백을 남긴 클라이언트 주소 수. 누구나 남길 수 있다(시빌 가능).
+    pub feedback_clients: u32,
+}
+
+/// 승인 창에 실어 보내는 **대조 결과**. 각 항목은 판정이 아니라 비교의 결과다.
+/// `wallet_check`  = match | differs | unset | unknown
+/// `domain_check`  = match | differs | unknown
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AgentTrust {
+    pub agent_id: u64,
+    pub chain_id: u64,
+    pub registered: bool,
+    pub wallet: String,
+    pub wallet_check: String,
+    pub uri_domain: String,
+    pub resource_domain: String,
+    pub domain_check: String,
+    pub feedback_clients: u32,
+}
+
+/// settings.json 에서 ERC-8004 조회 스위치만 읽는 가벼운 뷰(다른 필드 무시).
+/// GUI 와 같은 파일을 공유한다 — wallet.rs 의 RpcSettings 와 같은 패턴.
+#[derive(Deserialize)]
+struct LookupSel {
+    #[serde(default = "yes")]
+    agent_lookup: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// 사용자가 ERC-8004 조회를 켜 뒀는가. **기본 켜짐** — 새 바깥 연결을 여는 게 아니라
+/// 이미 잔액을 읽고 있는 그 RPC 로 읽기 한 번을 더 하는 것이라, 끄는 쪽이 명시적 선택이다.
+/// 파일이 없거나 못 읽으면 켜짐으로 본다(기능이 조용히 사라지는 것보다 낫다).
+pub fn lookup_enabled() -> bool {
+    let Ok(dir) = jigap_dir() else {
+        return true;
+    };
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<LookupSel>(&s).ok())
+        .map(|s| s.agent_lookup)
+        .unwrap_or(true)
+}
+
+/// 컨트랙트 호출이 **revert** 로 끝났는가(= 그런 토큰이 없다) — 네트워크 실패와 갈라야 한다.
+/// 네트워크 실패를 "없음"으로 표시하면 멀쩡한 에이전트에 헛경고가 뜬다(치명적 오탐).
+fn is_revert(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("revert") || e.contains("execution error")
+}
+
+/// URL 에서 호스트만 뽑는다(소문자, 포트·userinfo 제거, 선행 `www.` 제거).
+/// 스킴이 없으면 None — "도메인처럼 생긴 문자열"을 도메인으로 받아주지 않는다.
+pub fn host_of(url: &str) -> Option<String> {
+    let s = url.trim();
+    let (_, rest) = s.split_once("://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    // 공백이 낀 authority = 깨진 URL. trim 으로 살려내면 "https:// evil.com" 이 evil.com 으로
+    // 통과해, 사람이 읽은 문자열과 우리가 대조한 도메인이 갈린다 → 그냥 "모름"으로 둔다.
+    if authority.chars().any(char::is_whitespace) {
+        return None;
+    }
+    // userinfo@host 형태에서 호스트만 (`@` 뒤). `user@pass@host` 는 마지막 `@` 기준.
+    let hostport = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    // IPv6 리터럴은 대괄호까지 통째로, 그 외는 첫 `:` 앞까지(포트 제거).
+    let host = match hostport.find(']') {
+        Some(close) => &hostport[..=close],
+        None => hostport.split(':').next().unwrap_or(hostport),
+    };
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    if !host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | ':'))
+    {
+        return None;
+    }
+    let host = match host.strip_prefix("www.") {
+        Some(h) => h.to_string(),
+        None => host,
+    };
+    (!host.is_empty()).then_some(host)
+}
+
+/// `data:` URI 의 본문을 문자열로 꺼낸다(base64 면 디코드). 웹 접속 없음 — 값이 URI 안에 다 있다.
+fn decode_data_uri(uri: &str) -> Option<String> {
+    let (meta, payload) = uri.split_once(',')?;
+    if !meta.to_ascii_lowercase().contains(";base64") {
+        return Some(payload.to_string());
+    }
+    let cleaned: String = payload.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = B64
+        .decode(&cleaned)
+        .ok()
+        .or_else(|| B64_NP.decode(&cleaned).ok())?;
+    if bytes.len() > MAX_URI_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// 등록 JSON(EIP-8004 registration)에서 서비스 엔드포인트의 호스트를 고른다.
+/// `services[]` 중 name="web" 을 우선하고, 없으면 첫 http(s) 엔드포인트.
+fn domain_from_registration(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let services = v.get("services")?.as_array()?;
+    let pick = |web_only: bool| -> Option<String> {
+        for s in services {
+            let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if web_only != name.eq_ignore_ascii_case("web") {
+                continue;
+            }
+            let ep = s.get("endpoint").and_then(|e| e.as_str()).unwrap_or("");
+            let low = ep.to_ascii_lowercase();
+            if low.starts_with("http://") || low.starts_with("https://") {
+                if let Some(h) = host_of(ep) {
+                    return Some(h);
+                }
+            }
+        }
+        None
+    };
+    pick(true).or_else(|| pick(false))
+}
+
+/// tokenURI 에서 **기재 도메인**을 읽는다. http(s) 면 그 호스트(문서는 안 가져온다),
+/// data: 면 온체인에 박힌 등록 JSON 을 파싱해 서비스 호스트를 쓴다. 그 외(ipfs: 등)는 None.
+pub fn domain_from_token_uri(uri: &str) -> Option<String> {
+    let s = uri.trim();
+    if s.is_empty() || s.len() > MAX_URI_BYTES {
+        return None;
+    }
+    let low = s.to_ascii_lowercase();
+    if low.starts_with("http://") || low.starts_with("https://") {
+        return host_of(s);
+    }
+    if low.starts_with("data:") {
+        return domain_from_registration(&decode_data_uri(s)?);
+    }
+    None
+}
+
+/// 등록 문서가 밝힌 이름(data: URI 일 때만). 제어문자를 걷어내고 길이를 끊는다.
+/// **승인 창에는 쓰지 않는다** — MCP 결과에서 AI 가 참고할 용도.
+pub fn name_from_token_uri(uri: &str) -> Option<String> {
+    let s = uri.trim();
+    if s.is_empty() || s.len() > MAX_URI_BYTES || !s.to_ascii_lowercase().starts_with("data:") {
+        return None;
+    }
+    let json = decode_data_uri(s)?;
+    let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+    let name = v.get("name")?.as_str()?;
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_NAME_CHARS)
+        .collect();
+    let cleaned = cleaned.trim().to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// 두 주소 문자열이 같은가(체크섬 대소문자 무시). 빈 값은 같지 않다고 본다.
+fn same_addr(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    !a.is_empty() && !b.is_empty() && a.eq_ignore_ascii_case(b)
+}
+
+/// 읽어온 기록을 실제 결제(받는 주소·리소스)와 **대조**한다 — 순수 함수(테스트 대상).
+pub fn trust_from(rec: &AgentRecord, pay_to: &str, resource: &str) -> AgentTrust {
+    let wallet_check = if !rec.registered {
+        "unknown"
+    } else if rec.wallet.is_empty() {
+        "unset"
+    } else if same_addr(&rec.wallet, pay_to) {
+        "match"
+    } else {
+        "differs"
+    };
+
+    let resource_domain = host_of(resource).unwrap_or_default();
+    let domain_check = if !rec.registered || rec.uri_domain.is_empty() || resource_domain.is_empty()
+    {
+        "unknown"
+    } else if rec.uri_domain == resource_domain {
+        "match"
+    } else {
+        "differs"
+    };
+
+    AgentTrust {
+        agent_id: rec.agent_id,
+        chain_id: rec.chain_id,
+        registered: rec.registered,
+        wallet: rec.wallet.clone(),
+        wallet_check: wallet_check.to_string(),
+        uri_domain: rec.uri_domain.clone(),
+        resource_domain,
+        domain_check: domain_check.to_string(),
+        feedback_clients: rec.feedback_clients,
+    }
+}
+
+/// 활성 체인의 레지스트리에서 에이전트 기록을 읽는다(읽기 전용 RPC 호출 4번).
+/// 레지스트리가 없는 체인이면 Err — 호출자가 "이 네트워크엔 없음"으로 안내한다.
+pub async fn lookup(agent_id: u64) -> Result<AgentRecord, String> {
+    let chain = active_chain();
+    let identity = chain.erc8004_identity.ok_or_else(|| {
+        ts!(
+            "이 네트워크에는 ERC-8004 레지스트리가 없어요.",
+            "There is no ERC-8004 registry on this network."
+        )
+        .to_string()
+    })?;
+
+    let provider = ProviderBuilder::new()
+        .connect(&effective_rpc())
+        .await
+        .map_err(|e| {
+            tf!(
+                "RPC 연결 실패: {}",
+                "Couldn't reach the RPC server: {}",
+                redact_urls(&e.to_string())
+            )
+        })?;
+
+    let id = U256::from(agent_id);
+    let registry = IIdentityRegistry::new(identity, &provider);
+
+    // ownerOf 가 revert = 그런 번호가 없다(미등록). 그 외 실패는 네트워크 문제 → 에러로 올린다.
+    let owner = match registry.ownerOf(id).call().await {
+        Ok(a) => a,
+        Err(e) => {
+            let msg = e.to_string();
+            if is_revert(&msg) {
+                return Ok(AgentRecord {
+                    agent_id,
+                    chain_id: chain.chain_id,
+                    registered: false,
+                    owner: String::new(),
+                    wallet: String::new(),
+                    token_uri: String::new(),
+                    uri_domain: String::new(),
+                    declared_name: String::new(),
+                    feedback_clients: 0,
+                });
+            }
+            return Err(tf!(
+                "에이전트 조회 실패: {}",
+                "Couldn't read the agent record: {}",
+                redact_urls(&msg)
+            ));
+        }
+    };
+
+    // 나머지 셋은 동시에. 각각의 revert 는 "그 값이 없다"로 접는다(전체를 실패시키지 않는다).
+    let reputation = chain.erc8004_reputation;
+    let (uri, wallet, clients) = tokio::join!(
+        async { registry.tokenURI(id).call().await },
+        async { registry.getAgentWallet(id).call().await },
+        async {
+            match reputation {
+                Some(rep) => IReputationRegistry::new(rep, &provider)
+                    .getClients(id)
+                    .call()
+                    .await
+                    .map(|v| v.len()),
+                None => Ok(0),
+            }
+        }
+    );
+
+    let token_uri = uri.unwrap_or_default();
+    let wallet = wallet
+        .ok()
+        .filter(|w| *w != Address::ZERO)
+        .map(|w| w.to_string())
+        .unwrap_or_default();
+    let feedback_clients = clients.unwrap_or(0).min(u32::MAX as usize) as u32;
+
+    Ok(AgentRecord {
+        agent_id,
+        chain_id: chain.chain_id,
+        registered: true,
+        owner: owner.to_string(),
+        uri_domain: domain_from_token_uri(&token_uri).unwrap_or_default(),
+        declared_name: name_from_token_uri(&token_uri).unwrap_or_default(),
+        token_uri,
+        wallet,
+        feedback_clients,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_of_reads_the_host_only() {
+        assert_eq!(host_of("https://api.example.com/x/y?z=1").as_deref(), Some("api.example.com"));
+        assert_eq!(host_of("http://Example.COM").as_deref(), Some("example.com"));
+        assert_eq!(host_of("https://www.example.com/").as_deref(), Some("example.com"));
+        assert_eq!(host_of("https://example.com:8443/p").as_deref(), Some("example.com"));
+        assert_eq!(host_of("https://user:pw@example.com/p").as_deref(), Some("example.com"));
+        assert_eq!(host_of("https://example.com./").as_deref(), Some("example.com")); // 루트 점 제거
+        assert_eq!(host_of("https://[::1]:8545/").as_deref(), Some("[::1]"));
+    }
+
+    /// 스킴 없는 값·빈 값·공백 섞인 값은 도메인으로 받아주지 않는다.
+    #[test]
+    fn host_of_rejects_non_urls() {
+        assert_eq!(host_of("example.com"), None);
+        assert_eq!(host_of(""), None);
+        assert_eq!(host_of("https://"), None);
+        assert_eq!(host_of("https:// spaced.com"), None);
+    }
+
+    #[test]
+    fn domain_from_https_token_uri() {
+        assert_eq!(
+            domain_from_token_uri("https://marketplace.olas.network/erc8004/base/ai-agents/5").as_deref(),
+            Some("marketplace.olas.network")
+        );
+        // ipfs 등 우리가 해석 못 하는 스킴은 "모름"으로 남긴다(억지 추정 금지).
+        assert_eq!(domain_from_token_uri("ipfs://bafy…"), None);
+        assert_eq!(domain_from_token_uri(""), None);
+    }
+
+    /// data: URI = 등록 JSON 이 온체인에 통째로 있다 → 웹 접속 없이 서비스 호스트를 읽는다.
+    /// (실측 형태: Base 메인넷 #1 ClawNews)
+    #[test]
+    fn domain_from_data_uri_registration() {
+        let json = r#"{"name":"ClawNews","services":[
+            {"name":"OASF","endpoint":"https://github.com/agntcy/oasf/"},
+            {"name":"web","endpoint":"https://clawnews.io"}]}"#;
+        let uri = format!("data:application/json;base64,{}", B64.encode(json));
+        assert_eq!(domain_from_token_uri(&uri).as_deref(), Some("clawnews.io"));
+        assert_eq!(name_from_token_uri(&uri).as_deref(), Some("ClawNews"));
+    }
+
+    /// web 항목이 없으면 첫 http(s) 엔드포인트로 폴백한다.
+    #[test]
+    fn domain_falls_back_to_first_http_service() {
+        let json = r#"{"services":[{"name":"a2a","endpoint":"ipfs://x"},
+            {"name":"mcp","endpoint":"https://mcp.example.com/sse"}]}"#;
+        let uri = format!("data:application/json;base64,{}", B64.encode(json));
+        assert_eq!(domain_from_token_uri(&uri).as_deref(), Some("mcp.example.com"));
+    }
+
+    /// 깨진 base64·JSON 아님·services 없음 → 조용히 "모름"(패닉·오탐 금지).
+    #[test]
+    fn broken_data_uri_is_unknown() {
+        assert_eq!(domain_from_token_uri("data:application/json;base64,!!!!"), None);
+        assert_eq!(domain_from_token_uri("data:text/plain,hello"), None);
+        let uri = format!("data:application/json;base64,{}", B64.encode("{\"name\":\"x\"}"));
+        assert_eq!(domain_from_token_uri(&uri), None);
+        assert_eq!(name_from_token_uri(&uri).as_deref(), Some("x"));
+    }
+
+    /// 이름은 제어문자를 걷어내고 길이를 끊는다(외부 입력).
+    #[test]
+    fn declared_name_is_sanitized() {
+        let json = serde_json::json!({ "name": format!("A\nB{}", "x".repeat(300)) }).to_string();
+        let uri = format!("data:application/json;base64,{}", B64.encode(&json));
+        let name = name_from_token_uri(&uri).expect("이름");
+        assert!(!name.contains('\n'));
+        assert_eq!(name.chars().count(), MAX_NAME_CHARS);
+    }
+
+    fn rec(wallet: &str, domain: &str) -> AgentRecord {
+        AgentRecord {
+            agent_id: 123,
+            chain_id: 8453,
+            registered: true,
+            owner: "0xowner".into(),
+            wallet: wallet.into(),
+            token_uri: String::new(),
+            uri_domain: domain.into(),
+            declared_name: String::new(),
+            feedback_clients: 7,
+        }
+    }
+
+    /// 핵심 대조: 등록 지갑 == 받는 주소, 기재 도메인 == 리소스 도메인.
+    #[test]
+    fn trust_marks_match() {
+        let t = trust_from(
+            &rec("0xAbC0000000000000000000000000000000000001", "api.example.com"),
+            "0xabc0000000000000000000000000000000000001", // 체크섬 대소문자만 다름
+            "https://api.example.com/paid/thing",
+        );
+        assert_eq!(t.wallet_check, "match");
+        assert_eq!(t.domain_check, "match");
+        assert_eq!(t.resource_domain, "api.example.com");
+        assert_eq!(t.feedback_clients, 7);
+    }
+
+    /// 주소 바꿔치기 = 이 기능이 실제로 잡아야 하는 것.
+    #[test]
+    fn trust_marks_wallet_swap() {
+        let t = trust_from(
+            &rec("0x1111111111111111111111111111111111111111", "api.example.com"),
+            "0x2222222222222222222222222222222222222222",
+            "https://api.example.com/x",
+        );
+        assert_eq!(t.wallet_check, "differs");
+        assert_eq!(t.domain_check, "match");
+    }
+
+    /// 기재 도메인이 결제 리소스와 다른 경우.
+    #[test]
+    fn trust_marks_domain_mismatch() {
+        let t = trust_from(
+            &rec("0x1111111111111111111111111111111111111111", "other.example"),
+            "0x1111111111111111111111111111111111111111",
+            "https://api.example.com/x",
+        );
+        assert_eq!(t.wallet_check, "match");
+        assert_eq!(t.domain_check, "differs");
+    }
+
+    /// 값이 없으면 "다름"이 아니라 "모름"이다 — 없는 걸 경고로 만들지 않는다.
+    #[test]
+    fn missing_values_are_unknown_not_differs() {
+        let t = trust_from(&rec("", ""), "0x1", "https://api.example.com/x");
+        assert_eq!(t.wallet_check, "unset");
+        assert_eq!(t.domain_check, "unknown");
+
+        // 리소스 URL 을 모를 때(직접 송금 등)도 도메인은 "모름".
+        let t2 = trust_from(&rec("0x1", "api.example.com"), "0x1", "");
+        assert_eq!(t2.domain_check, "unknown");
+    }
+
+    /// 미등록 번호: 지갑·도메인 비교 자체가 성립하지 않는다.
+    #[test]
+    fn unregistered_agent_has_no_comparisons() {
+        let mut r = rec("", "");
+        r.registered = false;
+        let t = trust_from(&r, "0x1", "https://x.example/y");
+        assert!(!t.registered);
+        assert_eq!(t.wallet_check, "unknown");
+        assert_eq!(t.domain_check, "unknown");
+    }
+
+    /// 실물 조회 — 네트워크가 필요해 기본 제외. 체인은 KURA_CHAIN_ID 로 고정한다
+    /// (테스트는 사용자의 settings.json 을 안 따르지만, 환경변수는 그보다 우선한다).
+    ///   KURA_CHAIN_ID=8453 cargo test -p kura-mcp -- --ignored --nocapture
+    ///
+    /// 대상: Base 메인넷 #1 = "ClawNews" (개발 47 착수 실측). 등록 지갑이 owner 와 같고,
+    /// tokenURI 가 data: URI 라 **웹 접속 없이** 등록 JSON 에서 도메인이 나온다.
+    #[tokio::test]
+    #[ignore = "네트워크 필요 — Base 메인넷 레지스트리 실조회"]
+    async fn live_lookup_base_mainnet_agent_one() {
+        let rec = lookup(1).await.expect("조회");
+        assert!(rec.registered);
+        assert_eq!(rec.chain_id, 8453, "KURA_CHAIN_ID=8453 로 실행할 것");
+        assert!(rec.token_uri.starts_with("data:"), "{}", rec.token_uri);
+        assert_eq!(rec.uri_domain, "clawnews.io");
+        assert_eq!(rec.declared_name, "ClawNews");
+        assert!(!rec.wallet.is_empty());
+        assert!(rec.feedback_clients > 0);
+
+        // 같은 주소로 결제하면 "일치", 딴 주소면 "다름" — 이 기능이 실제로 하는 일.
+        let ok = trust_from(&rec, &rec.wallet, "https://clawnews.io/paid");
+        assert_eq!(ok.wallet_check, "match");
+        assert_eq!(ok.domain_check, "match");
+        let swapped = trust_from(
+            &rec,
+            "0x000000000000000000000000000000000000dEaD",
+            "https://evil.example/paid",
+        );
+        assert_eq!(swapped.wallet_check, "differs");
+        assert_eq!(swapped.domain_check, "differs");
+    }
+
+    /// 없는 번호는 revert → registered=false 로 접힌다(에러가 아니다).
+    #[tokio::test]
+    #[ignore = "네트워크 필요 — Base 메인넷 레지스트리 실조회"]
+    async fn live_lookup_missing_agent_is_not_an_error() {
+        let rec = lookup(999_999_999).await.expect("조회는 성공해야 한다");
+        assert!(!rec.registered);
+        assert!(rec.wallet.is_empty());
+    }
+
+    /// revert(없는 토큰)와 네트워크 실패를 갈라야 한다 — 네트워크 실패를 "없음"으로
+    /// 표시하면 멀쩡한 에이전트에 헛경고가 뜬다.
+    #[test]
+    fn revert_is_distinguished_from_network_failure() {
+        assert!(is_revert("server returned an error response: execution reverted"));
+        assert!(is_revert("Execution Reverted"));
+        assert!(!is_revert("over rate limit"));
+        assert!(!is_revert("error sending request for url"));
+        assert!(!is_revert("connection closed before message completed"));
+    }
+}

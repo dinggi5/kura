@@ -4,6 +4,7 @@
 // 비밀(니모닉/키)은 어느 모듈도 다루지 않는다 — 파일 읽기 + RPC + HTTP 만.
 
 pub mod chain;
+pub mod erc8004;
 pub mod flow;
 pub mod i18n;
 pub mod payment;

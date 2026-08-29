@@ -8,12 +8,14 @@
 // 결제 도구 2개 — 사람 승인 필요:
 //   - request_payment   : 송금을 "요청" (개발 9, Session 10). GUI 팝업 → 비번 승인 → 온체인 전송.
 //   - x402_fetch        : x402 유료 리소스를 가져온다 (개발 11, Session 12). 402 → 서명 승인 → 재요청.
+// 신원 조회 1개 — 읽기 전용, 온체인만 (개발 47):
+//   - lookup_agent      : ERC-8004 레지스트리에서 에이전트 번호의 등록 지갑·기재 도메인을 읽는다.
 //
 // 핵심 보안: 비번은 절대 MCP/채팅에 노출되지 않는다. MCP는 결제를 "요청"만 하고, 서명·전송은
 // GUI 앱이 사람 승인을 받아 수행한다(파일 기반 IPC). 한도·긴급잠금도 GUI가 강제한다.
 
-use kura_mcp::flow::{self, X402Outcome};
-use kura_mcp::{payment, wallet};
+use kura_mcp::flow::{self, X402Outcome, X402Result};
+use kura_mcp::{erc8004, payment, wallet};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -58,6 +60,24 @@ struct X402Args {
     /// What the payment is for — the user reads this in the approval window, so fill it in.
     #[serde(default)]
     memo: Option<String>,
+    /// Optional: the seller's ERC-8004 agent number, if you know it from the service's own
+    /// documentation or agent card. The wallet then reads that agent's on-chain record and shows
+    /// the user whether the payment address and the resource domain match what is registered.
+    /// Leave it out if you don't know it — a wrong number just produces a "no such agent" note.
+    #[serde(default)]
+    agent_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AgentArgs {
+    /// The agent's ERC-8004 number (agentId — the Identity Registry NFT token id).
+    agent_id: u64,
+    /// Optional: an address to compare against the agent's registered wallet.
+    #[serde(default)]
+    pay_to: Option<String>,
+    /// Optional: a resource URL whose domain is compared with the domain listed on-chain.
+    #[serde(default)]
+    resource: Option<String>,
 }
 
 /// JSON 직렬화 결과를 MCP 텍스트 콘텐츠로 감싼다.
@@ -158,21 +178,26 @@ impl WalletServer {
         &self,
         Parameters(args): Parameters<X402Args>,
     ) -> Result<CallToolResult, McpError> {
-        let out = flow::run_x402(args.url.trim(), args.memo.as_deref())
+        let out = flow::run_x402(args.url.trim(), args.memo.as_deref(), args.agent_id)
             .await
             .map_err(|e| McpError::internal_error(e, None))?;
-        match out {
-            X402Outcome::NotPaid { http_status, body } => json_result(&serde_json::json!({
+        let X402Result {
+            outcome,
+            agent,
+            agent_note,
+        } = out;
+        let mut body = match outcome {
+            X402Outcome::NotPaid { http_status, body } => serde_json::json!({
                 "paid": false,
                 "status": "ok",
                 "http_status": http_status,
                 "body": body,
-            })),
-            X402Outcome::Declined { status, detail } => json_result(&serde_json::json!({
+            }),
+            X402Outcome::Declined { status, detail } => serde_json::json!({
                 "paid": false,
                 "status": status,   // rejected | failed
                 "detail": detail,
-            })),
+            }),
             X402Outcome::Paid {
                 http_status,
                 ok,
@@ -181,7 +206,7 @@ impl WalletServer {
                 resource,
                 settlement,
                 body,
-            } => json_result(&serde_json::json!({
+            } => serde_json::json!({
                 "paid": true,
                 "status": if ok { "ok" } else { "settlement_failed" },
                 "http_status": http_status,
@@ -191,10 +216,62 @@ impl WalletServer {
                 "resource": resource,
                 "settlement": settlement,   // X-PAYMENT-RESPONSE (base64) — 정산 증빙
                 "body": body,
-            })),
+            }),
+        };
+        // 대조 결과는 사람(승인 창)과 AI 가 같이 본다 — 여기선 사실만, 판정은 없다.
+        if let Some(a) = agent {
+            body["agent"] = serde_json::to_value(a).unwrap_or(serde_json::Value::Null);
+            body["agent_caution"] = serde_json::json!(CAUTION);
         }
+        if !agent_note.is_empty() {
+            body["agent_lookup_note"] = serde_json::json!(agent_note);
+        }
+        json_result(&body)
+    }
+
+    #[tool(
+        description = "Reads an agent's ERC-8004 record from the registry on the active Base network \
+        (read-only, on-chain only — the wallet never fetches the agent's website). Give it agent_id, the \
+        agent's number in the Identity Registry. Returns: registered, owner, wallet (the registered \
+        agentWallet), token_uri and the uri_domain read from it, declared_name (what the record calls \
+        itself), and feedback_clients (how many addresses left feedback). Pass pay_to and/or resource to \
+        also get a comparison: whether the address equals the registered wallet and whether the resource's \
+        domain equals the domain listed on-chain. IMPORTANT: registration is permissionless — anyone can \
+        register any name, domain, or wallet, and anyone can leave feedback. Being registered is NOT proof \
+        of safety. Only a mismatch is a strong signal, and only when the agent number came from a source \
+        you trust (the service's own docs), not from the payment response itself."
+    )]
+    async fn lookup_agent(
+        &self,
+        Parameters(args): Parameters<AgentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if !erc8004::lookup_enabled() {
+            return Err(McpError::internal_error(
+                "The user has turned agent identity lookup off in the wallet settings. Ask them to \
+                 turn it back on (Settings → Network) if they want it.",
+                None,
+            ));
+        }
+        let rec = erc8004::lookup(args.agent_id)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let mut body = serde_json::to_value(&rec).unwrap_or(serde_json::Value::Null);
+        let pay_to = args.pay_to.unwrap_or_default();
+        let resource = args.resource.unwrap_or_default();
+        if !pay_to.trim().is_empty() || !resource.trim().is_empty() {
+            let trust = erc8004::trust_from(&rec, pay_to.trim(), resource.trim());
+            body["comparison"] = serde_json::to_value(trust).unwrap_or(serde_json::Value::Null);
+        }
+        body["caution"] = serde_json::json!(CAUTION);
+        json_result(&body)
     }
 }
+
+/// 조회 결과에 항상 함께 나가는 경고 — 등록은 무허가라 "등록됨"이 안전을 뜻하지 않는다.
+/// 읽는 쪽이 모델이라, 이 한 줄이 없으면 «온체인에 있으니 믿을 만하다»로 넘어가기 쉽다.
+const CAUTION: &str = "ERC-8004 registration is permissionless: anyone can register any name, \
+domain, or wallet, and anyone can leave feedback. Registration is not proof of safety — treat \
+these as claims. A mismatch is meaningful; a match only means the claim is self-consistent.";
 
 #[tool_handler]
 impl ServerHandler for WalletServer {
@@ -206,7 +283,9 @@ impl ServerHandler for WalletServer {
                  these are real funds). Balance, address, and history are read-only. To pay, call \
                  request_payment: the wallet app opens an approval window — by default a human must approve \
                  with their password, and only when the user has turned autopay on is it approved \
-                 automatically, within that limit. Never ask for or accept a password in chat or over MCP."
+                 automatically, within that limit. Never ask for or accept a password in chat or over \
+                 MCP. lookup_agent reads an ERC-8004 agent record on-chain (read-only); registration \
+                 there is permissionless, so it is a claim, not proof of safety."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

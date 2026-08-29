@@ -13,6 +13,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kura_mcp::chain::active_chain;
+use kura_mcp::erc8004::AgentTrust;
 use kura_mcp::flow::{self, X402Outcome};
 use kura_mcp::i18n::{lang, Lang};
 use kura_mcp::wallet;
@@ -30,7 +31,7 @@ Kura — AI 에이전트 전용 로컬 지갑 CLI
   kura pay <주소> <금액> [옵션]    결제(송금) 요청 → 지갑 앱에서 비번 승인
        --token USDC|ETH        토큰 (기본 USDC)
        --memo \"사유\"            승인 팝업에 보일 결제 사유
-  kura fetch <URL> [--memo \"사유\"]   x402 유료 리소스를 결제하고 가져온다
+  kura fetch <URL> [--memo \"사유\"] [--agent N]   x402 유료 리소스를 결제하고 가져온다
 
 전역 옵션:
   --json        기계가 읽는 JSON 으로 출력 (스크립트용)
@@ -51,7 +52,7 @@ Usage:
   kura pay <address> <amount>     ask to pay → approve with your password in the app
        --token USDC|ETH           token (USDC by default)
        --memo \"reason\"            what the payment is for, shown in the approval window
-  kura fetch <URL> [--memo \"reason\"]   pay for an x402 resource and fetch it
+  kura fetch <URL> [--memo \"reason\"] [--agent N]   pay for an x402 resource and fetch it
 
 Global options:
   --json        machine-readable JSON output (for scripts)
@@ -403,6 +404,17 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
         .to_string()
     })?;
     let memo = cli.opts.get("memo").map(String::as_str);
+    // --agent N: 상대의 ERC-8004 번호(선택). 주면 온체인 기록과 대조해 사실 한 줄을 덧붙인다.
+    // 숫자가 아니면 조용히 무시하지 않고 바로 알린다(오타가 "조회 안 함"으로 묻히지 않게).
+    let agent_id = match cli.opts.get("agent") {
+        Some(v) => Some(v.trim().parse::<u64>().map_err(|_| {
+            tf!(
+                "--agent 는 숫자여야 해요: {v:?}",
+                "--agent must be a number: {v:?}"
+            )
+        })?),
+        None => None,
+    };
 
     if !cli.json {
         println!(
@@ -413,16 +425,23 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
             )
         );
     }
-    let out = flow::run_x402(url, memo).await?;
+    let res = flow::run_x402(url, memo, agent_id).await?;
+    let (agent, agent_note, out) = (res.agent, res.agent_note, res.outcome);
     // 성공 = 결제 불필요(콘텐츠 받음) 또는 결제·정산까지 완료. 거부/실패/정산실패는 종료코드 1.
+    // **신원 조회 결과는 성공 판정에 넣지 않는다** — 사실을 보여줄 뿐 결제를 막지 않는다.
     let success = matches!(
         out,
         X402Outcome::NotPaid { .. } | X402Outcome::Paid { ok: true, .. }
     );
 
     if cli.json {
-        print_json(&x402_json(&out))?;
+        print_json(&x402_json(&out, agent.as_ref(), &agent_note))?;
     } else {
+        if let Some(a) = &agent {
+            println!("{}", agent_line(a));
+        } else if !agent_note.is_empty() {
+            println!("{agent_note}");
+        }
         match out {
             X402Outcome::NotPaid { http_status, body } => {
                 println!(
@@ -505,7 +524,51 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
 }
 
 /// X402Outcome → MCP 와 동일한 JSON 형태(스크립트가 두 어댑터를 같게 다루게).
-fn x402_json(out: &X402Outcome) -> serde_json::Value {
+/// ERC-8004 대조를 사람이 읽을 한 줄로 (개발 47). **판정하지 않는다** — 일치/다름/모름만.
+fn agent_line(a: &AgentTrust) -> String {
+    if !a.registered {
+        return tf!(
+            "온체인에 없는 에이전트 번호예요 (#{})",
+            "No agent #{} exists on-chain",
+            a.agent_id
+        );
+    }
+    let w = match a.wallet_check.as_str() {
+        "match" => ts!("등록 지갑 일치", "wallet matches"),
+        "differs" => ts!("⚠ 등록 지갑과 다름", "⚠ differs from registered wallet"),
+        "unset" => ts!("등록 지갑 없음", "no wallet on record"),
+        _ => ts!("등록 지갑 모름", "wallet unknown"),
+    };
+    let d = match a.domain_check.as_str() {
+        "match" => ts!("기재 도메인 일치", "listed domain matches"),
+        "differs" => ts!("⚠ 기재 도메인과 다름", "⚠ differs from listed domain"),
+        _ => ts!("기재 도메인 모름", "listed domain unknown"),
+    };
+    tf!(
+        "에이전트 #{} · {} · {}",
+        "Agent #{} · {} · {}",
+        a.agent_id,
+        w,
+        d
+    )
+}
+
+fn x402_json(
+    out: &X402Outcome,
+    agent: Option<&AgentTrust>,
+    agent_note: &str,
+) -> serde_json::Value {
+    let mut v = x402_outcome_json(out);
+    if let Some(a) = agent {
+        v["agent"] = serde_json::to_value(a).unwrap_or(serde_json::Value::Null);
+    }
+    if !agent_note.is_empty() {
+        v["agent_lookup_note"] = serde_json::json!(agent_note);
+    }
+    v
+}
+
+fn x402_outcome_json(out: &X402Outcome) -> serde_json::Value {
     match out {
         X402Outcome::NotPaid { http_status, body } => serde_json::json!({
             "paid": false, "status": "ok", "http_status": http_status, "body": body,

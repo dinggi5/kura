@@ -44,6 +44,31 @@ pub(crate) struct PaymentRequest {
     /// 0 = 미각인(옛 요청 파일 호환) → 체인 검사 건너뜀.
     #[serde(default)]
     pub(crate) chain_id: u64,
+    /// ERC-8004 대조 결과 (개발 47) — AI 가 에이전트 번호를 함께 준 x402 결제에만 붙는다.
+    /// 없으면 승인 창은 예전 그대로다(**말할 사실이 있을 때만 한 줄이 붙는다**).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent: Option<AgentTrust>,
+}
+
+/// MCP 가 온체인에서 읽어 **대조까지 마친 사실**. GUI 는 판정하지 않고 그대로 보여준다.
+///
+/// kura-mcp 의 erc8004::AgentTrust 와 같은 모양(두 크레이트는 공유 크레이트를 만들지 않는 정책 —
+/// 파일 JSON 이 계약이다). 필드를 바꾸면 양쪽을 함께 고쳐야 한다.
+///
+/// `wallet_check` = match | differs | unset | unknown, `domain_check` = match | differs | unknown.
+/// **여기에 "안전/검증됨" 같은 판정은 없다** — 등록은 무허가라 누구나 아무 도메인이나 적을 수
+/// 있고, 이 조회가 주는 건 일치·다름·모름뿐이다.
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct AgentTrust {
+    pub(crate) agent_id: u64,
+    pub(crate) chain_id: u64,
+    pub(crate) registered: bool,
+    pub(crate) wallet: String,
+    pub(crate) wallet_check: String,
+    pub(crate) uri_domain: String,
+    pub(crate) resource_domain: String,
+    pub(crate) domain_check: String,
+    pub(crate) feedback_clients: u32,
 }
 
 fn default_kind() -> String {
@@ -305,6 +330,7 @@ mod tests {
             kind: "transfer".into(),
             resource: String::new(),
             chain_id: 0,
+            agent: None,
         }
     }
 
@@ -342,6 +368,35 @@ mod tests {
         assert!(is_stale(&req_created(now_secs() + 10_000)));
     }
 
+    /// **크레이트 간 계약**: kura-mcp 가 쓰는 `agent` 필드를 GUI 가 그대로 읽어야 한다.
+    /// 두 크레이트는 코드를 공유하지 않으므로(정책) 이 JSON 자체가 계약이다 — 한쪽에서
+    /// 필드 이름을 바꾸면 조용히 None 이 되어 승인 창의 줄만 사라진다. 그래서 값까지 본다.
+    #[test]
+    fn request_carries_agent_trust_from_mcp() {
+        let json = r#"{"id":"1","token":"USDC","to":"0xB0b","amount":"0.01","memo":"",
+          "created":1,"kind":"x402","resource":"https://api.example.com/x","chain_id":8453,
+          "agent":{"agent_id":123,"chain_id":8453,"registered":true,
+          "wallet":"0xB0b","wallet_check":"match","uri_domain":"api.example.com",
+          "resource_domain":"api.example.com","domain_check":"match","feedback_clients":20}}"#;
+        let r: PaymentRequest = serde_json::from_str(json).unwrap();
+        let a = r.agent.expect("agent 필드");
+        assert_eq!(a.agent_id, 123);
+        assert!(a.registered);
+        assert_eq!(a.wallet_check, "match");
+        assert_eq!(a.domain_check, "match");
+        assert_eq!(a.uri_domain, "api.example.com");
+        assert_eq!(a.feedback_clients, 20);
+    }
+
+    /// 번호를 안 준 결제(대다수)는 `agent` 가 아예 없다 → None. 옛 요청 파일도 마찬가지.
+    /// 이게 깨지면 승인 창이 못 뜨거나(파싱 실패) 없는 사실을 말하게 된다.
+    #[test]
+    fn request_without_agent_is_none() {
+        let json = r#"{"id":"1","token":"USDC","to":"0xabc","amount":"1","memo":"","created":1}"#;
+        let r: PaymentRequest = serde_json::from_str(json).unwrap();
+        assert!(r.agent.is_none());
+    }
+
     // 결제 요청 JSON 왕복 — MCP가 쓰는 형식과 호환돼야 한다 (memo 한글 포함).
     #[test]
     fn payment_request_roundtrip() {
@@ -355,6 +410,7 @@ mod tests {
             kind: "transfer".into(),
             resource: String::new(),
             chain_id: 84_532,
+            agent: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: PaymentRequest = serde_json::from_str(&json).unwrap();

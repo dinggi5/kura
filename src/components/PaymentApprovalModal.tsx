@@ -8,6 +8,7 @@ import {
   ArrowUpRight,
   Bot,
   FileSignature,
+  Fingerprint,
   Globe,
   Loader2,
   Lock,
@@ -17,7 +18,7 @@ import {
 import { cn } from "@/lib/cn";
 import { useChain } from "@/lib/chain";
 import { fmtAmount, fmtCountdown, secsLeft, shortenAddress } from "@/lib/format";
-import type { Balances, PaymentRequest } from "@/lib/types";
+import type { AgentTrust, Balances, PaymentRequest } from "@/lib/types";
 import { modalCard, modalOverlay, primaryBtn, secondaryBtn, PwInput } from "@/components/ui";
 import { t } from "@/lib/i18n";
 
@@ -192,6 +193,9 @@ export function PaymentApprovalModal({
               {t("처음 보는 주소예요", "You haven't sent here before")}
             </p>
           )}
+          {/* ERC-8004 대조 (개발 47) — AI 가 에이전트 번호를 준 결제에만 붙는다.
+              번호가 없으면 아무것도 안 붙고 창은 예전 그대로다: 말할 사실이 있을 때만 말한다. */}
+          {request.agent && <AgentTrustLines agent={request.agent} />}
           {isX402 && (
             <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--color-ink-300)]">
               <FileSignature size={11} />
@@ -266,5 +270,94 @@ export function PaymentApprovalModal({
         </div>
       </motion.section>
     </motion.div>
+  );
+}
+
+/** 두 값의 대조 결과. `warn` 이면 **줄을 따로 세우고**(경고), 아니면 신원 줄 뒤에 짧게 붙인다.
+ *  — 조용한 경우는 조용하게, 말할 게 생겼을 때만 자리를 차지한다.
+ *
+ *  왜 "검증됨"이라 안 쓰나: ERC-8004 등록은 무허가다. 누구나 아무 도메인이나 적어 등록할 수
+ *  있어서, 일치는 "그 주장이 자기 자신과 앞뒤가 맞는다"는 뜻이지 안전을 뜻하지 않는다.
+ *  반대로 **불일치는 강한 신호**다(받는 주소가 바꿔치기된 정황) → 그때만 색과 줄을 준다. */
+function comparison(agent: AgentTrust): { warn: boolean; text: string } {
+  const w = agent.wallet_check;
+  const d = agent.domain_check;
+
+  // ── 다름: 경고 한 줄 (완결된 문장으로 또렷하게)
+  if (w === "differs" && d === "differs")
+    return {
+      warn: true,
+      text: t(
+        "받는 주소·기재 도메인이 모두 온체인 기록과 달라요",
+        "Both the address and the listed domain differ from the record",
+      ),
+    };
+  if (w === "differs")
+    return {
+      warn: true,
+      text: t(
+        "받는 주소가 온체인 등록 지갑과 달라요",
+        "The address differs from the registered wallet",
+      ),
+    };
+  if (d === "differs")
+    return {
+      warn: true,
+      text: t("기재 도메인이 이 리소스와 달라요", "The listed domain differs from this resource"),
+    };
+
+  // ── 같음·모름: 신원 줄 꼬리에 붙는 짧은 말
+  if (w === "match" && d === "match")
+    return { warn: false, text: t("주소·도메인 일치", "address and domain match") };
+  if (w === "match") return { warn: false, text: t("주소 일치", "address matches") };
+  if (w === "unset" && d === "match")
+    return { warn: false, text: t("도메인 일치 · 등록 지갑 없음", "domain matches · no wallet on record") };
+  if (w === "unset") return { warn: false, text: t("등록 지갑 없음", "no wallet on record") };
+  if (d === "match") return { warn: false, text: t("도메인 일치", "domain matches") };
+  return { warn: false, text: t("대조할 값 없음", "nothing to compare") };
+}
+
+/** 온체인 기록 대조 (개발 47). 조용한 결과는 **한 줄**, 어긋난 결과만 경고 줄을 하나 더 쓴다.
+ *
+ *  일부러 뺀 것 둘 —
+ *  ① 등록 문서의 자기신고 **이름**: 사람 눈앞에 이름을 크게 띄우는 순간 그게 사칭의 통로가 된다
+ *     (누구나 "Coinbase"로 등록할 수 있다). AI 는 lookup_agent 결과로 따로 본다.
+ *  ② **피드백 건수**: 시빌 가능해서 정직하려면 "누구나 남길 수 있어요" 단서를 늘 달아야 하는데,
+ *     그러면 승인 판단에 보탬은 없이 줄만 하나 더 든다. 숫자는 lookup_agent 로 넘겼다. */
+function AgentTrustLines({ agent }: { agent: AgentTrust }) {
+  const gray = "mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--color-ink-300)]";
+  const amber = "mt-1.5 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-500";
+
+  // 번호는 왔는데 온체인에 없다 = 그 자체가 말할 사실이다.
+  if (!agent.registered) {
+    return (
+      <p className={amber}>
+        <AlertTriangle size={11} className="shrink-0" />
+        {t(
+          `온체인에 없는 에이전트 번호예요 · #${agent.agent_id}`,
+          `No agent #${agent.agent_id} exists on-chain`,
+        )}
+      </p>
+    );
+  }
+
+  const cmp = comparison(agent);
+  return (
+    <>
+      <p className={cn(gray, "max-w-full break-all text-center")}>
+        <Fingerprint size={11} className="shrink-0" />
+        <span>
+          {t("온체인 기재", "On-chain record")} · #{agent.agent_id}
+          {agent.uri_domain && ` · ${agent.uri_domain}`}
+          {!cmp.warn && ` · ${cmp.text}`}
+        </span>
+      </p>
+      {cmp.warn && (
+        <p className={amber}>
+          <AlertTriangle size={11} className="shrink-0" />
+          {cmp.text}
+        </p>
+      )}
+    </>
   );
 }

@@ -35,7 +35,12 @@ import { chooseLang, lang, t, type Lang } from "@/lib/i18n";
 const RPC_CUSTOM = "__custom__";
 
 // Settings 의 boolean 필드만 — toggle() 이 실수로 문자열/숫자 필드를 뒤집지 못하게 좁힌다(코덱스 리뷰 low).
-type BoolSettingKey = "lock_on_blur" | "notify_auto" | "notify_hide_amount" | "auto_trusted_only";
+type BoolSettingKey =
+  | "lock_on_blur"
+  | "notify_auto"
+  | "notify_hide_amount"
+  | "auto_trusted_only"
+  | "agent_lookup";
 
 // RPC 프리셋은 활성 체인에 따라 달라진다(공식·PublicNode URL이 체인별로 다름).
 // ①공식 ②로그 안 남긴다 표방하는 대체 공개 RPC ③직접 입력(본인 키/노드 = 진짜 프라이버시).
@@ -436,6 +441,23 @@ export function SettingsScreen({
                     )}
                   </p>
                 </div>
+              )}
+
+              {/* ERC-8004 신원 조회 (개발 47) — 레지스트리가 배포된 체인에서만 보여준다.
+                  네트워크 섹션에 두는 이유: 하는 일이 "이 체인의 레지스트리를 읽는 것"이고,
+                  체인을 바꾸면 있고 없고가 갈리는 설정이라 선택 바로 아래가 제자리다. */}
+              {chain.erc8004 && (
+                <RowGroup>
+                  <ToggleRow
+                    title={t("에이전트 신원 조회", "Agent identity lookup")}
+                    desc={t(
+                      "AI가 상대의 에이전트 번호를 알려주면, 받는 주소·도메인이 온체인 기록과 같은지 대조해 승인 창에 알려줘요. 쓰던 RPC로 읽기만 하고, 상대 웹사이트에는 접속하지 않아요.",
+                      "When the AI knows the other side's agent number, Kura checks whether the address and domain match the on-chain record and says so in the approval window. It only reads over your existing RPC — it never visits their website.",
+                    )}
+                    checked={s.agent_lookup}
+                    onToggle={() => toggle("agent_lookup")}
+                  />
+                </RowGroup>
               )}
             </Section>
 

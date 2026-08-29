@@ -160,7 +160,7 @@ claude mcp add --scope user kura -- /Applications/Kura.app/Contents/MacOS/kura-m
 
 리포 루트의 [`.mcp.json`](.mcp.json)이 이미 들어 있어요. 이 폴더에서 `claude`를 실행하면 자동으로 잡혀요(처음엔 서버를 쓸지 묻는데 **승인**하면 돼요). 이 경로는 `cargo run`으로 매번 새로 빌드하는 개발용이에요 — 설치해서 쓰실 거라면 위의 앱 경로 등록이 맞아요.
 
-AI가 쓸 수 있는 도구: `get_wallet_status` · `get_balances` · `get_history`(읽기 전용) · `request_payment`(결제 요청 → 앱 승인 팝업) · `x402_fetch`(402 결제가 걸린 URL 호출).
+AI가 쓸 수 있는 도구: `get_wallet_status` · `get_balances` · `get_history`(읽기 전용) · `request_payment`(결제 요청 → 앱 승인 팝업) · `x402_fetch`(402 결제가 걸린 URL 호출) · `lookup_agent`(ERC-8004 에이전트 신원 조회 — 온체인 읽기 전용).
 
 > MCP 도구를 바꾸면 **AI 앱을 재시작**해야 반영돼요(서버가 세션 시작 때 1회 로드).
 

@@ -31,6 +31,9 @@ export type Settings = {
   auto_trusted_only: boolean;
   /** 활성 체인 ID — 84532=Base Sepolia(테스트넷) / 8453=Base 메인넷. 체인별 데이터 파일 분리. */
   chain_id: number;
+  /** ERC-8004 에이전트 신원 조회 (개발 47). AI 가 에이전트 번호를 주면 온체인 기록과 대조해
+   *  승인 창에 사실 한 줄을 붙인다. 읽기 전용·온체인만(웹 fetch 없음). 기본 켜짐. */
+  agent_lookup: boolean;
   /** 시작 시 업데이트 자동 확인 (개발 31). 읽기 전용으로만 쓴다 — 변경은 set_auto_check_update. */
   auto_check_update: boolean;
 };
@@ -69,6 +72,34 @@ export type HistoryEntry = {
   settle_tx?: string;
 };
 
+/** 대조 결과 하나 — 판정이 아니라 비교의 결과다.
+ *  wallet: match(같음) | differs(다름) | unset(등록 지갑 없음) | unknown(비교 불가)
+ *  domain: match | differs | unknown */
+export type CheckResult = "match" | "differs" | "unset" | "unknown";
+
+/** ERC-8004 대조 결과 (개발 47) — MCP 가 **온체인만** 읽어 대조까지 마친 사실.
+ *
+ * ⚠️ 여기엔 "안전/검증됨"이 없고 앞으로도 없어야 한다. ERC-8004 등록은 무허가라 누구나 아무
+ * 이름·도메인·지갑을 적을 수 있고 피드백도 누구나 남긴다. 화면은 **일치·다름·모름**만 말한다.
+ * 등록 문서의 자기신고 이름(name)은 일부러 여기 담지 않는다 — 사람 눈앞에 띄우는 순간
+ * 그게 사칭의 통로가 된다(AI 는 lookup_agent 결과로 따로 본다). */
+export type AgentTrust = {
+  agent_id: number;
+  chain_id: number;
+  /** 이 번호가 온체인에 존재하나. */
+  registered: boolean;
+  /** 온체인 등록 지갑(agentWallet). 미설정이면 빈 문자열. */
+  wallet: string;
+  wallet_check: CheckResult;
+  /** tokenURI 에 기재된 도메인(주장값). 해석 못 했으면 빈 문자열. */
+  uri_domain: string;
+  /** 실제 결제 리소스의 도메인. */
+  resource_domain: string;
+  domain_check: CheckResult;
+  /** 피드백을 남긴 주소 수. 누구나 남길 수 있다(시빌 가능). */
+  feedback_clients: number;
+};
+
 export type PaymentRequest = {
   id: string;
   token: string;
@@ -82,6 +113,9 @@ export type PaymentRequest = {
   resource?: string;
   /** 요청 생성 시점의 체인 ID. 승인 시 현재 활성 체인과 다르면 백엔드가 거부. */
   chain_id?: number;
+  /** ERC-8004 대조 결과 — AI 가 에이전트 번호를 함께 준 x402 결제에만 붙는다.
+   *  없으면 승인 창은 예전 그대로다(말할 사실이 있을 때만 한 줄이 붙는다). */
+  agent?: AgentTrust;
 };
 
 export type AgentStatus = { connected: boolean; client: string };

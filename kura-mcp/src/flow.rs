@@ -7,6 +7,7 @@
 // 사람 승인을 받아 수행한다(payment.rs 의 파일 IPC). 한도·긴급잠금·화이트리스트도 GUI 가 강제한다.
 
 use crate::chain::active_chain;
+use crate::erc8004::{self, AgentTrust};
 use crate::{payment, x402};
 use crate::{tf, ts};
 
@@ -191,11 +192,29 @@ pub enum X402Outcome {
     },
 }
 
+/// x402 실행 결과 + (요청했다면) ERC-8004 대조 결과.
+///
+/// 대조를 결과에 함께 싣는 이유: 승인 창의 사람과 **AI 가 같은 사실을 본다**. AI 는 이걸 읽고
+/// "주소가 기재와 다르니 결제를 접겠다"는 판단을 스스로 할 수 있고, 사람은 창에서 같은 줄을 본다.
+pub struct X402Result {
+    pub outcome: X402Outcome,
+    /// 온체인 대조 결과. 번호를 안 줬거나 조회를 못 했으면 None.
+    pub agent: Option<AgentTrust>,
+    /// 조회를 못 한 이유(꺼짐·레지스트리 없는 체인·RPC 실패). **결제 흐름은 막지 않는다** —
+    /// 신원 조회 실패로 결제가 죽으면, 조회를 켠 순간 앱이 더 잘 깨지는 셈이 된다.
+    pub agent_note: String,
+}
+
 /// x402 유료 리소스를 가져온다. GET → 402 면 결제 요구 파싱 → GUI 승인(서명) → 결제 헤더로 재요청.
 ///
-/// `memo` = 호출자가 준 결제 사유(없으면 서버 설명으로 폴백). `Err` = 진행 불가(요청/파싱 실패·
-/// 앱 꺼짐·대기 중·시간 초과·서명 누락·재요청 실패).
-pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, String> {
+/// `memo` = 호출자가 준 결제 사유(없으면 서버 설명으로 폴백). `agent_id` = AI 가 알아낸 상대의
+/// ERC-8004 에이전트 번호(선택) — 주면 온체인 기록과 대조해 승인 창에 사실 한 줄이 붙는다.
+/// `Err` = 진행 불가(요청/파싱 실패·앱 꺼짐·대기 중·시간 초과·서명 누락·재요청 실패).
+pub async fn run_x402(
+    url: &str,
+    memo: Option<&str>,
+    agent_id: Option<u64>,
+) -> Result<X402Result, String> {
     let url = url.trim().to_string();
     let client = http_client()?;
 
@@ -208,7 +227,12 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
     let http_status = resp.status().as_u16();
     if http_status != 402 {
         let body = read_body_capped(resp).await;
-        return Ok(X402Outcome::NotPaid { http_status, body });
+        // 결제가 없으면 대조할 결제도 없다 — 조회를 아예 하지 않는다(불필요한 RPC 0).
+        return Ok(X402Result {
+            outcome: X402Outcome::NotPaid { http_status, body },
+            agent: None,
+            agent_note: String::new(),
+        });
     }
 
     // probe 가 리다이렉트를 따라갔을 수 있으니 402 를 실제로 낸 "최종" URL 을 잡아둔다 —
@@ -252,7 +276,30 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
         })
         .unwrap_or_default();
 
-    // 3) 승인할 앱이 켜져 있는지 + single-flight.
+    // 3) ERC-8004 대조 (개발 47) — AI 가 번호를 준 경우에만. **여기서 실패해도 결제는 계속된다**:
+    // 조회는 판단 재료를 하나 더 얹는 일이지 결제의 전제조건이 아니다. 못 읽으면 줄이 안 붙고,
+    // 사용자는 예전과 똑같은 승인 창을 본다.
+    let mut agent_note = String::new();
+    let agent = match agent_id {
+        None => None,
+        Some(_) if !erc8004::lookup_enabled() => {
+            agent_note = ts!(
+                "에이전트 신원 조회가 설정에서 꺼져 있어요.",
+                "Agent identity lookup is turned off in the wallet settings."
+            )
+            .to_string();
+            None
+        }
+        Some(id) => match erc8004::lookup(id).await {
+            Ok(rec) => Some(erc8004::trust_from(&rec, req.pay_to.trim(), &resource)),
+            Err(e) => {
+                agent_note = e;
+                None
+            }
+        },
+    };
+
+    // 4) 승인할 앱이 켜져 있는지 + single-flight.
     if !payment::app_alive() {
         return Err(ts!(
             "지갑 앱이 실행 중이 아니에요. 앱을 켠 뒤 다시 시도하세요.",
@@ -268,8 +315,14 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
         .into());
     }
 
-    // 4) GUI에 서명 요청 → 사람 승인 → 서명 페이로드 수신.
-    let id = payment::write_x402_request(req.pay_to.trim(), &amount_usdc, &memo, &resource)?;
+    // 5) GUI에 서명 요청 → 사람 승인 → 서명 페이로드 수신.
+    let id = payment::write_x402_request(
+        req.pay_to.trim(),
+        &amount_usdc,
+        &memo,
+        &resource,
+        agent.clone(),
+    )?;
     let result = match payment::await_result(&id, payment::APPROVAL_TIMEOUT).await {
         Some(r) => r,
         None => {
@@ -282,9 +335,13 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
         }
     };
     if result.status != "approved" {
-        return Ok(X402Outcome::Declined {
-            status: result.status, // rejected | failed
-            detail: result.detail,
+        return Ok(X402Result {
+            outcome: X402Outcome::Declined {
+                status: result.status, // rejected | failed
+                detail: result.detail,
+            },
+            agent,
+            agent_note,
         });
     }
     let payment = result.x402.ok_or(ts!(
@@ -292,7 +349,7 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
         "Approved, but the signature payload is empty"
     ))?;
 
-    // 5) 결제 헤더를 붙여 재요청 → 콘텐츠 수신.
+    // 6) 결제 헤더를 붙여 재요청 → 콘텐츠 수신.
     // V2면 PAYMENT-SIGNATURE(+ resource/accepted 에코), V1이면 X-PAYMENT. 정산 응답 헤더 이름도 버전별.
     let sub = required.build_submission(&req, &payment)?;
     // 결제 헤더(서명된 인가)는 리다이렉트를 따라가지 않는 클라이언트로 최종 URL 에만 보낸다.
@@ -322,13 +379,17 @@ pub async fn run_x402(url: &str, memo: Option<&str>) -> Result<X402Outcome, Stri
         }
     }
 
-    Ok(X402Outcome::Paid {
-        http_status: paid_status,
-        ok,
-        amount: amount_usdc,
-        pay_to: req.pay_to,
-        resource,
-        settlement,
-        body,
+    Ok(X402Result {
+        outcome: X402Outcome::Paid {
+            http_status: paid_status,
+            ok,
+            amount: amount_usdc,
+            pay_to: req.pay_to,
+            resource,
+            settlement,
+            body,
+        },
+        agent,
+        agent_note,
     })
 }

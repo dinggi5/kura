@@ -22,6 +22,11 @@ pub struct ChainConfig {
     pub x402_network_caip2: &'static str,
     /// 익스플로러 트랜잭션 URL 접두사 (뒤에 tx 해시를 붙인다).
     pub explorer_tx_prefix: &'static str,
+    /// ERC-8004 IdentityRegistry (개발 47). `None` = 이 체인엔 레지스트리가 없다 →
+    /// 에이전트 신원 조회를 아예 안 한다(예: 아직 배포 안 된 신규 체인).
+    pub erc8004_identity: Option<Address>,
+    /// ERC-8004 ReputationRegistry — 피드백 클라이언트 수 조회용. 없으면 피드백은 0으로 둔다.
+    pub erc8004_reputation: Option<Address>,
 }
 
 /// Base Sepolia (테스트넷). 기본 체인 — 데이터 파일이 접미사 없이 저장되는 "원본" 체인.
@@ -33,6 +38,8 @@ pub const BASE_SEPOLIA: ChainConfig = ChainConfig {
     x402_network_v1: "base-sepolia",
     x402_network_caip2: "eip155:84532",
     explorer_tx_prefix: "https://sepolia.basescan.org/tx/",
+    erc8004_identity: Some(address!("0x8004A818BFB912233c491871b3d84c89A494BD9e")),
+    erc8004_reputation: Some(address!("0x8004B663056A597Dffe9eCcC1965A193B7388713")),
 };
 
 /// Base 메인넷 (실제 자금). x402 네트워크명은 "base" / CAIP-2 "eip155:8453".
@@ -44,6 +51,8 @@ pub const BASE_MAINNET: ChainConfig = ChainConfig {
     x402_network_v1: "base",
     x402_network_caip2: "eip155:8453",
     explorer_tx_prefix: "https://basescan.org/tx/",
+    erc8004_identity: Some(address!("0x8004A169FB4a3325136EB29fA0ceB6D2e539a432")),
+    erc8004_reputation: Some(address!("0x8004BAa17C55a88189AE136b182e5fdA19dE9b63")),
 };
 
 /// 사용자가 선택한 체인 ID. 파일 없음(첫 실행)=메인넷, 깨짐/옛 설정=테스트넷 — 본문 주석 참고.
@@ -127,5 +136,36 @@ pub fn chain_file(stem: &str) -> String {
     match active_chain().chain_id {
         id if id == BASE_SEPOLIA.chain_id => format!("{stem}.json"),
         id => format!("{stem}-{id}.json"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 레지스트리 주소를 문자로 못박는다 — 하드코딩한 컨트랙트 주소의 오타는 조용히
+    /// **엉뚱한 컨트랙트를 신뢰 근거로 읽는** 실패라, 눈으로 못 잡는다.
+    /// 값 출처: erc-8004/erc-8004-contracts 공식 배포 목록 + 개발 47에서 두 체인 모두
+    /// 온체인 `getVersion()` = "2.0.0" 실응답으로 교차 확인.
+    #[test]
+    fn erc8004_registry_addresses_are_pinned() {
+        assert_eq!(
+            BASE_MAINNET.erc8004_identity.unwrap().to_string(),
+            "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+        );
+        assert_eq!(
+            BASE_MAINNET.erc8004_reputation.unwrap().to_string(),
+            "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63"
+        );
+        assert_eq!(
+            BASE_SEPOLIA.erc8004_identity.unwrap().to_string(),
+            "0x8004A818BFB912233c491871b3d84c89A494BD9e"
+        );
+        assert_eq!(
+            BASE_SEPOLIA.erc8004_reputation.unwrap().to_string(),
+            "0x8004B663056A597Dffe9eCcC1965A193B7388713"
+        );
+        // 두 체인의 레지스트리는 서로 다르다(체인별 배포) — 한쪽을 복사하다 생기는 사고 방지.
+        assert_ne!(BASE_MAINNET.erc8004_identity, BASE_SEPOLIA.erc8004_identity);
     }
 }

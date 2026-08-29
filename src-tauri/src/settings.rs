@@ -80,6 +80,16 @@ pub(crate) struct Settings {
     /// 옛 설정엔 없어서 기본 = 테스트넷(실돈 안전). 체인별로 사용액·내역·신뢰목록 파일이 분리된다.
     #[serde(default = "default_chain_id")]
     pub(crate) chain_id: u64,
+    /// ERC-8004 에이전트 신원 조회 (개발 47). AI 가 상대의 에이전트 번호를 함께 주면, 승인 전에
+    /// 온체인 레지스트리를 읽어 **받는 주소·리소스 도메인이 온체인 기재와 같은지 대조**해 승인
+    /// 창에 사실 한 줄을 붙인다. 조회는 **읽기 전용·온체인 한정**이다 — 에이전트의 웹 문서를
+    /// 가져오지 않는다(이 앱은 바깥에 말을 걸지 않는다).
+    ///
+    /// **기본 켜짐** — auto_check_update(기본 꺼짐)와 갈리는 이유: 저건 깃허브라는 **새 상대**에게
+    /// 말을 거는 일이고, 이건 이미 잔액·결제로 계속 말하고 있는 **그 RPC** 에 읽기를 한 번 더
+    /// 얹는 일이다. 새로 생기는 상대가 없으므로, 판단 재료를 주는 쪽을 기본으로 둔다.
+    #[serde(default = "default_true")]
+    pub(crate) agent_lookup: bool,
 
     // ── 아래 둘은 **앱이 관리하는 필드**다. 설정 화면 폼에서 오는 값이 아니라서
     //    set_settings 가 클라이언트가 보낸 값을 무시하고 디스크 값을 지킨다(preserve_managed).
@@ -147,6 +157,7 @@ impl Default for Settings {
             // 없는 기존 지갑"은 conservative()(테스트넷)가 따로 맡는다 — 여기는
             // **진짜 신규**(지갑도 설정도 없는 첫 실행)만.
             chain_id: BASE_MAINNET.chain_id,
+            agent_lookup: true,       // 켜짐 — 필드 doc 참고(새 상대 없음, 같은 RPC 읽기)
             autostart: None,          // 아직 모름 → 첫 실행에서 OS 상태를 채택
             auto_check_update: false, // 신규 기본 꺼짐 (개발 39) — 필드 doc 참고
             lang: None,               // 아직 안 고름 → 시스템 언어 (개발 42)
@@ -456,6 +467,24 @@ fn preserve_managed(settings: &mut Settings, from: &Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ERC-8004 조회는 신규·기존 파일 모두 켜짐이어야 한다 (개발 47).
+    /// 기존 파일(필드 없음)까지 켜짐인 이유: 새 바깥 상대가 생기는 게 아니라 이미 쓰던 RPC 에
+    /// 읽기를 얹는 것이라, 조용히 꺼진 채 기능이 없는 것처럼 보이는 쪽이 더 나쁘다.
+    #[test]
+    fn agent_lookup_defaults_on_for_new_and_old_files() {
+        assert!(Settings::default().agent_lookup);
+        assert!(Settings::conservative().agent_lookup);
+        // 이 필드가 없던 시절의 설정 파일 → serde 기본으로 켜짐.
+        let old = r#"{"single_usdc":"5","daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05"}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.agent_lookup);
+        // 명시적으로 끈 파일은 꺼진 채로 읽힌다(사용자 선택이 기본값에 먹히지 않게).
+        let off = r#"{"single_usdc":"5","daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05",
+          "agent_lookup":false}"#;
+        let s: Settings = serde_json::from_str(off).unwrap();
+        assert!(!s.agent_lookup);
+    }
 
     // 기본 설정값 — 신규 기본은 메인넷(개발 39), 한도는 실돈 가드레일 축(USDC 5/20, ETH 0.01/0.05).
     #[test]

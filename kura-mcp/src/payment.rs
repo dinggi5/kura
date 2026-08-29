@@ -7,6 +7,7 @@
 // single-flight: 한 번에 대기 요청 1건. 앱이 안 켜져 있으면(하트비트 신선도) 즉시 안내.
 
 use crate::chain::chain_file;
+use crate::erc8004::AgentTrust;
 use crate::wallet::jigap_dir;
 use crate::{tf, ts};
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,10 @@ pub struct PaymentRequest {
     /// 요청 생성 시점의 활성 체인 ID — GUI가 승인 시 현재 체인과 다르면 거부한다(코덱스 개발20 #2).
     #[serde(default)]
     pub chain_id: u64,
+    /// ERC-8004 대조 결과 (개발 47). AI 가 에이전트 번호를 함께 준 x402 결제에서만 채워진다 —
+    /// 없으면 승인 창은 예전 그대로다(**말할 사실이 있을 때만 한 줄이 붙는다**).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentTrust>,
 }
 
 fn default_kind() -> String {
@@ -204,7 +209,7 @@ fn new_id() -> String {
 
 /// 온체인 송금 요청을 파일에 쓴다 (kind="transfer"). 반환된 id로 결과를 매칭한다.
 pub fn write_request(token: &str, to: &str, amount: &str, memo: &str) -> Result<String, String> {
-    write_request_kind(token, to, amount, memo, "transfer", "")
+    write_request_kind(token, to, amount, memo, "transfer", "", None)
 }
 
 /// x402 결제 서명 요청을 파일에 쓴다 (kind="x402", USDC 고정).
@@ -214,11 +219,13 @@ pub fn write_x402_request(
     amount: &str,
     memo: &str,
     resource: &str,
+    agent: Option<AgentTrust>,
 ) -> Result<String, String> {
-    write_request_kind("USDC", to, amount, memo, "x402", resource)
+    write_request_kind("USDC", to, amount, memo, "x402", resource, agent)
 }
 
 /// 공통 요청 작성기 — kind/resource 만 다르고 나머지 single-flight 로직은 동일.
+#[allow(clippy::too_many_arguments)]
 fn write_request_kind(
     token: &str,
     to: &str,
@@ -226,6 +233,7 @@ fn write_request_kind(
     memo: &str,
     kind: &str,
     resource: &str,
+    agent: Option<AgentTrust>,
 ) -> Result<String, String> {
     let id = new_id();
     let req = PaymentRequest {
@@ -238,6 +246,7 @@ fn write_request_kind(
         kind: kind.to_string(),
         resource: resource.to_string(),
         chain_id: crate::chain::active_chain().chain_id, // 요청 시점 활성 체인 각인(승인 시 GUI가 대조)
+        agent,
     };
     let json = serde_json::to_string_pretty(&req)
         .map_err(|e| tf!("직렬화 실패: {e}", "Couldn't serialize the request: {e}"))?;
@@ -348,6 +357,7 @@ mod tests {
             kind: "transfer".into(),
             resource: String::new(),
             chain_id: 84_532,
+            agent: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: PaymentRequest = serde_json::from_str(&json).unwrap();
@@ -364,6 +374,27 @@ mod tests {
         let r: PaymentRequest = serde_json::from_str(json).unwrap();
         assert_eq!(r.kind, "transfer");
         assert_eq!(r.resource, "");
+        assert!(r.agent.is_none());
+    }
+
+    /// 대조 결과가 없으면 JSON 에 `agent` 키 자체가 없어야 한다 — 옛 GUI 가 읽어도
+    /// 달라지는 게 없고, "조회를 했는데 결과가 비었다"와 "조회를 안 했다"가 안 섞인다.
+    #[test]
+    fn agent_field_is_omitted_when_absent() {
+        let r = PaymentRequest {
+            id: "1".into(),
+            token: "USDC".into(),
+            to: "0xabc".into(),
+            amount: "1".into(),
+            memo: String::new(),
+            created: 1,
+            kind: "x402".into(),
+            resource: "https://api.example.com/x".into(),
+            chain_id: 8453,
+            agent: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("agent"), "{json}");
     }
 
     /// 결과 파싱 — GUI가 쓴 형식. x402 필드 없는 기존 결과도 파싱돼야 한다.

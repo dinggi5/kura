@@ -25,6 +25,9 @@ export interface ChainConfig {
   publicNode: string;
   /** 테스트넷이면 true — 받기 화면의 Faucet 노출, 메인넷 경고 등에 쓴다. */
   testnet: boolean;
+  /** ERC-8004 레지스트리가 이 체인에 배포돼 있나 (개발 47). false 면 신원 조회 설정을
+   *  아예 안 보여준다 — 켤 수 없는 스위치를 두는 것보다 없는 게 정직하다. */
+  erc8004: boolean;
 }
 
 /** Base Sepolia (테스트넷). 연습용 — 옛 파일·깨진 설정의 보수적 폴백 체인(백엔드 기준). */
@@ -36,6 +39,7 @@ export const BASE_SEPOLIA: ChainConfig = {
   defaultRpc: "https://sepolia.base.org",
   publicNode: "https://base-sepolia-rpc.publicnode.com",
   testnet: true,
+  erc8004: true,
 };
 
 /** Base 메인넷 (실제 자금). 신규 기본 체인 (개발 39). */
@@ -47,6 +51,7 @@ export const BASE_MAINNET: ChainConfig = {
   defaultRpc: "https://mainnet.base.org",
   publicNode: "https://base-rpc.publicnode.com",
   testnet: false,
+  erc8004: true,
 };
 
 /** 선택 가능한 체인 목록 (설정 토글 순서 — 메인넷이 왼쪽/기본, 개발 39). */
