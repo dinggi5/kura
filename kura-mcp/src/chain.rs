@@ -57,6 +57,11 @@ pub const BASE_MAINNET: ChainConfig = ChainConfig {
 
 /// 사용자가 선택한 체인 ID. 파일 없음(첫 실행)=메인넷, 깨짐/옛 설정=테스트넷 — 본문 주석 참고.
 fn selected_chain_id() -> u64 {
+    env_chain_id().unwrap_or_else(settings_chain_id)
+}
+
+/// `KURA_CHAIN_ID` 로 강제된 체인 ID (없으면 None). 잘못된 값이면 즉시 종료한다.
+fn env_chain_id() -> Option<u64> {
     // 환경변수 우선 — 테스트·스크립트가 사용자의 라이브 settings.json 에 의존하지 않게 체인을 고정한다.
     // GUI 와 다른 (정상) 체인을 가리키더라도, 결제 요청에 각인된 chain_id 를 GUI 가 승인 시 대조해
     // 거부하므로(개발 20 가드) 잘못된 체인으로 송금되지 않는다. 단, **잘못/미지원 값은 조용히
@@ -78,8 +83,13 @@ fn selected_chain_id() -> u64 {
             );
             std::process::exit(1);
         }
-        return id;
+        return Some(id);
     }
+    None
+}
+
+/// settings.json 이 말하는 체인 ID (환경변수를 보지 않는다).
+fn settings_chain_id() -> u64 {
     // 단위 테스트는 실제 ~/.jigap/settings.json 을 읽지 않는다 — 사용자의 지갑 설정(메인넷 등)에
     // 테스트 결과가 좌우되지 않게 기본 체인(Base Sepolia)으로 고정해 항상 결정론적이게 한다.
     #[cfg(test)]
@@ -117,6 +127,21 @@ fn selected_chain_id() -> u64 {
                 .map(|c| c.chain_id)
                 .unwrap_or(BASE_SEPOLIA.chain_id),
         }
+    }
+}
+
+/// **환경변수가 settings 와 다른 체인을 강제하고 있는가** (개발 49).
+///
+/// `KURA_CHAIN_ID` 는 체인만 바꾸고 `settings.json` 의 `rpc_url` 은 그대로 뒀다 → 커스텀 RPC
+/// (또는 프리셋 RPC)를 쓰는 사람이 이 환경변수로 체인을 넘기면 **딴 체인의 RPC 에 이 체인의
+/// 컨트랙트를 묻는 꼴**이 되어 잔액 조회가 `returned no data ("0x")` 로 죽는다(개발 48 실측).
+/// GUI 로 체인을 바꾸면 프리셋이 새 체인으로 재매핑되므로 정상 — 환경변수 경로만의 함정이다.
+///
+/// 두 체인이 **같으면 false** — 그때 rpc_url 은 이 체인의 것이 맞으니 그대로 존중한다.
+pub fn env_forces_other_chain() -> bool {
+    match env_chain_id() {
+        Some(id) => id != settings_chain_id(),
+        None => false,
     }
 }
 

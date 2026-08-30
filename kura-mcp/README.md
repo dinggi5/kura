@@ -69,6 +69,10 @@ KURA_CHAIN_ID=84532 kura balance       # 강제로 Base Sepolia 에서 조회
 GUI 와 다른 체인을 가리켜도, 결제 요청에 각인된 chain_id 를 GUI 가 승인 시 대조해 거부하므로
 (개발 20 가드) 잘못된 체인으로 송금되지 않는다.
 
+이 환경변수로 **설정과 다른 체인**을 고정하면 `settings.json` 의 `rpc_url` 은 그 체인의
+엔드포인트가 아니므로 쓰지 않고, 고정한 체인의 공개 RPC 로 폴백한다(개발 49). 커스텀 RPC 를
+쓰는 사람이 이 변수로 체인을 갈아탔을 때 잔액 조회가 `returned no data ("0x")` 로 죽던 걸 막는다.
+
 ## Claude Code에 연결 (MCP)
 
 레포 루트의 [`.mcp.json`](../.mcp.json)에 이미 등록돼 있다. 프로젝트 디렉터리에서 Claude

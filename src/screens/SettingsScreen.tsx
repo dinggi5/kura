@@ -449,7 +449,7 @@ export function SettingsScreen({
               {chain.erc8004 && (
                 <RowGroup>
                   <ToggleRow
-                    title={t("에이전트 신원 조회", "Agent identity lookup")}
+                    title={t("에이전트 신원 조회 (ERC-8004)", "Agent identity lookup (ERC-8004)")}
                     desc={t(
                       "AI가 상대의 에이전트 번호를 알려주면, 받는 주소·도메인이 온체인 기록과 같은지 대조해 승인 창에 알려줘요. 쓰던 RPC로 읽기만 하고, 상대 웹사이트에는 접속하지 않아요.",
                       "When the AI knows the other side's agent number, Kura checks whether the address and domain match the on-chain record and says so in the approval window. It only reads over your existing RPC — it never visits their website.",

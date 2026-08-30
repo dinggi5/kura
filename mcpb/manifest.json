@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "kura",
   "display_name": "Kura",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A local Ethereum wallet for AI agents — read balances, pay with x402. The key never leaves this Mac.",
   "long_description": "Connects to the installed Kura app to read balances and history, and to **ask** for payments. By default a payment only goes out after the app opens an approval window and a human approves it with their password (automatic approval without a password happens only if the user turned autopay on themselves, and only within an unlocked session, a small limit, and a trusted address). Passwords and recovery phrases are typed in the app alone — they never enter a conversation or a config file.\n\nThis extension contains no executable. It verifies and runs the signed, notarized binary inside the installed Kura.app. Install Kura first: https://github.com/dinggi5/kura",
   "author": {

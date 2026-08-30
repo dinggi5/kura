@@ -12,6 +12,7 @@ use crate::i18n::{tf, ts};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::store::{jigap_dir, now_secs, write_json};
 use crate::transfer::{send_eth, send_usdc};
@@ -193,17 +194,102 @@ pub(crate) fn resolve_request(result: &PaymentResult) -> Result<(), String> {
     Ok(())
 }
 
-/// GUI가 1초마다 폴링한다. 대기 요청을 돌려주고 하트비트를 갱신한다(앱 생존 표시).
-/// 하트비트 디스크 쓰기는 2초에 한 번이면 충분하다 (MCP 신선도 기준 10초 = 5배 여유).
+// ---------- 생존 감시 (개발 49) ----------
+//
+// 개발 48 실측: 창을 안 건드리면 **약 5분 뒤 프론트 폴링이 완전히 멎는다**(WebView 타이머
+// 억제). 하트비트가 그 폴링에만 매달려 있어 같이 멎었고, MCP 는 그 뒤 도착한 결제를
+// 「지갑 앱이 실행 중이 아니에요」로 거절했다. 트레이 상주 앱이라 **창이 숨어 있는 게 평상시**고,
+// "AI 와 대화하다 결제가 필요해진" 순간은 대개 지갑을 5분 넘게 안 건드린 뒤다 → 드문 일이 아니다.
+//
+// 고침은 **두 개가 한 쌍**이다. ① 하트비트를 러스트가 찍는다(프로세스가 살아 있다는 건 러스트만
+// 정직하게 안다). ②만 빼고 ①만 하면 **개악**이다 — 정직한 즉시 거절이 "요청은 받았는데 창은
+// 안 뜸"이라는 5분짜리 침묵으로 바뀐다. 그래서 ② **요청이 왔는데 프론트가 자고 있으면 러스트가
+// 창을 깨운다**. 창이 뜨면 WebView 가 되살아나 기존 경로(자율 승인 시도 → 실패 시 모달)가
+// 그대로 이어진다.
+
+/// 하트비트를 다시 쓰는 주기(초). MCP 신선도 기준(payment.rs ALIVE_SECS = 10초)의 5배 여유.
+const HEARTBEAT_SECS: u64 = 2;
+
+/// 프론트 폴링이 이만큼 끊기면 "WebView 가 잠들었다"로 본다. 폴링 주기가 1초라 3초면
+/// 두 번을 내리 놓친 뒤다 — 한 박자 밀린 것과 구별된다.
+const FRONT_STALE_SECS: u64 = 3;
+
+/// 잠든 프론트를 깨우려고 창을 다시 띄우는 최소 간격(초). 한 번의 show 로 안 깨어난
+/// 경우에만 다시 시도한다(깨어나면 폴링이 돌아와 아래 조건에서 걸러진다).
+const WAKE_RETRY_SECS: u64 = 15;
+
+/// 프론트(WebView)가 마지막으로 폴링한 시각. 0 = 아직 한 번도.
+static LAST_POLL: AtomicU64 = AtomicU64::new(0);
+
+/// 하트비트를 찍고, 프론트가 자는 동안 도착한 결제 요청에 창을 깨우는 상주 스레드.
+///
+/// **프론트가 깨어 있으면 아무것도 하지 않는다**(하트비트만 계속 찍는다). 이게 중요하다 —
+/// 요청이 오자마자 창을 띄우면 자율 결제(창 없이 조용히 끝나야 하는 경로)까지 창이 튀어나온다.
+/// 지금 동작은 "프론트가 살아 있으면 예전 그대로, 자고 있을 때만 러스트가 대신 깨운다"다.
+///
+/// 창 조작은 AppKit 을 건드리므로 반드시 메인 스레드에서 한다(트레이 rect 조회 포함).
+fn watchdog(app: tauri::AppHandle) {
+    let mut last_beat = 0u64;
+    // 마지막으로 창을 깨운 시각. 0 = 아직 안 깨움 → 다음 대기 요청에 즉시 깨운다.
+    let mut last_wake = 0u64;
+    // 우리가 마지막으로 적용한 "항상 위" 값. None = 아직 한 번도 안 건드림.
+    let mut last_pinned: Option<bool> = None;
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let now = now_secs();
+        if now.saturating_sub(last_beat) >= HEARTBEAT_SECS {
+            last_beat = now;
+            let _ = write_json(heartbeat_path().unwrap_or_default(), &Heartbeat { ts: now });
+        }
+        // 프론트가 살아 있다 → 폴링이 이미 같은 일(고정 수렴·모달·자율 승인)을 하고 있다.
+        if now.saturating_sub(LAST_POLL.load(Ordering::Relaxed)) <= FRONT_STALE_SECS {
+            last_pinned = None; // 주도권을 넘긴다 — 다시 잠들면 그때 처음부터 다시 맞춘다.
+            continue;
+        }
+        // 여기서부터는 "프론트가 잔다" — 고정 수렴도 우리가 대신한다.
+        let pinned = has_pending();
+        if !pinned {
+            last_wake = 0;
+        }
+        let wake = pinned && now.saturating_sub(last_wake) >= WAKE_RETRY_SECS;
+        if wake {
+            last_wake = now;
+        }
+        // **대기 요청이 없고 값도 그대로면 메인 스레드를 깨우지 않는다.** 트레이 상주 앱은
+        // 하루 종일 이 상태로 있다 — 여기서 매초 메시지를 보내면 앱이 영영 못 쉰다.
+        // 반대로 승인 대기 중(pinned=true)에는 매초 다시 적용한다: 그 몇 초가 돈이 걸린
+        // 구간이고, tray::set_pinned 의 자가 치유(값을 캐시하지 않는다)가 필요한 곳이다.
+        let converge = pinned || last_pinned == Some(true);
+        if !converge && !wake {
+            continue;
+        }
+        last_pinned = Some(pinned);
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            crate::tray::set_pinned(&handle, pinned);
+            if wake {
+                crate::tray::show(&handle);
+            }
+        });
+    }
+}
+
+/// 감시 스레드를 띄운다 (setup 에서 한 번).
+pub(crate) fn spawn_watchdog(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || watchdog(app));
+}
+
+/// GUI가 1초마다 폴링한다. 대기 요청을 돌려준다.
+///
+/// **하트비트는 여기서 찍지 않는다**(개발 49). WebView 의 타이머는 창이 숨은 채 5분이 지나면
+/// 멎어서(개발 48 실측: 0~300초 정상 → 약 305초부터 10분간 0회) 하트비트가 같이 멎었고,
+/// 그동안 MCP 가 결제를 「앱이 실행 중이 아니에요」로 거절했다 — 앱은 멀쩡히 떠 있는데도.
+/// 지금은 러스트 스레드(watchdog)가 찍고, 이 커맨드는 **프론트가 아직 깨어 있다는 표식**만
+/// 남긴다. watchdog 이 그 표식을 보고 "WebView 가 잠들었는지"를 판단한다.
 #[tauri::command]
 pub(crate) fn get_pending_request(app: tauri::AppHandle) -> Option<PaymentRequest> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static LAST_BEAT: AtomicU64 = AtomicU64::new(0);
-    let now = now_secs();
-    if now.saturating_sub(LAST_BEAT.load(Ordering::Relaxed)) >= 2 {
-        LAST_BEAT.store(now, Ordering::Relaxed);
-        let _ = write_json(heartbeat_path().unwrap_or_default(), &Heartbeat { ts: now });
-    }
+    LAST_POLL.store(now_secs(), Ordering::Relaxed);
     // 파일은 한 번만 읽고 그 값으로 둘 다 정한다 — 두 번 읽으면 그 사이에 요청이
     // 생기거나 사라질 때 한 폴링 안에서 "모달은 뜨는데 고정은 꺼진" 상태가 나온다.
     let pending = live_request();

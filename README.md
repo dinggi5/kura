@@ -51,7 +51,7 @@ brew install --cask dinggi5/tap/kura
 ```bash
 git clone https://github.com/dinggi5/kura.git
 cd kura
-git checkout v0.3.0   # 배포본과 같은 소스. 빼면 개발 중인 최신 코드가 받아져요
+git checkout v0.3.1   # 배포본과 같은 소스. 빼면 개발 중인 최신 코드가 받아져요
 npm ci                # package-lock.json 그대로 설치 (install 은 버전이 올라갈 수 있어요)
 
 # 개발 모드로 바로 실행

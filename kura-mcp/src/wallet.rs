@@ -58,8 +58,23 @@ struct RpcSettings {
     rpc_url: String,
 }
 
+/// settings 의 rpc_url 과 활성 체인의 기본 RPC 중 무엇을 쓸지 — 순수 판정(테스트용).
+///
+/// `forced_other_chain` = `KURA_CHAIN_ID` 가 settings 와 **다른** 체인을 강제한 상태.
+/// 그때 settings 의 rpc_url 은 **딴 체인의 엔드포인트**다 — 그대로 쓰면 이 체인의 컨트랙트를
+/// 저쪽 체인에 물어 잔액이 `returned no data ("0x")` 로 죽는다(개발 48 실측 → 개발 49 수정).
+/// 커스텀 RPC 를 조용히 버리는 셈이지만, 대안이 "조용히 안 되는 것"이라 이쪽이 낫다.
+fn pick_rpc(custom: &str, forced_other_chain: bool, default_rpc: &str) -> String {
+    if custom.is_empty() || forced_other_chain {
+        default_rpc.to_string()
+    } else {
+        custom.to_string()
+    }
+}
+
 /// 사용자가 설정한 RPC를 돌려준다. 없거나 비어 있으면 활성 체인의 공식 RPC(default_rpc)로 폴백.
 /// GUI(src-tauri)와 동일한 settings.json 을 읽으므로 두 프로세스의 RPC가 자동으로 일치한다.
+/// 단, 환경변수로 체인을 갈아탄 경우엔 그 rpc_url 이 딴 체인 것이므로 쓰지 않는다(pick_rpc).
 pub fn effective_rpc() -> String {
     let url = settings_path()
         .ok()
@@ -67,11 +82,11 @@ pub fn effective_rpc() -> String {
         .and_then(|s| serde_json::from_str::<RpcSettings>(&s).ok())
         .map(|s| s.rpc_url.trim().to_string())
         .unwrap_or_default();
-    if url.is_empty() {
-        active_chain().default_rpc.to_string()
-    } else {
-        url
-    }
+    pick_rpc(
+        &url,
+        crate::chain::env_forces_other_chain(),
+        active_chain().default_rpc,
+    )
 }
 
 /// AI(MCP)/CLI 로 나가는 에러·로그 문자열에서 URL 을 통째로 `[RPC]` 로 가린다.
@@ -283,6 +298,21 @@ pub fn read_history() -> Vec<HistoryEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RPC 선택 (개발 49). 환경변수로 체인을 갈아탄 경우엔 settings 의 커스텀 RPC 를 버린다 —
+    /// 그 URL 은 **딴 체인의 엔드포인트**라 그대로 쓰면 잔액 조회가 조용히 죽는다(개발 48 실측).
+    #[test]
+    fn pick_rpc_drops_custom_when_env_forces_other_chain() {
+        let custom = "https://base-mainnet.example/v2/KEY";
+        let default = "https://sepolia.base.org";
+        // 평소: 커스텀이 있으면 커스텀.
+        assert_eq!(pick_rpc(custom, false, default), custom);
+        // 커스텀이 비면 언제나 기본값.
+        assert_eq!(pick_rpc("", false, default), default);
+        assert_eq!(pick_rpc("", true, default), default);
+        // 환경변수가 다른 체인을 강제 → 커스텀을 버리고 그 체인의 기본 RPC 로.
+        assert_eq!(pick_rpc(custom, true, default), default);
+    }
 
     /// 핵심 계약: wallet.enc 를 읽을 때 주소만 가져오고 ciphertext(니모닉)는 무시한다.
     /// EncMeta 에 ciphertext 필드 자체가 없으므로 역직렬화 결과에 비밀이 들어올 수 없다.

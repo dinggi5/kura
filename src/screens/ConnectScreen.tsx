@@ -58,7 +58,7 @@ function StaleInstallNote({ installed, running }: { installed: string; running: 
       <p className="text-[12px] leading-relaxed text-amber-800 dark:text-amber-300">
         {t(
           <>
-            지금 이 앱은 <b>{running}</b>인데, 이 맥에 설치된 Kura는 <b>{installed}</b>이에요.
+            지금 이 앱은 <b>{running}</b> 버전인데, 이 맥에 설치된 Kura는 <b>{installed}</b> 버전이에요.
             어느 쪽으로 연결하든 AI는 <b>설치본</b>의 MCP를 실행해요 — 이 앱을{" "}
             <b>응용 프로그램</b> 폴더에 덮어써서 두 버전을 맞춘 뒤 쓰는 게 좋아요.
           </>,
