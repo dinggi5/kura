@@ -237,7 +237,13 @@ fn watchdog(app: tauri::AppHandle) {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let now = now_secs();
-        if now.saturating_sub(last_beat) >= HEARTBEAT_SECS {
+        // 하트비트가 뜻하는 건 "프로세스가 살아 있다"가 아니라 **"여기서 사람이 승인까지 할 수
+        // 있다"**이다. 지갑이 아직 없으면(첫 실행·평문 마이그레이션 대기) 프론트는 SetupScreen 을
+        // 그리고 WalletScreen 은 아예 안 뜬다 → 승인 창을 띄울 경로가 없다. 그 상태에서 살아
+        // 있다고 하면 MCP 가 요청을 받아 두고 **5분을 조용히 기다린다**(코덱스 개발49 1차 P2).
+        // 옛 코드도 결과적으로 같은 조건이었다 — 하트비트를 WalletScreen 의 폴링이 찍었으니
+        // 지갑이 없으면 안 찍혔다. 여기서 명시적으로 같은 선을 긋는다.
+        if now.saturating_sub(last_beat) >= HEARTBEAT_SECS && !crate::wallet::needs_setup() {
             last_beat = now;
             let _ = write_json(heartbeat_path().unwrap_or_default(), &Heartbeat { ts: now });
         }
