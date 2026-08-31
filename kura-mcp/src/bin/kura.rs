@@ -356,7 +356,14 @@ async fn cmd_pay(cli: &Cli, rest: &[String]) -> Result<bool, String> {
     let quiet = cli.json;
     let out = flow::run_payment(token, to, amount, memo, agent_id, || {
         if !quiet {
-            println!(
+            // 🔴 `println!` 을 쓰면 안 된다 (코덱스 개발51 2차 P2). 이 콜백은 **요청 파일을 이미
+            // 만든 뒤**에 불린다 — stdout 이 닫혀 있으면(`kura pay … | head -1`) println! 이
+            // 패닉하고, 그 되감기가 await_result·cancel_request 를 건너뛰어 **요청 파일이 고아로
+            // 남는다**. MCP 의 `has_pending()` 은 파일 존재만 보므로 그 뒤 모든 결제가 막힌다.
+            // 실패해도 무시하는 쓰기로 바꾼다 — 안내 한 줄 때문에 지갑이 잠기면 안 된다.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stdout(),
                 "{}",
                 ts!(
                     "지갑 앱 승인을 기다리는 중… (최대 5분, 앱 팝업에서 비번 입력)",

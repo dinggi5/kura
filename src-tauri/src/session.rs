@@ -173,6 +173,25 @@ pub(crate) async fn auto_approve_payment(
     }
     crate::ipc::ensure_request_chain(&req)?; // 요청 시점 체인 ≠ 현재 체인이면 거부(자율 경로도 동일)
 
+    // 🔴 **여기서부터 체인을 못박는다** (코덱스 개발51 2차 P1). 위 검사는 *그 순간*만 본다 —
+    // 그 뒤로 잔액 조회·서명·전송에 `.await` 가 여러 번 있고, 그동안 사용자가 네트워크를 바꾸면
+    // `do_send_usdc` 가 **그때 활성인 체인**을 고정해 버린다. 즉 Arc 로 만들어진 자율 결제가
+    // 비번 없이 **Base 로 나갈 수 있다** — 요청-체인 가드가 있으나 마나가 된다.
+    // 작업 전체를 요청의 체인으로 묶으면 그 창이 사라진다(안쪽 do_* 의 고정은 같은 값이 된다).
+    // chain_id 0 = 옛 미각인 요청 → 예전대로 활성 체인을 쓴다.
+    let pinned = if req.chain_id != 0 {
+        req.chain_id
+    } else {
+        active_chain().chain_id
+    };
+    crate::chain::with_pinned_chain(pinned, auto_approve_pinned(req, session)).await
+}
+
+/// 체인이 고정된 채로 도는 자율 승인 본체 — 한도·잔액·서명·전송·장부가 모두 같은 체인을 본다.
+async fn auto_approve_pinned(
+    req: crate::ipc::PaymentRequest,
+    session: tauri::State<'_, SessionKey>,
+) -> Result<PaymentResult, String> {
     // 자율 한도 판정 — USDC 표시 결제(x402 서명·USDC 송금)만, 한도 이하만.
     // 음수 한도는 0(자율 꺼짐)으로, 음수 금액은 오류로 — 거대 U256 둔갑 함정 차단(parse_usdc_nonneg).
     let dec = active_chain().usdc_decimals;

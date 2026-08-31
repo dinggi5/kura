@@ -305,7 +305,13 @@ fn watchdog(app: tauri::AppHandle) {
             wakes_without_poll = 0;
         }
         // 창을 여러 번 깨워도 폴링이 안 돌아온다 = WebView 가 죽었다(개발 51).
-        let ui_ok = wakes_without_poll < DEAD_WAKES;
+        //
+        // **마지막 깨움에도 회복할 시간을 준다** (코덱스 개발51 2차 P2). 카운터는 깨운 *뒤*에
+        // 올라가므로, 이 조건만 보면 3번째 깨움은 다음 1초 루프에서 곧장 사망 판정을 맞는다 —
+        // 실측(개발 51)상 깨운 뒤 폴링이 돌아오는 데 5초쯤 걸리므로 1초는 너무 짧다.
+        // 마지막 깨움이 `WAKE_RETRY_SECS` 만큼 묵은 뒤에야 판정한다 = 주석대로 "3회 ≈ 45초".
+        let ui_ok = wakes_without_poll < DEAD_WAKES
+            || now.saturating_sub(last_wake) < WAKE_RETRY_SECS;
         // 하트비트가 뜻하는 건 "프로세스가 살아 있다"가 아니라 **"여기서 사람이 승인까지 할 수
         // 있다"**이다. 지갑이 아직 없으면(첫 실행·평문 마이그레이션 대기) 프론트는 SetupScreen 을
         // 그리고 WalletScreen 은 아예 안 뜬다 → 승인 창을 띄울 경로가 없다. 그 상태에서 살아
