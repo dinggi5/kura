@@ -198,23 +198,29 @@ pub(crate) fn has_pending() -> bool {
 
 /// 처리 결과를 기록하고 대기 요청을 치운다 (single-flight 해제).
 ///
-/// 🔴 **요청 파일은 그게 「이 결과의 요청」일 때만 치운다** (코덱스 개발51 1차 P1).
-/// 예전엔 무조건 지웠다 — 늦게 끝난 승인이 그 사이 새로 들어온 **다른 요청**을 치워
-/// single-flight 를 깨고, 그 요청을 기다리던 쪽은 영영 답을 못 받는다.
+/// 🔴 **결과 파일도 요청 파일도, 「이 결과의 요청」이 아직 대기 중일 때만 건드린다**
+/// (코덱스 개발51 1차·3차 P1). 결과 파일은 **한 칸뿐**이라, 늦게 끝난 승인 A 가 그 뒤
+/// 승인된 B 의 결과를 덮으면 **B 를 기다리던 쪽은 돈이 나갔는데도 시간 초과**로 보고
+/// 재시도한다(이중 결제). 요청 파일 쪽도 같은 이유로 남의 것을 치우면 안 된다.
+///
+/// 내 요청이 이미 사라졌다면(상대가 시간 초과로 거둬감) **조용히 아무것도 안 쓴다** —
+/// 그 결과를 기다리는 쪽은 이미 없고, 결과를 남기면 다음 사람의 답을 가린다.
+/// 사람에게는 어차피 호출자(승인 창)가 반환값으로 결과를 보여준다.
 pub(crate) fn resolve_request(result: &PaymentResult) -> Result<(), String> {
-    write_json(result_path()?, result)?;
     let pending = read_request().map(|r| r.id);
-    if clears_pending(pending.as_deref(), &result.id) {
-        if let Ok(p) = request_path() {
-            let _ = fs::remove_file(p);
-        }
+    if !owns_pending(pending.as_deref(), &result.id) {
+        return Ok(());
+    }
+    write_json(result_path()?, result)?;
+    if let Ok(p) = request_path() {
+        let _ = fs::remove_file(p);
     }
     Ok(())
 }
 
-/// 이 결과가 「지금 대기 중인 그 요청」의 것인가 = 요청 파일을 치워도 되는가 (순수 — 테스트용).
-/// 대기 요청이 없으면 치울 것도 없다. **다른 id** 면 남의 요청이므로 절대 건드리지 않는다.
-fn clears_pending(pending_id: Option<&str>, result_id: &str) -> bool {
+/// 이 결과가 「지금 대기 중인 그 요청」의 것인가 (순수 — 테스트용).
+/// 대기 요청이 없으면 상대는 이미 떠난 뒤다. **다른 id** 면 남의 요청이므로 절대 건드리지 않는다.
+fn owns_pending(pending_id: Option<&str>, result_id: &str) -> bool {
     pending_id == Some(result_id)
 }
 
@@ -558,13 +564,14 @@ mod tests {
         }
     }
 
-    /// 🔴 늦게 끝난 승인이 **그 사이 들어온 다른 요청**을 치우면 안 된다
-    /// (코덱스 개발51 1차 P1). single-flight 가 깨지고, 새 요청을 기다리던 쪽은 답을 못 받는다.
+    /// 🔴 늦게 끝난 승인은 **결과 칸도 요청 파일도** 건드리면 안 된다
+    /// (코덱스 개발51 1차·3차 P1). 남의 요청을 치우면 single-flight 가 깨지고,
+    /// 남의 결과를 덮으면 그쪽은 돈이 나갔는데도 시간 초과로 보고 재시도한다.
     #[test]
-    fn resolve_only_clears_its_own_request() {
-        assert!(clears_pending(Some("A"), "A"), "같은 요청이면 치운다");
-        assert!(!clears_pending(Some("B"), "A"), "남의 요청은 건드리지 않는다");
-        assert!(!clears_pending(None, "A"), "대기 요청이 없으면 치울 것도 없다");
+    fn resolve_only_touches_its_own_request() {
+        assert!(owns_pending(Some("A"), "A"), "같은 요청이면 기록한다");
+        assert!(!owns_pending(Some("B"), "A"), "남의 요청은 건드리지 않는다");
+        assert!(!owns_pending(None, "A"), "이미 거둬간 요청이면 남길 것도 없다");
     }
 
     /// 승인 처리 중에는 감시 스레드가 요청을 실패로 끝내면 안 된다 — 가드가 그 구간을 표시한다.

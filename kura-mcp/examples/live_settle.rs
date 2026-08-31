@@ -32,7 +32,8 @@ async fn main() {
         return;
     }
 
-    // 2) 결제 요구 파싱 — V2는 헤더, V1은 본문. 헤더를 본문 소비 전에 챙긴다.
+    // 2) 결제 요구 파싱 — V2는 헤더, V1은 본문. 헤더/최종 URL 을 본문 소비 전에 챙긴다.
+    let final_url = resp.url().clone(); // 리다이렉트를 따라갔을 수 있다
     let pr_header = resp
         .headers()
         .get("payment-required")
@@ -42,7 +43,9 @@ async fn main() {
     let required = x402::parse_required(pr_header.as_deref(), &body402).expect("402 파싱 실패");
     let req = x402::pick_requirement(&required).expect("지원 결제 요구 선택 실패");
     let amount = x402::base_units_to_usdc(&req.amount).expect("금액 변환 실패");
-    let resource = url.clone(); // 표시는 실제 요청 URL (개발 51 — 서버 주장값을 안 쓴다)
+    // 표시는 **리다이렉트를 따라간 최종 URL** (개발 51 — 서버 주장값도, 원본 인자도 아니다).
+    // 본문을 소비하기 전에 잡아 둬야 한다(코덱스 3차 P2).
+    let resource = final_url.to_string();
     println!(
         "402 수신 (x402Version={})\n  scheme={} network={}\n  amount={amount} USDC → payTo={}\n  resource={resource}\n",
         required.version, req.scheme, req.network, req.pay_to

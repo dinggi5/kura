@@ -235,11 +235,32 @@ async fn auto_approve_pinned(
     // x402 는 제외: 우리는 서명만 하고 온체인 제출·가스는 페이실리테이터 몫이라 가스가 안 나간다.
     if req.kind != "x402" && active_chain().native_is_usdc {
         let reserve = parse_usdc_nonneg(active_chain().gas_reserve_usdc, dec).unwrap_or(U256::ZERO);
-        if let Ok(bal) = crate::transfer::usdc_balance_units(signer.address()).await {
+        // 🔴 **시간 상한을 둔다** (코덱스 개발51 3차 P1). RPC 가 멎으면 이 조회가 무한정 걸리고,
+        // 그 사이 상대(MCP)는 5분 만에 요청을 거둬간다 → 나중에 깨어난 이 명령이 **이미 만료된
+        // 결제를 보낼** 수 있다. 조회는 판단 재료일 뿐이라 못 읽으면 건너뛰면 된다(아래 재확인이
+        // 진짜 방어선). 5초는 개발 50 실측 RPC 왕복(수백 ms)의 열 배 남짓.
+        let lookup = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::transfer::usdc_balance_units(signer.address()),
+        )
+        .await;
+        if let Ok(Ok(bal)) = lookup {
             if amount.saturating_add(reserve) > bal {
                 return Err(NEEDS_PASSWORD.into());
             }
         }
+    }
+
+    // 🔴 **await 를 지나온 뒤, 그 요청이 아직 대기 중인지 다시 본다** (코덱스 개발51 3차 P1).
+    // `do_send_usdc` 는 요청 파일을 보지 않으므로, 위 조회가 늦어 상대가 시간 초과로 요청을
+    // 거둬간 뒤에도 그대로 돈을 보내 버린다 — 그쪽은 이미 재시도했을 수 있다(이중 결제).
+    // 사라졌거나 다른 요청으로 바뀌었으면 여기서 멈춘다(아무도 승인하지 않은 자율 처리다).
+    if read_request().map(|r| r.id).as_deref() != Some(req.id.as_str()) {
+        return Err(ts!(
+            "결제 요청이 이미 취소됐거나 시간이 지났어요.",
+            "That payment request was already cancelled or timed out."
+        )
+        .into());
     }
 
     // 실제 처리 — 긴급잠금·단일/일일 한도·내역·누적은 do_* 가 송금과 동일하게 적용.
