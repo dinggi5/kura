@@ -257,14 +257,21 @@ async fn cmd_balance(cli: &Cli) -> Result<(), String> {
             trim_zeros(&b.usdc)
         )
     );
-    println!(
-        "{}",
-        tf!(
-            "ETH   {}  (가스용)",
-            "ETH   {}  (for gas)",
-            trim_zeros(&b.eth)
-        )
-    );
+    // 네이티브가 곧 USDC 인 체인(Arc)엔 따로 셀 가스 잔액이 없다 — 줄을 지우는 대신
+    // "가스도 여기서 나간다"를 한 줄로 말해 준다(빈자리보다 사실이 낫다).
+    match &b.eth {
+        Some(eth) => println!(
+            "{}",
+            tf!("ETH   {}  (가스용)", "ETH   {}  (for gas)", trim_zeros(eth))
+        ),
+        None => println!(
+            "{}",
+            ts!(
+                "가스   위 USDC 에서 나가요 (이 체인은 가스도 USDC)",
+                "Gas    comes out of the USDC above (this chain pays gas in USDC)"
+            )
+        ),
+    }
     println!("{}", tf!("네트워크  {}", "Network   {}", network_label()));
     Ok(())
 }
@@ -619,6 +626,7 @@ fn network_label() -> String {
     match active_chain().chain_id {
         84_532 => ts!("Base Sepolia (테스트넷)", "Base Sepolia (testnet)").into(),
         8453 => ts!("Base 메인넷 · 실제 자금 ⚠️", "Base mainnet · real funds ⚠️").into(),
+        5_042_002 => ts!("Arc 테스트넷", "Arc testnet").into(),
         id => tf!("체인 {id}", "chain {id}"),
     }
 }

@@ -112,7 +112,7 @@ async fn sign_authorization(
 
 /// x402 결제용 EIP-3009 인가를 서명한다 (온체인 전송 X — 페이실리테이터가 정산).
 /// 송금과 동일하게 긴급 잠금·단일/일일 한도를 적용하고, 서명 시점에 누적 사용액에 기록한다.
-/// (현재는 Base Sepolia USDC 전용. network/asset 은 앱 설정과 동일하게 고정.)
+/// (활성 체인의 USDC 전용. network/asset 은 앱 설정과 동일하게 고정.)
 #[tauri::command]
 pub(crate) async fn sign_x402_payment(
     password: String,
@@ -279,6 +279,112 @@ mod tests {
         assert_eq!(recovered, signer.address());
     }
 
+    /// 🔴 [x402-4] 개발 50 — **Arc 에서 우리 서명이 실제로 정산될까**를 체인에 직접 물어본다(돈 0원).
+    ///
+    /// 도메인 일치(x402-3)는 "봉투 주소가 맞다"까지고, 이건 **컨트랙트가 그 서명을 받아 실행까지
+    /// 하는가**를 본다. 방법: 아무 키나 하나 만들어 x402 와 같은 경로로 EIP-3009 인가를 서명하고,
+    /// `transferWithAuthorization` 에 실어 `eth_call` 로 **시뮬레이션**한다. eth_call 은 상태를 안 바꾸고
+    /// 가스도 안 쓰므로 잔액 0인 새 키로 안전하다. 금액 0 이면 잔액 검사에 안 걸려 **서명 검증만**
+    /// 통과 여부를 가른다 → 성공 = 페이실리테이터가 이 서명을 그대로 정산할 수 있다.
+    /// (개발 50 시점엔 Arc 용 페이실리테이터가 없어 진짜 왕복은 못 한다 — 우리 쪽 준비 완료의 증거다.)
+    #[tokio::test]
+    #[ignore = "네트워크 필요 — Arc 테스트넷에 eth_call 로 정산 시뮬레이션"]
+    // sol! 이 만드는 호출 함수는 인자가 9개다 — EIP-3009 시그니처가 원래 그렇다.
+    #[allow(clippy::too_many_arguments)]
+    async fn x402_signature_would_settle_on_arc() {
+        use crate::chain::{TransferWithAuthorization, ARC_TESTNET};
+        use alloy::signers::local::PrivateKeySigner;
+        use alloy::signers::Signer;
+        use alloy::sol;
+        use alloy::sol_types::{eip712_domain, Eip712Domain, SolStruct};
+
+        sol! {
+            #[sol(rpc)]
+            interface IEIP3009 {
+                function transferWithAuthorization(
+                    address from, address to, uint256 value,
+                    uint256 validAfter, uint256 validBefore, bytes32 nonce,
+                    uint8 v, bytes32 r, bytes32 s
+                ) external;
+            }
+        }
+
+        let chain = ARC_TESTNET;
+        let signer = PrivateKeySigner::random();
+        let domain: Eip712Domain = eip712_domain! {
+            name: chain.usdc_eip712_name,
+            version: chain.usdc_eip712_version,
+            chain_id: chain.chain_id,
+            verifying_contract: chain.usdc_address,
+        };
+
+        let mut nonce_bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let auth = TransferWithAuthorization {
+            from: signer.address(),
+            to: Address::from([0x11u8; 20]),
+            value: U256::ZERO, // 0 = 잔액 검사를 안 타고 서명 검증만 남는다
+            validAfter: U256::ZERO,
+            validBefore: U256::from(now_secs() + 3600),
+            nonce: B256::from(nonce_bytes),
+        };
+
+        let provider = ProviderBuilder::new()
+            .connect(chain.default_rpc)
+            .await
+            .expect("Arc RPC 연결");
+        let usdc = IEIP3009::new(chain.usdc_address, &provider);
+
+        // 시뮬레이션 한 번 = (서명 도메인, 기대 결과) 한 쌍.
+        let sim = |dom: Eip712Domain| {
+            let usdc = &usdc;
+            let signer = &signer;
+            let auth = auth.clone();
+            async move {
+                let sig = signer
+                    .sign_hash(&auth.eip712_signing_hash(&dom))
+                    .await
+                    .expect("서명");
+                usdc.transferWithAuthorization(
+                    auth.from,
+                    auth.to,
+                    auth.value,
+                    auth.validAfter,
+                    auth.validBefore,
+                    auth.nonce,
+                    27 + sig.v() as u8,
+                    B256::from(sig.r().to_be_bytes::<32>()),
+                    B256::from(sig.s().to_be_bytes::<32>()),
+                )
+                .call()
+                .await
+                .map(|_| ()) // 반환값은 볼 게 없다 — Ok/Err 만 본다(그리고 Debug 로 찍기 위함).
+            }
+        };
+
+        let ours = sim(domain).await;
+        println!("Arc 정산 시뮬레이션 (우리 도메인): {ours:?}");
+        assert!(
+            ours.is_ok(),
+            "Arc USDC 가 우리 EIP-3009 서명을 거부했다 = x402 정산이 안 된다: {ours:?}"
+        );
+
+        // 대조군 — 버전 한 글자만 틀린 도메인. 이게 없으면 위 성공이 "아무 서명이나 받는다"는
+        // 뜻일 수도 있어 증거가 못 된다(개발 12 의 «통과하지만 아무것도 안 보는 검사» 방지).
+        let wrong: Eip712Domain = eip712_domain! {
+            name: chain.usdc_eip712_name,
+            version: "1", // 실제는 "2"
+            chain_id: chain.chain_id,
+            verifying_contract: chain.usdc_address,
+        };
+        let bad = sim(wrong).await;
+        println!("대조군 (틀린 도메인): {bad:?}");
+        assert!(
+            bad.is_err(),
+            "틀린 도메인 서명이 통과했다 — 위 성공은 증거가 못 된다"
+        );
+    }
+
     // [x402-3] 우리가 만든 EIP-712 도메인 세퍼레이터가 온체인 USDC.DOMAIN_SEPARATOR() 와 일치
     // (네트워크 필요). → name/version/chainId/컨트랙트가 정확 → 우리 서명을 USDC 가 그대로 받아준다.
     // 타입해시(x402-1) + 도메인(x402-3) + 복구(x402-2)가 다 맞으면 온체인 정산과 수학적으로 동등.
@@ -288,10 +394,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "네트워크 필요 (Base Sepolia + Base 메인넷 공개 RPC)"]
     async fn x402_domain_matches_usdc_onchain() {
-        use crate::chain::{BASE_MAINNET, BASE_SEPOLIA};
+        use crate::chain::{ARC_TESTNET, BASE_MAINNET, BASE_SEPOLIA};
         use alloy::sol_types::{eip712_domain, Eip712Domain};
 
-        for chain in [BASE_SEPOLIA, BASE_MAINNET] {
+        // Arc 도 같이 본다 (개발 50). 이 테스트가 Arc 에서 통과한다 = **우리가 만드는 서명 도메인이
+        // Arc USDC 컨트랙트가 기대하는 것과 바이트 단위로 같다** = 정산해 줄 서버만 나타나면 그대로 선다.
+        for chain in [BASE_SEPOLIA, BASE_MAINNET, ARC_TESTNET] {
             let domain: Eip712Domain = eip712_domain! {
                 name: chain.usdc_eip712_name,
                 version: chain.usdc_eip712_version,

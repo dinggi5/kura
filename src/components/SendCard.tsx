@@ -82,7 +82,10 @@ export function SendCard({
     cfg.balance != null && Number.isFinite(Number(cfg.balance)) && amountNum > Number(cfg.balance);
   const overDaily = remaining != null && amountNum > remaining;
   // USDC 송금도 가스는 ETH로 낸다. ETH가 0이면 전송이 실패하니 미리 안내.
-  const noGas = token === "USDC" && (ethBalance == null || Number(ethBalance) === 0);
+  // 🔴 가스가 곧 USDC 인 체인(Arc)에선 ethBalance 가 **항상 undefined** 라(백엔드가 안 보낸다)
+  // 이 검사를 그대로 두면 보내기 버튼이 영영 잠긴다. 그 체인엔 따로 받을 가스가 없으니 검사도 없다.
+  const noGas =
+    !chain.nativeIsUsdc && token === "USDC" && (ethBalance == null || Number(ethBalance) === 0);
 
   function switchToken(t: SendToken) {
     setToken(t);
@@ -141,25 +144,28 @@ export function SendCard({
       {/* 1) 입력 */}
       {step === "form" && (
         <div className="mt-6 space-y-4">
-          {/* 토큰 선택 (세그먼트 컨트롤) */}
-          <div className="grid grid-cols-2 gap-1 p-1 rounded-[var(--radius-card)] bg-[var(--color-ivory-200)] dark:bg-[var(--color-night-900)]">
-            {(["USDC", "ETH"] as SendToken[]).map((tk) => (
-              <button
-                key={tk}
-                type="button"
-                onClick={() => switchToken(tk)}
-                className={cn(
-                  "h-9 rounded-[10px] text-[13px] tracking-tight",
-                  "transition-all duration-[var(--duration-base)] ease-[cubic-bezier(0.4,0,0.2,1)]",
-                  token === tk
-                    ? "bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-700)] text-[var(--color-ink-900)] dark:text-[#E8E5DD] shadow-[var(--shadow-soft)]"
-                    : "text-[var(--color-ink-500)] hover:text-[var(--color-ink-700)]",
-                )}
-              >
-                {tk}
-              </button>
-            ))}
-          </div>
+          {/* 토큰 선택 (세그먼트 컨트롤). 가스가 곧 USDC 인 체인(Arc)엔 고를 게 하나뿐이라
+              세그먼트를 통째로 뺀다 — 선택지가 하나인 선택지는 화면에서 지운다. */}
+          {!chain.nativeIsUsdc && (
+            <div className="grid grid-cols-2 gap-1 p-1 rounded-[var(--radius-card)] bg-[var(--color-ivory-200)] dark:bg-[var(--color-night-900)]">
+              {(["USDC", "ETH"] as SendToken[]).map((tk) => (
+                <button
+                  key={tk}
+                  type="button"
+                  onClick={() => switchToken(tk)}
+                  className={cn(
+                    "h-9 rounded-[10px] text-[13px] tracking-tight",
+                    "transition-all duration-[var(--duration-base)] ease-[cubic-bezier(0.4,0,0.2,1)]",
+                    token === tk
+                      ? "bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-700)] text-[var(--color-ink-900)] dark:text-[#E8E5DD] shadow-[var(--shadow-soft)]"
+                      : "text-[var(--color-ink-500)] hover:text-[var(--color-ink-700)]",
+                  )}
+                >
+                  {tk}
+                </button>
+              ))}
+            </div>
+          )}
 
           <div>
             <label className="text-[11px] text-[var(--color-ink-500)]">

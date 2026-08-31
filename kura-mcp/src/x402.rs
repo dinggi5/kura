@@ -77,11 +77,59 @@ pub struct Submission {
 }
 
 /// 네트워크 표기가 우리가 지원하는 활성 체인인지 (V1 단축명/V2 CAIP-2 둘 다 허용).
+/// V1 단축명이 없는 체인(Arc)은 CAIP-2 로만 매칭한다. 빈 표기는 항상 불일치 — `network` 를
+/// 아예 안 준 요구가 "빈 문자열끼리 같다"로 통과하면 체인 검사가 통째로 무력해진다.
 fn network_supported(raw: &str) -> bool {
     let chain = active_chain();
     let n = raw.trim();
-    n.eq_ignore_ascii_case(chain.x402_network_v1)
+    if n.is_empty() {
+        return false;
+    }
+    chain
+        .x402_network_v1
+        .is_some_and(|v1| n.eq_ignore_ascii_case(v1))
         || n.eq_ignore_ascii_case(chain.x402_network_caip2)
+}
+
+/// **서버가 지정한 서명 도메인이 우리가 실제로 서명할 도메인과 같은가** (개발 50).
+///
+/// x402 요구의 `extra` 는 "이 EIP-712 도메인에 서명하라"는 지시다. 우리는 언제나 **활성 체인의
+/// USDC(EIP-3009) 도메인**에만 서명하는데, 지금까지는 scheme·network·asset 세 개만 보고 골라서
+/// **다른 도메인을 요구하는 서버의 요구도 "지원함"으로 집어 들었다**. 그러면 사람이 승인 창까지 보고
+/// 비번을 넣은 뒤, 서버가 검증에 실패해 조용히 거절된다 — 최악의 실패 모드(돈은 안 나가지만 사용자는
+/// 왜 안 되는지 모른다).
+///
+/// 실물 예 (개발 50, Circle Gateway 테스트넷 페이실리테이터 `/v1/x402/supported` 실응답):
+/// Arc·Base Sepolia 등에서 `scheme:"exact"`, 우리와 **같은 USDC 주소**로 제시하면서
+/// `extra:{name:"GatewayWalletBatched", version:"1", verifyingContract:"0x0077…19b9"}` 를 준다.
+/// 앞의 세 필드만 보면 정확히 통과하는 요구다 → 이 가드가 없으면 그대로 잘못 서명한다.
+///
+/// 판정은 **있는 필드만** 본다(없으면 우리 기본 도메인이라는 뜻으로 받아들인다) — 여태 잘 돌던
+/// `extra` 없는 서버·`extra` 에 다른 것만 담은 서버를 새로 깨뜨리지 않으려고.
+fn extra_domain_ok(entry: &Value) -> bool {
+    let Some(extra) = entry.get("extra") else {
+        return true;
+    };
+    let chain = active_chain();
+    // name/version 은 EIP-712 도메인 문자열이라 대소문자까지 정확히 같아야 서명이 맞는다
+    // ("USDC" vs "USD Coin" 이 체인마다 다른 것과 같은 이유 — 한 글자 다르면 다른 도메인이다).
+    if let Some(name) = str_field(extra, "name") {
+        if name != chain.usdc_eip712_name {
+            return false;
+        }
+    }
+    if let Some(version) = str_field(extra, "version") {
+        if version != chain.usdc_eip712_version {
+            return false;
+        }
+    }
+    // 주소만 체크섬 대소문자를 흡수해 비교한다.
+    if let Some(vc) = str_field(extra, "verifyingContract") {
+        if vc.trim().to_lowercase() != chain.usdc_address.to_string().to_lowercase() {
+            return false;
+        }
+    }
+    true
 }
 
 fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -130,6 +178,7 @@ pub fn pick_requirement(pr: &PaymentRequired) -> Result<Requirement, String> {
             if scheme.eq_ignore_ascii_case(SCHEME)
                 && network_supported(network)
                 && asset.to_lowercase() == usdc_lower
+                && extra_domain_ok(entry)
             {
                 let amount = str_field(entry, "amount")
                     .or_else(|| str_field(entry, "maxAmountRequired"))
@@ -145,23 +194,39 @@ pub fn pick_requirement(pr: &PaymentRequired) -> Result<Requirement, String> {
             }
         }
     }
+    // 제시 목록에 **왜 못 골랐는지**가 드러나게 적는다. 특히 scheme/network/asset 이 전부 맞는데
+    // extra 도메인만 다른 경우(Circle Gateway 등)는 세 값만 찍으면 "맞는데 왜 안 되지"로 읽힌다.
     let offered: Vec<String> = accepts
         .map(|l| {
             l.iter()
                 .map(|e| {
-                    format!(
+                    let base = format!(
                         "{}/{}/{}",
                         str_field(e, "scheme").unwrap_or("?"),
                         str_field(e, "network").unwrap_or("?"),
                         str_field(e, "asset").unwrap_or("?")
-                    )
+                    );
+                    if extra_domain_ok(e) {
+                        base
+                    } else {
+                        let name = e
+                            .get("extra")
+                            .and_then(|x| str_field(x, "name"))
+                            .unwrap_or("?");
+                        tf!(
+                            "{base} (서명 도메인이 {name} — 우리는 USDC 에 서명해요)",
+                            "{base} (asks to sign the {name} domain — Kura signs USDC itself)"
+                        )
+                    }
                 })
                 .collect()
         })
         .unwrap_or_default();
+    let chain = active_chain();
     Err(tf!(
-        "지원하는 결제 요구가 없어요. 우리는 exact·Base(USDC)만 지원합니다. 서버 제시: [{}]",
-        "No supported payment requirement. Kura supports the exact scheme on Base with USDC only. Server offered: [{}]",
+        "지원하는 결제 요구가 없어요. 우리는 exact 스킴 · {} · 그 체인의 USDC · USDC 자체 서명(EIP-3009)만 지원합니다. 서버 제시: [{}]",
+        "No supported payment requirement. Kura supports the exact scheme on {} with that chain's USDC, signed against USDC itself (EIP-3009). Server offered: [{}]",
+        chain.x402_network_caip2,
         offered.join(", ")
     ))
 }
@@ -335,6 +400,58 @@ mod tests {
 
     fn decode(value: &str) -> Value {
         serde_json::from_slice(&B64.decode(value).unwrap()).unwrap()
+    }
+
+    /// 🔴 개발 50 — **서버가 지정한 서명 도메인이 우리 것과 다르면 고르지 않는다.**
+    /// 표본은 Circle Gateway 테스트넷 페이실리테이터의 실응답 형태다(`/v1/x402/supported`):
+    /// scheme·network·asset 은 우리와 정확히 같고 `extra` 만 GatewayWallet 도메인을 가리킨다.
+    /// 가드가 없으면 사람이 비번까지 넣은 뒤 서버가 조용히 거절한다.
+    #[test]
+    fn reject_requirement_asking_for_another_signing_domain() {
+        let body = r#"{
+          "x402Version": 2,
+          "accepts": [
+            { "scheme": "exact", "network": "eip155:84532", "amount": "10000",
+              "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+              "payTo": "0x1111111111111111111111111111111111111111",
+              "extra": { "name": "GatewayWalletBatched", "version": "1",
+                         "verifyingContract": "0x0077777d7eba4688bdef3e311b846f25870a19b9" } }
+          ]
+        }"#;
+        let pr = parse_required(None, body).unwrap();
+        let err = match pick_requirement(&pr) {
+            Ok(_) => panic!("Gateway 도메인 요구를 골랐다 — 가드가 안 걸렸다"),
+            Err(e) => e,
+        };
+        // 왜 못 골랐는지가 문구에 남아야 한다 — 세 값만 찍으면 "다 맞는데 왜"로 읽힌다.
+        assert!(err.contains("GatewayWalletBatched"), "{err}");
+    }
+
+    /// extra 가 아예 없거나 우리 도메인과 같으면 예전처럼 통과한다(회귀 방지 — 대부분의 서버가 이쪽).
+    #[test]
+    fn extra_absent_or_matching_still_passes() {
+        let no_extra = r#"{"x402Version":1,"accepts":[
+          {"scheme":"exact","network":"base-sepolia","maxAmountRequired":"1",
+           "payTo":"0x1111111111111111111111111111111111111111",
+           "asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e"}]}"#;
+        assert!(pick_requirement(&parse_required(None, no_extra).unwrap()).is_ok());
+        // 체크섬 대소문자만 다른 verifyingContract 는 같은 주소다 — 주소만 대소문자를 흡수한다.
+        let checksum = r#"{"x402Version":1,"accepts":[
+          {"scheme":"exact","network":"base-sepolia","maxAmountRequired":"1",
+           "payTo":"0x1111111111111111111111111111111111111111",
+           "asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+           "extra":{"name":"USDC","version":"2",
+                    "verifyingContract":"0x036cbd53842c5426634e7929541ec2318f3dcf7e"}}]}"#;
+        assert!(pick_requirement(&parse_required(None, checksum).unwrap()).is_ok());
+    }
+
+    /// network 를 아예 안 준 요구가 통과하면 체인 검사가 통째로 무력해진다 (Option 전환 시 실수하기 쉬운 곳).
+    #[test]
+    fn empty_network_is_not_supported() {
+        assert!(!network_supported(""));
+        assert!(!network_supported("   "));
+        assert!(network_supported("base-sepolia")); // 테스트 기본 체인
+        assert!(network_supported("eip155:84532"));
     }
 
     /// V1: 본문 파싱(헤더 없음) + 요구 선택 + 표시 정보.

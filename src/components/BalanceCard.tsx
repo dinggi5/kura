@@ -1,8 +1,9 @@
-// 잔액 카드 — 메인 화면의 첫 카드. 큰 USDC 잔액 + 가스용 ETH + 주소 복사.
+// 잔액 카드 — 메인 화면의 첫 카드. 큰 USDC 잔액 + 가스 한 줄 + 주소 복사.
 
 import { motion } from "framer-motion";
 import { Check, Copy, Fuel, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { useChain } from "@/lib/chain";
 import { fmtAmount, shortenAddress } from "@/lib/format";
 import type { Balances } from "@/lib/types";
 import { cardBase, enter } from "@/components/ui";
@@ -25,6 +26,7 @@ export function BalanceCard({
   refreshing: boolean;
   onRefresh: () => void;
 }) {
+  const chain = useChain();
   return (
     <motion.section {...enter} className={cn(cardBase, "px-8 py-10")}>
       <div className="flex items-center justify-between">
@@ -60,6 +62,10 @@ export function BalanceCard({
         <Fuel size={12} className="text-[var(--color-ink-300)]" />
         {balanceError ? (
           <span className="text-red-500/80 text-[12px]">{t("잔액 조회 실패", "Couldn't load balance")}</span>
+        ) : chain.nativeIsUsdc ? (
+          // 가스가 곧 위 USDC 인 체인(Arc) — 숫자를 하나 더 놓으면 같은 돈을 두 번 센다.
+          // 줄을 지우는 대신 "그 돈에서 나간다"를 말해 준다(빈자리보다 사실이 낫다).
+          <>{t("가스도 이 USDC에서 나가요", "Gas comes out of this USDC")}</>
         ) : (
           <>{t("가스용 ETH ", "ETH for gas ")}{fmtAmount(balances?.eth, 5)}</>
         )}

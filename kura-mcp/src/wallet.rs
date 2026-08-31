@@ -210,13 +210,18 @@ pub fn wallet_status() -> Result<WalletStatus, String> {
 }
 
 /// 잔액 — 십진수 문자열.
+///
+/// `eth` = **네이티브(가스) 토큰이 USDC 와 다른 자산인 체인에서만 있다** (개발 50). Arc 처럼
+/// 네이티브가 곧 USDC 인 체인에선 아예 안 내보낸다 — 같은 잔액의 18dp 뷰를 나란히 주면 읽는 쪽
+/// (여기선 AI 모델)이 **같은 돈을 두 몫으로 센다**. src-tauri/src/transfer.rs 의 Balances 와 같은 규칙.
 #[derive(Serialize)]
 pub struct Balances {
-    pub eth: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eth: Option<String>,
     pub usdc: String,
 }
 
-/// 지갑 주소의 ETH(가스용) + USDC(결제용) 잔액을 Base Sepolia에서 조회한다.
+/// 지갑 주소의 네이티브(가스) + USDC(결제) 잔액을 활성 체인에서 조회한다.
 pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
     let addr: Address = addr_hex
         .parse()
@@ -234,9 +239,13 @@ pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
         })?;
 
     let usdc_contract = IERC20::new(active_chain().usdc_address, &provider);
-    let (wei, raw): (U256, U256) = tokio::try_join!(
+    let (wei, raw): (Option<U256>, U256) = tokio::try_join!(
         async {
-            provider.get_balance(addr).await.map_err(|e| {
+            // 네이티브가 곧 USDC 인 체인(Arc)에선 네이티브 조회를 아예 건너뛴다 — 같은 잔액이다.
+            if active_chain().native_is_usdc {
+                return Ok(None);
+            }
+            provider.get_balance(addr).await.map(Some).map_err(|e| {
                 tf!(
                     "ETH 잔액 조회 실패: {}",
                     "Couldn't read the ETH balance: {}",
@@ -256,7 +265,7 @@ pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
     )?;
 
     Ok(Balances {
-        eth: format_ether(wei),
+        eth: wei.map(format_ether),
         usdc: format_units(raw, active_chain().usdc_decimals).map_err(|e| {
             tf!(
                 "USDC 단위 변환 실패: {e}",

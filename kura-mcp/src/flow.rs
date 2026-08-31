@@ -128,6 +128,16 @@ pub async fn run_payment(
         )
         .into());
     }
+    // 네이티브가 곧 USDC 인 체인(Arc)엔 "ETH 송금"이라는 게 없다 — 네이티브 전송은 같은 USDC 를
+    // 18dp 로 보내는 것이라 한도·장부·내역(전부 6dp 기준)과 어긋난다. 승인 창을 띄우기 전에 막는다
+    // (앱도 같은 걸 막지만, 여기서 걸러야 사람에게 창이 안 뜨고 AI 가 이유를 바로 읽는다).
+    if token == "ETH" && crate::chain::active_chain().native_is_usdc {
+        return Err(ts!(
+            "이 체인은 가스도 USDC로 내요. ETH 송금은 없으니 token은 USDC로 요청하세요.",
+            "On this chain gas is paid in USDC, so there is no ETH to send — request token USDC instead."
+        )
+        .into());
+    }
     // 앱이 안 켜져 있으면 승인할 사람이 없다 → 즉시 안내(5분 대기 안 함).
     if !payment::app_alive() {
         return Err(ts!(
@@ -315,7 +325,11 @@ pub async fn run_x402(
         // 우리가 서명한 결제 헤더를 실제로 받는 곳은 final_url 이므로 그쪽과 맞춘다.
         // (`resource` 는 표시·프로토콜 제출용으로만 계속 쓴다.)
         Some(id) => match erc8004::lookup(id).await {
-            Ok(rec) => Some(erc8004::trust_from(&rec, req.pay_to.trim(), final_url.as_str())),
+            Ok(rec) => Some(erc8004::trust_from(
+                &rec,
+                req.pay_to.trim(),
+                final_url.as_str(),
+            )),
             Err(e) => {
                 agent_note = e;
                 None

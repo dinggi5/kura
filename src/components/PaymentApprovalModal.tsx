@@ -69,8 +69,11 @@ export function PaymentApprovalModal({
   }, [request.to]);
 
   const isX402 = request.kind === "x402";
-  // x402는 USDC 서명만(온체인 전송 X). transfer는 USDC/ETH 송금.
-  const tokenOk = isX402 ? request.token === "USDC" : request.token === "USDC" || request.token === "ETH";
+  // x402는 USDC 서명만(온체인 전송 X). transfer는 USDC/ETH 송금 — 단 가스가 곧 USDC 인 체인(Arc)엔
+  // 보낼 ETH 라는 게 없다(백엔드도 막는다). 여기서 걸러야 "승인할 수 없는 요청"으로 정직하게 뜬다.
+  const tokenOk = isX402
+    ? request.token === "USDC"
+    : request.token === "USDC" || (request.token === "ETH" && !chain.nativeIsUsdc);
 
   // 사전 잔액 검사 — 거부밖에 못 누르는 막다른 길(잔액 부족 revert)을 미리 막는다. 잔액을 아직
   // 못 읽었으면(balances=null)·파싱 실패면 검사를 생략한다. ⚠️ 이건 UX 가드일 뿐 보안 경계가
@@ -78,7 +81,7 @@ export function PaymentApprovalModal({
   // 실제 방어선은 백엔드의 한도·긴급잠금·체인 revert. x402 도 USDC 부족이면 정산이 실패하므로 동일 검사.
   // 비교는 토큰 decimals 기준 base unit BigInt 로 — JS Number 는 18자리 ETH·큰 수에서 정밀도 손실.
   const haveStr = request.token === "ETH" ? balances?.eth : balances?.usdc;
-  const decimals = request.token === "ETH" ? 18 : 6; // 두 Base 체인 모두 USDC=6
+  const decimals = request.token === "ETH" ? 18 : 6; // USDC 는 세 체인 모두 6 (Arc 의 ERC-20 뷰 포함)
   const needUnits = toBaseUnits(request.amount, decimals);
   const haveUnits = haveStr != null ? toBaseUnits(haveStr, decimals) : null;
   const insufficient = needUnits != null && haveUnits != null && needUnits > haveUnits;

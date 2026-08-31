@@ -47,10 +47,13 @@ type BoolSettingKey =
 // "공식"의 url 은 빈 값 = "활성 체인의 공식 RPC를 따라간다"(백엔드 effective_rpc 가 해석). 구체 URL 을
 // 저장하면 체인을 바꿔도 옛 RPC 에 고정되는 함정이 생긴다 (개발 18 코덱스 리뷰 #1).
 function rpcPresets(chain: ChainConfig): { label: string; url: string }[] {
-  return [
-    { label: t(`${chain.name} 공식`, `${chain.name} official`), url: "" },
-    { label: t("PublicNode (로그 없음 표방)", "PublicNode (claims no logs)"), url: chain.publicNode },
-  ];
+  const presets = [{ label: t(`${chain.name} 공식`, `${chain.name} official`), url: "" }];
+  // PublicNode 가 없는 체인(Arc)은 이 줄 자체를 안 만든다 — 없는 대체 RPC 를 있는 척 채우면
+  // "로그 안 남김"이라는 프라이버시 약속이 거짓이 된다. 그 체인은 공식 / 직접 입력 둘뿐.
+  if (chain.publicNode) {
+    presets.push({ label: t("PublicNode (로그 없음 표방)", "PublicNode (claims no logs)"), url: chain.publicNode });
+  }
+  return presets;
 }
 
 // 저장된 rpc_url 을 프리셋 표현으로 정규화. 옛 설정이 구체 공식 URL 을 박아 뒀어도 "공식"(빈 값)으로
@@ -169,8 +172,8 @@ export function SettingsScreen({
       if (!prev) return prev;
       const rpc_url = rpcCustom
         ? "" // 커스텀 → 새 체인 공식 (옛 체인 전용 URL 은 못 옮긴다)
-        : presetUrl(prev.rpc_url, chain) === chain.publicNode
-          ? next.publicNode // PublicNode 선택 유지 (새 체인의 PublicNode 로)
+        : chain.publicNode && presetUrl(prev.rpc_url, chain) === chain.publicNode
+          ? (next.publicNode ?? "") // PublicNode 선택 유지 (없는 체인이면 그 체인 공식으로)
           : ""; // 공식 유지
       return { ...prev, chain_id: id, rpc_url };
     });
@@ -261,15 +264,19 @@ export function SettingsScreen({
                   onDaily={(v) => field("daily_usdc", v)}
                   usedToday={spend?.usdc}
                 />
-                <LimitGroup
-                  token="ETH"
-                  single={s.single_eth}
-                  daily={s.daily_eth}
-                  onSingle={(v) => field("single_eth", v)}
-                  onDaily={(v) => field("daily_eth", v)}
-                  usedToday={spend?.eth}
-                  frac={5}
-                />
+                {/* ETH 한도는 ETH 를 보낼 수 있는 체인에서만. 가스가 곧 USDC 인 체인(Arc)엔
+                    네이티브 송금 경로 자체가 없어서(백엔드가 막는다) 걸 한도도 없다. */}
+                {!chain.nativeIsUsdc && (
+                  <LimitGroup
+                    token="ETH"
+                    single={s.single_eth}
+                    daily={s.daily_eth}
+                    onSingle={(v) => field("single_eth", v)}
+                    onDaily={(v) => field("daily_eth", v)}
+                    usedToday={spend?.eth}
+                    frac={5}
+                  />
+                )}
               </div>
             </Section>
 
@@ -402,7 +409,7 @@ export function SettingsScreen({
                   "The blockchain your balance and payments live on. Mainnet moves real funds; the testnet is practice with fake coins. Limits, spending, history, and the allowlist are kept per chain.",
                 )}
               </p>
-              <div className="mt-4 grid grid-cols-2 gap-2">
+              <div className="mt-4 grid grid-cols-3 gap-2">
                 {CHAINS.map((c) => {
                   const active = c.id === s.chain_id;
                   return (
@@ -411,7 +418,7 @@ export function SettingsScreen({
                       type="button"
                       onClick={() => selectChain(c.id)}
                       className={cn(
-                        "rounded-[var(--radius-card)] border px-3 py-3 text-[13px] tracking-tight transition-colors",
+                        "rounded-[var(--radius-card)] border px-2 py-3 text-[12px] tracking-tight transition-colors",
                         active
                           ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-accent)] font-medium"
                           : "border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] text-[var(--color-ink-500)] hover:border-[var(--color-ink-300)]",
@@ -419,9 +426,7 @@ export function SettingsScreen({
                     >
                       {c.name}
                       <span className="block mt-0.5 text-[10px] text-[var(--color-ink-300)]">
-                        {c.testnet
-                          ? t("연습용 · 가짜 코인", "Practice · fake coins")
-                          : t("실제 자금", "Real funds")}
+                        {c.testnet ? t("연습용", "Practice") : t("실제 자금", "Real funds")}
                       </span>
                     </button>
                   );

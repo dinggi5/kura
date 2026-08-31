@@ -58,13 +58,22 @@ export function ReceiveCard({ address, onClose }: { address: string; onClose: ()
           <p className="text-[11px] tracking-[0.04em] text-[var(--color-ink-500)]">{t("테스트 코인 받기", "Get test coins")}</p>
           <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--color-ink-300)]">
             {t(
-              `주소가 복사돼요. 열리는 페이지에 붙여넣고 ${chain.name}를 고르세요.`,
+              // 조사를 체인 이름 뒤에 붙이지 않는다 — 받침이 이름마다 갈려서(「Arc 테스트넷을」 /
+              // 「Base Sepolia를」) 고정 조사는 늘 절반이 틀린다. 이름을 문장 끝으로 빼서 조사를
+              // 아예 안 타게 했다 (개발 49 「버전이에요」와 같은 처방).
+              `주소가 복사돼요. 열리는 페이지에 붙여넣고 네트워크를 고르세요 — ${chain.name}.`,
               `Your address is copied. Paste it on the page that opens and pick ${chain.name}.`,
             )}
           </p>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <FaucetButton icon={<Droplets size={13} />} label="USDC" sub="Circle" onClick={() => openFaucet("https://faucet.circle.com")} />
-            <FaucetButton icon={<Fuel size={13} />} label="ETH" sub="Base" onClick={() => openFaucet("https://portal.cdp.coinbase.com/products/faucet")} />
+          {/* Faucet 은 체인이 정한다 — 가스가 곧 USDC 인 체인(Arc)엔 따로 받을 가스가 없어서
+              버튼도 하나뿐이다(빈 버튼을 남기지 않는다). */}
+          <div className={cn("mt-3 grid gap-2", chain.gasFaucet ? "grid-cols-2" : "grid-cols-1")}>
+            {chain.usdcFaucet && (
+              <FaucetButton icon={<Droplets size={13} />} label="USDC" sub="Circle" onClick={() => openFaucet(chain.usdcFaucet!)} />
+            )}
+            {chain.gasFaucet && (
+              <FaucetButton icon={<Fuel size={13} />} label="ETH" sub="Base" onClick={() => openFaucet(chain.gasFaucet!)} />
+            )}
           </div>
         </div>
       ) : (

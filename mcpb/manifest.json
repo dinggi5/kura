@@ -33,7 +33,7 @@
     },
     {
       "name": "get_balances",
-      "description": "ETH and USDC balances (read only)"
+      "description": "USDC and gas balances (read only). On chains where gas is USDC itself, there is no separate gas balance."
     },
     {
       "name": "get_history",

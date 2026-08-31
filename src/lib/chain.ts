@@ -21,10 +21,21 @@ export interface ChainConfig {
   explorerTx: string;
   /** 설정 화면의 "공식 RPC" 옵션 URL (빈 값 저장 시 백엔드가 이 값으로 폴백). */
   defaultRpc: string;
-  /** "로그 안 남김" 표방 대체 공개 RPC (설정 프리셋용). */
-  publicNode: string;
+  /** "로그 안 남김" 표방 대체 공개 RPC (설정 프리셋용). **없는 체인은 undefined** —
+   *  Arc 엔 PublicNode 가 없다(개발 50 확인). 없는 걸 있는 척 채우면 프라이버시 약속이 거짓말이 되므로
+   *  프리셋에서 빼고 "공식 / 직접 입력" 둘만 보여준다. */
+  publicNode?: string;
   /** 테스트넷이면 true — 받기 화면의 Faucet 노출, 메인넷 경고 등에 쓴다. */
   testnet: boolean;
+  /** **네이티브(가스) 토큰이 이 체인의 USDC 와 같은 자산인가** (개발 50, Arc).
+   *  true 면 "USDC 잔액"과 "가스 잔액"이 같은 돈이라 따로 보여주면 두 번 세는 화면이 된다 →
+   *  가스 줄·ETH 보내기 탭·ETH 한도·ETH Faucet 을 전부 감춘다. 백엔드도 같은 이유로 네이티브
+   *  잔액을 아예 안 내려보내고(Balances.eth 없음) 네이티브 송금을 막는다. */
+  nativeIsUsdc: boolean;
+  /** 테스트 USDC Faucet (testnet 전용). */
+  usdcFaucet?: string;
+  /** 테스트 가스 토큰 Faucet — nativeIsUsdc 인 체인엔 없다(가스가 곧 위 USDC). */
+  gasFaucet?: string;
   /** ERC-8004 레지스트리가 이 체인에 배포돼 있나 (개발 47). false 면 신원 조회 설정을
    *  아예 안 보여준다 — 켤 수 없는 스위치를 두는 것보다 없는 게 정직하다. */
   erc8004: boolean;
@@ -39,6 +50,9 @@ export const BASE_SEPOLIA: ChainConfig = {
   defaultRpc: "https://sepolia.base.org",
   publicNode: "https://base-sepolia-rpc.publicnode.com",
   testnet: true,
+  nativeIsUsdc: false,
+  usdcFaucet: "https://faucet.circle.com",
+  gasFaucet: "https://portal.cdp.coinbase.com/products/faucet",
   erc8004: true,
 };
 
@@ -51,11 +65,28 @@ export const BASE_MAINNET: ChainConfig = {
   defaultRpc: "https://mainnet.base.org",
   publicNode: "https://base-rpc.publicnode.com",
   testnet: false,
+  nativeIsUsdc: false,
+  erc8004: true,
+};
+
+/** Arc 테스트넷 (Circle L1, 개발 50). **가스도 USDC로 낸다** — 이 체인만 nativeIsUsdc.
+ *  ERC-8004 레지스트리가 Base Sepolia 와 같은 주소로 여기에도 있다(개발 50 온체인 확인) → true. */
+export const ARC_TESTNET: ChainConfig = {
+  id: 5042002,
+  name: t("Arc 테스트넷", "Arc testnet"),
+  explorerName: "Arcscan",
+  explorerTx: "https://testnet.arcscan.app/tx/",
+  defaultRpc: "https://rpc.testnet.arc.network",
+  // publicNode 없음 — Arc 를 서비스하는 PublicNode 엔드포인트가 아직 없다(개발 50 실측).
+  testnet: true,
+  nativeIsUsdc: true,
+  usdcFaucet: "https://faucet.circle.com",
+  // gasFaucet 없음 — 위 USDC 가 곧 가스다.
   erc8004: true,
 };
 
 /** 선택 가능한 체인 목록 (설정 토글 순서 — 메인넷이 왼쪽/기본, 개발 39). */
-export const CHAINS: ChainConfig[] = [BASE_MAINNET, BASE_SEPOLIA];
+export const CHAINS: ChainConfig[] = [BASE_MAINNET, BASE_SEPOLIA, ARC_TESTNET];
 
 /** chain_id → ChainConfig. 두 폴백이 다르다(코덱스 개발 39 P2):
  *  - undefined(설정 로드 전) → 메인넷 — 신규 기본과 일치시켜 로드 전후 화면이 안 흔들리게.

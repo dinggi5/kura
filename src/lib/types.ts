@@ -8,7 +8,9 @@ export type WalletStatus = {
   backed_up: boolean;
 };
 
-export type Balances = { eth: string; usdc: string };
+/** 잔액. `eth` = 네이티브(가스) 토큰 — **가스가 곧 USDC 인 체인(Arc)에선 백엔드가 아예 안 보낸다**
+ *  (개발 50). 같은 잔액을 18dp 로 한 번 더 담으면 화면이 같은 돈을 두 번 세기 때문이다. */
+export type Balances = { eth?: string; usdc: string };
 
 export type Settings = {
   single_usdc: string;
@@ -29,7 +31,8 @@ export type Settings = {
   notify_hide_amount: boolean;
   /** 자율 결제는 신뢰 주소(비번으로 승인한 적 있는 주소)만. */
   auto_trusted_only: boolean;
-  /** 활성 체인 ID — 84532=Base Sepolia(테스트넷) / 8453=Base 메인넷. 체인별 데이터 파일 분리. */
+  /** 활성 체인 ID — 8453=Base 메인넷 / 84532=Base Sepolia / 5042002=Arc 테스트넷.
+   *  체인별로 한도·사용액·내역·신뢰목록 파일이 분리된다. 목록은 lib/chain.ts 의 CHAINS 가 정본. */
   chain_id: number;
   /** ERC-8004 에이전트 신원 조회 (개발 47). AI 가 에이전트 번호를 주면 온체인 기록과 대조해
    *  승인 창에 사실 한 줄을 붙인다. 읽기 전용·온체인만(웹 fetch 없음). 기본 켜짐. */

@@ -105,7 +105,7 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "Reads the wallet's ETH (for gas) and USDC (for payments) balances on the active network (Base — testnet or mainnet, per the user's setting). Errors if there is no wallet."
+        description = "Reads the wallet's USDC (for payments) and gas-token balances on the active network (Base mainnet, Base Sepolia, or Arc testnet, per the user's setting). The `eth` field is the gas balance and is ABSENT on chains where gas is paid in USDC itself (Arc) — there the USDC balance already covers gas, so never add the two together. Errors if there is no wallet."
     )]
     async fn get_balances(&self) -> Result<CallToolResult, McpError> {
         let status = wallet::wallet_status().map_err(|e| McpError::internal_error(e, None))?;
@@ -278,9 +278,9 @@ impl ServerHandler for WalletServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Kura — a local Ethereum wallet for AI agents (on Base — testnet or mainnet, per the \
-                 user's setting; check get_balances/get_wallet_status for the current balance. On mainnet \
-                 these are real funds). Balance, address, and history are read-only. To pay, call \
+                "Kura — a local Ethereum wallet for AI agents (on Base mainnet, Base Sepolia, or Arc \
+                 testnet, per the user's setting; check get_balances/get_wallet_status for the current \
+                 balance. On mainnet these are real funds). Balance, address, and history are read-only. To pay, call \
                  request_payment: the wallet app opens an approval window — by default a human must approve \
                  with their password, and only when the user has turned autopay on is it approved \
                  automatically, within that limit. Never ask for or accept a password in chat or over \

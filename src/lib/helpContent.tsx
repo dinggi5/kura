@@ -80,8 +80,9 @@ export const HELP_SECTIONS: HelpSection[] = [
           버튼으로 공짜 테스트 코인을 받아 연습할 수 있어요.
         </p>
         <p>
-          <b className={em}>결제엔 ETH가 없어도 돼요</b> — x402 결제의 가스비는 대신 내주는
-          구조예요. 보내기로 직접 송금할 때만 가스용 ETH가 아주 조금 필요해요.
+          <b className={em}>결제엔 가스가 없어도 돼요</b> — x402 결제의 가스비는 대신 내주는
+          구조예요. 보내기로 직접 송금할 때만 가스가 아주 조금 드는데, 무엇으로 내는지는 체인이
+          정해요 — Base는 ETH, Arc는 USDC예요.
         </p>
       </div>,
       <div className="space-y-2.5">
@@ -99,8 +100,9 @@ export const HELP_SECTIONS: HelpSection[] = [
           free test coins from the Faucet buttons on the Receive screen.
         </p>
         <p>
-          <b className={em}>You don't need ETH to pay</b> — with x402 the gas is covered for you.
-          Only a direct transfer from the Send screen needs a tiny amount of ETH for gas.
+          <b className={em}>You don't need gas to pay</b> — with x402 the gas is covered for you.
+          Only a direct transfer from the Send screen needs a little gas, and the chain decides what
+          it's paid in — ETH on Base, USDC on Arc.
         </p>
       </div>,
     ),

@@ -23,9 +23,15 @@ use crate::trusted::record_trusted;
 use crate::wallet::unlock_signer;
 
 /// 잔액 — 보기 좋게 다듬기 전의 십진수 문자열.
+///
+/// `eth` = **네이티브(가스) 토큰 잔액. 그게 USDC 와 다른 자산인 체인에서만 있다** (개발 50).
+/// Arc 처럼 네이티브가 곧 USDC 인 체인에선 아예 내보내지 않는다 — 같은 잔액을 18dp 뷰로 한 번 더
+/// 담으면 화면이든 AI 든 **같은 돈을 두 번 세기** 때문이다. "보내 놓고 안 보여주기"가 아니라
+/// 애초에 안 만드는 쪽을 골랐다(빠뜨리기 쉬운 곳을 구조로 없앤다).
 #[derive(Serialize)]
 pub(crate) struct Balances {
-    eth: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eth: Option<String>,
     usdc: String,
 }
 
@@ -94,7 +100,7 @@ fn humanize_chain_error(raw: &str, token: &str) -> String {
     }
 }
 
-/// 지갑 주소의 ETH(가스용) + USDC(결제용) 잔액을 Base Sepolia에서 조회한다.
+/// 지갑 주소의 네이티브(가스용) + USDC(결제용) 잔액을 활성 체인에서 조회한다.
 #[tauri::command]
 pub(crate) async fn get_balances(addr_hex: String) -> Result<Balances, String> {
     let addr: Address = addr_hex
@@ -113,11 +119,16 @@ pub(crate) async fn get_balances(addr_hex: String) -> Result<Balances, String> {
         })?;
 
     // ETH와 USDC 잔액을 동시에 조회 (순차 2번 → RPC 왕복 1번 분량).
+    // 네이티브가 곧 USDC 인 체인(Arc)에선 네이티브 조회를 **아예 하지 않는다** — 같은 잔액이라
+    // 쓸 데가 없고, RPC 왕복도 하나 준다.
     let chain = active_chain();
     let usdc_contract = IERC20::new(chain.usdc_address, &provider);
-    let (wei, raw): (U256, U256) = tokio::try_join!(
+    let (wei, raw): (Option<U256>, U256) = tokio::try_join!(
         async {
-            provider.get_balance(addr).await.map_err(|e| {
+            if chain.native_is_usdc {
+                return Ok(None);
+            }
+            provider.get_balance(addr).await.map(Some).map_err(|e| {
                 tf!(
                     "ETH 잔액 조회 실패: {}",
                     "Couldn't read your ETH balance: {}",
@@ -136,7 +147,7 @@ pub(crate) async fn get_balances(addr_hex: String) -> Result<Balances, String> {
         },
     )?;
 
-    let eth = format_ether(wei);
+    let eth = wei.map(format_ether);
     let usdc = format_units(raw, chain.usdc_decimals).map_err(|e| {
         tf!(
             "USDC 단위 변환 실패: {e}",
@@ -173,7 +184,8 @@ async fn signing_provider(signer: PrivateKeySigner) -> Result<impl Provider, Str
         })
 }
 
-/// 비번으로 키를 복호화해 Base Sepolia에서 ETH(가스 토큰)를 송금한다. tx 해시를 돌려준다.
+/// 비번으로 키를 복호화해 활성 체인에서 ETH(가스 토큰)를 송금한다. tx 해시를 돌려준다.
+/// 가스가 곧 USDC 인 체인(Arc)에선 이 경로가 막혀 있다 — do_send_eth_inner 주석 참고.
 #[tauri::command]
 pub(crate) async fn send_eth(
     password: String,
@@ -216,6 +228,19 @@ async fn do_send_eth_inner(
     amount_eth: String,
 ) -> Result<String, String> {
     let amt = amount_eth.trim();
+    // 🔴 네이티브가 곧 USDC 인 체인(Arc)에선 네이티브 송금 경로를 닫는다 (개발 50).
+    // 여기서 보내는 "1"은 1 ETH 가 아니라 **1 USDC 를 18dp 로** 옮기는 것이라, 6dp 로 세는 한도·
+    // 오늘 사용액·내역과 전부 어긋난다(같은 돈이 두 장부에 다르게 남는다). 같은 일을 USDC 송금이
+    // 이미 정확히 해 주므로 막는 게 기능 상실이 아니다.
+    if active_chain().native_is_usdc {
+        let msg = ts!(
+            "이 체인은 가스도 USDC로 내요. ETH 송금 대신 USDC로 보내세요.",
+            "On this chain gas is paid in USDC — send USDC instead of ETH."
+        )
+        .to_string();
+        log_attempt("ETH", to.trim(), amt, "failed", &msg);
+        return Err(msg);
+    }
     let value = parse_eth_nonneg(amt)?;
     if value.is_zero() {
         return Err(ts!(
@@ -285,7 +310,7 @@ async fn do_send_eth_inner(
     Ok(hash)
 }
 
-/// 비번으로 키를 복호화해 Base Sepolia에서 USDC(ERC20)를 송금한다. tx 해시를 돌려준다.
+/// 비번으로 키를 복호화해 활성 체인에서 USDC(ERC20)를 송금한다. tx 해시를 돌려준다.
 /// (가스는 ETH로 지불되므로 ETH 잔액도 약간 필요하다.)
 #[tauri::command]
 pub(crate) async fn send_usdc(
@@ -454,6 +479,69 @@ mod tests {
         );
     }
 
+    /// 🔴 개발 50 — **Arc 의 네이티브 잔액과 ERC-20 잔액이 "같은 돈"인지** 체인에 확인한다.
+    ///
+    /// Arc UI 결정(가스 줄 감춤·ETH 탭 제거·네이티브 송금 차단)이 통째로 이 사실 하나 위에 서 있다.
+    /// 만약 둘이 **다른 자산**이라면 우리는 진짜 가스 잔액을 숨겨 사용자가 송금을 못 하게 만든 셈이다.
+    /// 검증하는 식: `balanceOf(a)` == `floor(eth_getBalance(a) / 10^12)`
+    /// (6dp 뷰는 18dp 를 자른다 — 실측 예: 253271474403192451 → 253271).
+    /// 두 조회를 **같은 블록에 고정**해서 그 사이 입금이 들어와도 흔들리지 않게 한다.
+    /// 잔액이 0인 주소는 이 식이 그냥 성립하므로, 최근 블록에서 **실제로 움직인 주소**를 골라 쓴다.
+    #[tokio::test]
+    #[ignore = "네트워크 필요 (Arc 테스트넷 공개 RPC)"]
+    async fn arc_native_and_erc20_are_the_same_money() {
+        use crate::chain::ARC_TESTNET;
+        use alloy::eips::BlockId;
+        use alloy::providers::Provider;
+
+        let provider = ProviderBuilder::new()
+            .connect(ARC_TESTNET.default_rpc)
+            .await
+            .expect("Arc RPC 연결");
+        let n = provider.get_block_number().await.expect("블록 번호");
+        let at = BlockId::number(n);
+        let block = provider
+            .get_block(at)
+            .full()
+            .await
+            .expect("블록 조회")
+            .expect("블록 존재");
+        let addr = block
+            .transactions
+            .txns()
+            .next()
+            .map(|t| t.inner.signer())
+            .expect("이 블록에 트랜잭션이 있어야 표본이 된다");
+
+        let native = provider
+            .get_balance(addr)
+            .block_id(at)
+            .await
+            .expect("네이티브 잔액");
+        let erc20 = IERC20::new(ARC_TESTNET.usdc_address, &provider)
+            .balanceOf(addr)
+            .block(at)
+            .call()
+            .await
+            .expect("ERC-20 잔액");
+
+        // 18dp → 6dp 는 10^12 로 나눈 몫(내림).
+        let scale = U256::from(10u64).pow(U256::from(12u64));
+        println!(
+            "Arc {addr} @ block {n}: native={native}  erc20={erc20}  native/1e12={}",
+            native / scale
+        );
+        assert!(
+            !native.is_zero(),
+            "표본 주소의 잔액이 0이라 아무것도 못 본다"
+        );
+        assert_eq!(
+            erc20,
+            native / scale,
+            "Arc 의 네이티브 잔액과 ERC-20 잔액이 같은 돈이 아니다 — 가스 줄을 감춘 판단이 틀렸다는 뜻"
+        );
+    }
+
     // 실제 Base Sepolia RPC로 잔액 조회 (네트워크 필요).
     #[tokio::test]
     #[ignore = "네트워크 필요 (Base Sepolia 공개 RPC)"]
@@ -461,8 +549,8 @@ mod tests {
         let b = get_balances("0x8b7ba5077d261739f5FeBB31B10167671e590161".into())
             .await
             .expect("잔액 조회 성공");
-        println!("ETH = {}  USDC = {}", b.eth, b.usdc);
-        assert!(b.eth.parse::<f64>().is_ok());
+        println!("ETH = {:?}  USDC = {}", b.eth, b.usdc);
+        assert!(b.eth.as_deref().unwrap().parse::<f64>().is_ok());
         assert!(b.usdc.parse::<f64>().is_ok());
     }
 }

@@ -26,6 +26,16 @@ pub(crate) struct ChainConfig {
     /// transferWithAuthorization 으로 정산된다 (x402_domain_matches_usdc_onchain 테스트가 검증).
     pub(crate) usdc_eip712_name: &'static str,
     pub(crate) usdc_eip712_version: &'static str,
+    /// **이 체인의 네이티브(가스) 토큰이 위 USDC 와 같은 자산인가** (개발 50, Arc).
+    ///
+    /// Arc 는 USDC 가 네이티브 자산이라 가스도 USDC 로 낸다. 래핑이 아니라 **하나의 잔액에 인터페이스가
+    /// 둘**이다 — 네이티브 뷰는 18 decimals, ERC-20 뷰는 6 decimals. 실측(개발 50): 같은 주소가
+    /// `eth_getBalance` = 253271474403192451(18dp) / `balanceOf` = 253271(6dp) = 같은 0.253271 USDC.
+    /// 그래서 이 값이 true 인 체인에서 "USDC 잔액 + 가스 토큰 잔액"을 나란히 보여주면 **같은 돈을 두 번
+    /// 세는** 화면이 된다. Arc 문서도 "읽기·전송은 ERC-20 인터페이스만 쓰라"고 못 박는다 → 우리는
+    /// ERC-20 뷰(6dp)만 쓰고, 네이티브 송금 경로(send_eth)는 이 체인에서 **막는다**(같은 돈을 18dp 로
+    /// 보내면 한도·장부·내역이 6dp 기준과 어긋난다). false 인 체인(Base)은 예전과 완전히 동일하다.
+    pub(crate) native_is_usdc: bool,
 }
 
 /// Base Sepolia (테스트넷). 기본 체인 — 데이터 파일이 접미사 없이 저장되는 "원본" 체인이기도 하다.
@@ -36,6 +46,7 @@ pub(crate) const BASE_SEPOLIA: ChainConfig = ChainConfig {
     usdc_decimals: 6,
     usdc_eip712_name: "USDC",
     usdc_eip712_version: "2",
+    native_is_usdc: false,
 };
 
 /// Base 메인넷 (실제 자금). USDC EIP-712 도메인 name 은 Sepolia("USDC")와 달리 "USD Coin" 이다
@@ -48,6 +59,24 @@ pub(crate) const BASE_MAINNET: ChainConfig = ChainConfig {
     usdc_decimals: 6,
     usdc_eip712_name: "USD Coin",
     usdc_eip712_version: "2",
+    native_is_usdc: false,
+};
+
+/// Arc 테스트넷 (Circle L1, 개발 50). USDC 가 **네이티브 가스 토큰**인 체인 — `native_is_usdc: true`.
+///
+/// 값 출처는 전부 개발 50 에서 이 RPC 로 직접 재 본 것이다(문서 인용이 아니라 실응답):
+/// `eth_chainId`=0x4cef52(5042002) · `decimals()`=6 · `name()`="USDC" · `version()`="2" ·
+/// `DOMAIN_SEPARATOR()`=0x361191522483d32a83e70ae7183b4b9629442c13a78bc9921d6f707911c8c6b0 ·
+/// `TRANSFER_WITH_AUTHORIZATION_TYPEHASH`=0x7c7c6cdb…(EIP-3009 표준값) → x402 서명 경로는 그대로 선다.
+/// USDC 주소가 `0x3600…0000` 인 것은 오타가 아니다 — 네이티브 자산의 ERC-20 뷰라 시스템 주소다.
+pub(crate) const ARC_TESTNET: ChainConfig = ChainConfig {
+    chain_id: 5_042_002,
+    default_rpc: "https://rpc.testnet.arc.network",
+    usdc_address: address!("0x3600000000000000000000000000000000000000"),
+    usdc_decimals: 6,
+    usdc_eip712_name: "USDC",
+    usdc_eip712_version: "2",
+    native_is_usdc: true,
 };
 
 /// settings.json 에서 선택된 체인 ID만 읽는 가벼운 뷰(다른 필드는 무시). settings.rs 의 Settings 를
@@ -114,6 +143,7 @@ pub(crate) fn chain_by_id(id: u64) -> Option<ChainConfig> {
     match id {
         id if id == BASE_SEPOLIA.chain_id => Some(BASE_SEPOLIA),
         id if id == BASE_MAINNET.chain_id => Some(BASE_MAINNET),
+        id if id == ARC_TESTNET.chain_id => Some(ARC_TESTNET),
         _ => None,
     }
 }
@@ -180,6 +210,28 @@ mod tests {
         assert!(chain_by_id(1).is_none());
         assert_eq!(chain_by_id(8453).unwrap().chain_id, 8453);
         assert_eq!(chain_by_id(84_532).unwrap().chain_id, 84_532);
+    }
+
+    // Arc 테스트넷 상수 회귀 가드 (개발 50). 값은 전부 라이브 RPC 실응답에서 옮겨 적은 것 —
+    // 오타 하나가 "딴 컨트랙트에 서명" 또는 "잔액이 늘 0"으로 조용히 나가는 자리라 문자로 못박는다.
+    #[test]
+    fn arc_testnet_constants_are_pinned() {
+        assert_eq!(ARC_TESTNET.chain_id, 5_042_002);
+        assert_eq!(
+            ARC_TESTNET.usdc_address,
+            address!("0x3600000000000000000000000000000000000000")
+        );
+        // 🔴 ERC-20 뷰의 decimals 는 6 (네이티브 뷰 18 이 아니다) — 이걸 18 로 쓰면 금액이 1조 배 어긋난다.
+        assert_eq!(ARC_TESTNET.usdc_decimals, 6);
+        assert_eq!(ARC_TESTNET.usdc_eip712_name, "USDC");
+        assert_eq!(ARC_TESTNET.usdc_eip712_version, "2");
+        // Arc 만 네이티브=USDC. Base 두 체인은 예전 그대로여야 한다(가스 ETH 화면·send_eth 경로 유지).
+        const { assert!(ARC_TESTNET.native_is_usdc) };
+        const { assert!(!BASE_SEPOLIA.native_is_usdc) };
+        const { assert!(!BASE_MAINNET.native_is_usdc) };
+        assert_eq!(chain_by_id(5_042_002).unwrap().chain_id, 5_042_002);
+        // 기본 체인이 아니므로 데이터 파일은 접미사가 붙는다(Base 와 사용액·내역이 절대 안 섞이게).
+        assert_ne!(ARC_TESTNET.chain_id, BASE_SEPOLIA.chain_id);
     }
 
     // settings.json 본문 → chain_id 해석 (개발 39). 깨진 JSON·필드 없는 옛 파일은

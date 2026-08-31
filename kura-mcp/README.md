@@ -23,7 +23,7 @@ RPC로 잔액을 조회하며, 결제는 GUI 앱에 "요청"만 한다. **비밀
 | 기능 | MCP 도구 | CLI 명령 | 비번 |
 |------|----------|----------|------|
 | 지갑 상태·주소 | `get_wallet_status` | `kura status` | 불필요 |
-| ETH·USDC 잔액 | `get_balances` | `kura balance` | 불필요 |
+| USDC·가스 잔액 | `get_balances` | `kura balance` | 불필요 |
 | 거래 내역 | `get_history` | `kura history [--limit N]` | 불필요 |
 | 송금 요청 | `request_payment` | `kura pay <주소> <금액> [--token USDC\|ETH] [--memo "사유"]` | **GUI 승인** |
 | x402 유료 리소스 | `x402_fetch` | `kura fetch <URL> [--memo "사유"]` | **GUI 승인** |
@@ -64,7 +64,11 @@ kura fetch https://example.com/paid --agent 1   # ERC-8004 번호를 함께 넘�
 
 ```bash
 KURA_CHAIN_ID=84532 kura balance       # 강제로 Base Sepolia 에서 조회
+KURA_CHAIN_ID=5042002 kura balance    # Arc 테스트넷 (가스도 USDC — 잔액에 ETH 줄이 없다)
 ```
+
+지원 값은 `8453`(Base 메인넷) · `84532`(Base Sepolia) · `5042002`(Arc 테스트넷) 셋뿐이고,
+그 밖의 값은 **조용히 폴백하지 않고 즉시 종료**한다(오타가 실돈 체인으로 도는 것 방지).
 
 GUI 와 다른 체인을 가리켜도, 결제 요청에 각인된 chain_id 를 GUI 가 승인 시 대조해 거부하므로
 (개발 20 가드) 잘못된 체인으로 송금되지 않는다.

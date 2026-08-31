@@ -7,6 +7,7 @@ On a Mac, when an AI like Claude pays for something online (x402), Kura is the w
 - Not a cloud SaaS — it runs **locally only**. The key never leaves this computer.
 - The AI **asks** to pay → a human **approves with a password** → it goes out
 - The chain is **Base** (an Ethereum L2, fees near zero). Mainnet by default; you can switch to the practice testnet (Base Sepolia) in settings
+- **Arc testnet** (Circle's L1) is selectable too. Gas there is paid in USDC, so there is no separate "you also need ETH for gas" problem. No facilitator settles x402 on Arc yet, so for now it is balances and transfers only
 
 한국어 문서: **[README.md](README.md)**
 

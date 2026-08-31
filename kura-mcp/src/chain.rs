@@ -17,9 +17,20 @@ pub struct ChainConfig {
     pub usdc_address: Address,
     /// USDC 소수 자릿수 (base unit ↔ 십진 변환에 쓴다).
     pub usdc_decimals: u8,
-    /// x402 네트워크 표기 — V1 단축명과 V2 CAIP-2 (서버가 둘 중 하나로 제시).
-    pub x402_network_v1: &'static str,
+    /// USDC(FiatToken)의 EIP-712 도메인 이름/버전 — src-tauri/src/chain.rs 와 같은 값.
+    /// MCP 는 서명하지 않지만, 서버가 결제 요구에 붙여 보내는 `extra`(어느 도메인에 서명하라)가
+    /// 우리가 실제로 서명할 도메인과 같은지 대조하는 데 쓴다 (개발 50 — x402 extra 가드).
+    pub usdc_eip712_name: &'static str,
+    pub usdc_eip712_version: &'static str,
+    /// x402 네트워크 표기 — V1 단축명(있는 체인만)과 V2 CAIP-2 (서버가 둘 중 하나로 제시).
+    /// `None` = 이 체인엔 통용되는 V1 단축명이 없다(Arc). 빈 문자열로 두면 `network` 가 없는
+    /// 요구가 빈 문자열과 같다고 판정돼 **아무 체인 요구나 통과**하므로 Option 이어야 한다.
+    pub x402_network_v1: Option<&'static str>,
     pub x402_network_caip2: &'static str,
+    /// **네이티브(가스) 토큰이 위 USDC 와 같은 자산인가** (개발 50, Arc). 자세한 배경은
+    /// src-tauri/src/chain.rs 의 같은 필드 주석 참고 — 한 잔액에 인터페이스가 둘(18dp/6dp)이라
+    /// "USDC + 가스 토큰"을 따로 세면 같은 돈을 두 번 세게 된다. MCP 는 잔액 보고 문구에 쓴다.
+    pub native_is_usdc: bool,
     /// 익스플로러 트랜잭션 URL 접두사 (뒤에 tx 해시를 붙인다).
     pub explorer_tx_prefix: &'static str,
     /// ERC-8004 IdentityRegistry (개발 47). `None` = 이 체인엔 레지스트리가 없다 →
@@ -35,11 +46,14 @@ pub const BASE_SEPOLIA: ChainConfig = ChainConfig {
     default_rpc: "https://sepolia.base.org",
     usdc_address: address!("0x036CbD53842c5426634e7929541eC2318f3dCF7e"),
     usdc_decimals: 6,
-    x402_network_v1: "base-sepolia",
+    usdc_eip712_name: "USDC",
+    usdc_eip712_version: "2",
+    x402_network_v1: Some("base-sepolia"),
     x402_network_caip2: "eip155:84532",
     explorer_tx_prefix: "https://sepolia.basescan.org/tx/",
     erc8004_identity: Some(address!("0x8004A818BFB912233c491871b3d84c89A494BD9e")),
     erc8004_reputation: Some(address!("0x8004B663056A597Dffe9eCcC1965A193B7388713")),
+    native_is_usdc: false,
 };
 
 /// Base 메인넷 (실제 자금). x402 네트워크명은 "base" / CAIP-2 "eip155:8453".
@@ -48,11 +62,39 @@ pub const BASE_MAINNET: ChainConfig = ChainConfig {
     default_rpc: "https://mainnet.base.org",
     usdc_address: address!("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
     usdc_decimals: 6,
-    x402_network_v1: "base",
+    usdc_eip712_name: "USD Coin",
+    usdc_eip712_version: "2",
+    x402_network_v1: Some("base"),
     x402_network_caip2: "eip155:8453",
     explorer_tx_prefix: "https://basescan.org/tx/",
     erc8004_identity: Some(address!("0x8004A169FB4a3325136EB29fA0ceB6D2e539a432")),
     erc8004_reputation: Some(address!("0x8004BAa17C55a88189AE136b182e5fdA19dE9b63")),
+    native_is_usdc: false,
+};
+
+/// Arc 테스트넷 (Circle L1, 개발 50). USDC 가 네이티브 가스 토큰인 체인.
+///
+/// x402: **V1 단축명이 없다** — 이 체인을 아는 서버는 CAIP-2 `eip155:5042002` 로만 제시한다.
+/// ⚠️ 개발 50 시점에 이 네트워크를 지원하는 페이실리테이터는 Circle Gateway 하나뿐인데, 그쪽은
+/// USDC EIP-3009 가 아니라 **GatewayWallet 도메인**에 서명하라고 요구한다(우리 형식과 다름).
+/// 그래서 Arc 결제는 "서명 경로는 서 있지만 받아 줄 상대가 아직 없다" 상태다 — 서버가 우리 형식으로
+/// 제시하면 그대로 동작하고, Gateway 형식으로 제시하면 x402.rs 의 extra 가드가 걸러 낸다.
+///
+/// ERC-8004 레지스트리는 **Base Sepolia 와 같은 주소로 Arc 테스트넷에도 있다**(결정론적 배포).
+/// 개발 50 에서 두 주소 모두 Arc RPC 로 `getVersion()` = "2.0.0" 실응답 확인 — 그래서 Some 이다.
+pub const ARC_TESTNET: ChainConfig = ChainConfig {
+    chain_id: 5_042_002,
+    default_rpc: "https://rpc.testnet.arc.network",
+    usdc_address: address!("0x3600000000000000000000000000000000000000"),
+    usdc_decimals: 6,
+    usdc_eip712_name: "USDC",
+    usdc_eip712_version: "2",
+    x402_network_v1: None,
+    x402_network_caip2: "eip155:5042002",
+    explorer_tx_prefix: "https://testnet.arcscan.app/tx/",
+    erc8004_identity: Some(address!("0x8004A818BFB912233c491871b3d84c89A494BD9e")),
+    erc8004_reputation: Some(address!("0x8004B663056A597Dffe9eCcC1965A193B7388713")),
+    native_is_usdc: true,
 };
 
 /// 사용자가 선택한 체인 ID. 파일 없음(첫 실행)=메인넷, 깨짐/옛 설정=테스트넷 — 본문 주석 참고.
@@ -76,10 +118,11 @@ fn env_chain_id() -> Option<u64> {
             eprintln!("KURA_CHAIN_ID is not an integer: {v:?}");
             std::process::exit(1);
         });
-        if id != BASE_SEPOLIA.chain_id && id != BASE_MAINNET.chain_id {
+        if id != BASE_SEPOLIA.chain_id && id != BASE_MAINNET.chain_id && id != ARC_TESTNET.chain_id
+        {
             eprintln!(
-                "KURA_CHAIN_ID={id} is not a supported chain (supported: {} / {}).",
-                BASE_SEPOLIA.chain_id, BASE_MAINNET.chain_id
+                "KURA_CHAIN_ID={id} is not a supported chain (supported: {} / {} / {}).",
+                BASE_SEPOLIA.chain_id, BASE_MAINNET.chain_id, ARC_TESTNET.chain_id
             );
             std::process::exit(1);
         }
@@ -149,6 +192,7 @@ pub fn env_forces_other_chain() -> bool {
 pub fn active_chain() -> ChainConfig {
     match selected_chain_id() {
         id if id == BASE_MAINNET.chain_id => BASE_MAINNET,
+        id if id == ARC_TESTNET.chain_id => ARC_TESTNET,
         _ => BASE_SEPOLIA,
     }
 }
@@ -192,5 +236,33 @@ mod tests {
         );
         // 두 체인의 레지스트리는 서로 다르다(체인별 배포) — 한쪽을 복사하다 생기는 사고 방지.
         assert_ne!(BASE_MAINNET.erc8004_identity, BASE_SEPOLIA.erc8004_identity);
+        // Arc 테스트넷은 **Base Sepolia 와 같은 주소**다(결정론적 배포 — 개발 50 에서 Arc RPC 로
+        // getVersion()="2.0.0" 실응답 확인). 우연히 같은 게 아니라 그래야 맞는 값이다.
+        assert_eq!(ARC_TESTNET.erc8004_identity, BASE_SEPOLIA.erc8004_identity);
+        assert_eq!(
+            ARC_TESTNET.erc8004_reputation,
+            BASE_SEPOLIA.erc8004_reputation
+        );
+    }
+
+    /// Arc 테스트넷 상수 회귀 가드 (개발 50). 전부 라이브 RPC 실응답을 옮겨 적은 값.
+    #[test]
+    fn arc_testnet_constants_are_pinned() {
+        assert_eq!(ARC_TESTNET.chain_id, 5_042_002);
+        assert_eq!(
+            ARC_TESTNET.usdc_address.to_string().to_lowercase(),
+            "0x3600000000000000000000000000000000000000"
+        );
+        // 🔴 ERC-20 뷰는 6dp. 네이티브 뷰(18dp)를 쓰면 금액이 1조 배 어긋난다.
+        assert_eq!(ARC_TESTNET.usdc_decimals, 6);
+        assert_eq!(ARC_TESTNET.usdc_eip712_name, "USDC");
+        assert_eq!(ARC_TESTNET.usdc_eip712_version, "2");
+        const { assert!(ARC_TESTNET.native_is_usdc) };
+        // V1 단축명이 없는 체인 — CAIP-2 로만 매칭한다(빈 문자열이 아니라 None 이어야 하는 이유는
+        // x402::network_supported 주석 참고).
+        assert_eq!(ARC_TESTNET.x402_network_v1, None);
+        assert_eq!(ARC_TESTNET.x402_network_caip2, "eip155:5042002");
+        const { assert!(!BASE_SEPOLIA.native_is_usdc) };
+        const { assert!(!BASE_MAINNET.native_is_usdc) };
     }
 }
