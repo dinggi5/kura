@@ -153,6 +153,8 @@ impl WalletServer {
             args.to.trim(),
             args.amount.trim(),
             args.memo.as_deref().unwrap_or("").trim(),
+            // MCP 는 도구 호출당 응답이 한 번뿐이라 "기다리는 중"을 중간에 알릴 상대가 없다.
+            || {},
         )
         .await
         .map_err(|e| McpError::internal_error(e, None))?;

@@ -183,11 +183,43 @@ pub fn host_of(url: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
+/// 퍼센트 인코딩(`%7B` → `{`)을 푼다. 바이트로 돌려주고 UTF-8 판정은 호출자가 한다.
+///
+/// **`+` 를 공백으로 바꾸지 않는다** — 그건 form 인코딩(`application/x-www-form-urlencoded`)
+/// 규칙이고, `data:` URI 본문은 RFC 2397 의 URI 인코딩이라 `+` 는 글자 그대로다. 바꾸면
+/// base64 를 본문에 담은 JSON 문자열이 조용히 망가진다.
+///
+/// 깨진 시퀀스(`%`, `%A`, `%zz`)는 **원문 그대로 남긴다**. 조용히 다른 글자로 바꾸느니 남겨서
+/// 뒤의 JSON 파싱이 실패하게 하는 쪽이 낫다 — 여기서 만들어 낸 글자가 도메인 대조에 쓰이면
+/// 「등록 문서가 이렇게 말했다」가 거짓이 된다.
+fn percent_decode(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hi = (b[i + 1] as char).to_digit(16);
+            let lo = (b[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
+}
+
 /// `data:` URI 의 본문을 문자열로 꺼낸다(base64 면 디코드). 웹 접속 없음 — 값이 URI 안에 다 있다.
 fn decode_data_uri(uri: &str) -> Option<String> {
     let (meta, payload) = uri.split_once(',')?;
     if !meta.to_ascii_lowercase().contains(";base64") {
-        return Some(payload.to_string());
+        // base64 가 아니면 본문은 **퍼센트 인코딩**이다(RFC 2397). 예전엔 원문을 그대로 돌려줘서
+        // `data:application/json,%7B...%7D` 같은 등록 문서가 JSON 파싱에 실패했고, 도메인이
+        // 「모름」으로 떨어져 승인 창에 대조 줄이 안 붙었다(개발 47 이월).
+        return String::from_utf8(percent_decode(payload)).ok();
     }
     let cleaned: String = payload.chars().filter(|c| !c.is_whitespace()).collect();
     let bytes = B64
@@ -533,6 +565,39 @@ mod tests {
         let uri = format!("data:application/json;base64,{}", B64.encode("{\"name\":\"x\"}"));
         assert!(domains_from_token_uri(&uri).is_empty());
         assert_eq!(name_from_token_uri(&uri).as_deref(), Some("x"));
+    }
+
+    /// base64 가 아닌 `data:` URI 는 **퍼센트 인코딩**이다 (개발 47 이월).
+    /// 안 풀면 JSON 파싱이 실패해 도메인이 통째로 「모름」이 된다.
+    #[test]
+    fn percent_encoded_data_uri_is_decoded() {
+        let json = r#"{"name":"a b","services":[{"name":"web","endpoint":"https://api.example.com/x"}]}"#;
+        // RFC 3986 예약문자를 인코딩한 형태(실제 온체인 표본이 이렇게 온다).
+        let encoded: String = json
+            .chars()
+            .map(|c| match c {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' | ':' => {
+                    c.to_string()
+                }
+                _ => format!("%{:02X}", c as u32),
+            })
+            .collect();
+        let uri = format!("data:application/json,{encoded}");
+        assert_eq!(domains_from_token_uri(&uri), vec!["api.example.com"]);
+        assert_eq!(name_from_token_uri(&uri).as_deref(), Some("a b"));
+    }
+
+    /// 대조군 — 인코딩 규칙을 잘못 적용하면 값이 조용히 달라진다.
+    /// `+` 는 공백이 **아니고**(form 인코딩 규칙을 쓰면 안 된다), 깨진 `%` 는 원문으로 남는다.
+    #[test]
+    fn percent_decode_does_not_invent_characters() {
+        let uri = r#"data:application/json,{"name":"a+b"}"#;
+        assert_eq!(name_from_token_uri(uri).as_deref(), Some("a+b"));
+        // 깨진 시퀀스는 그대로 → JSON 은 여전히 유효하고 글자가 바뀌지 않는다.
+        let uri = r#"data:application/json,{"name":"100%"}"#;
+        assert_eq!(name_from_token_uri(uri).as_deref(), Some("100%"));
+        let uri = r##"data:application/json,{"name":"%zz"}"##;
+        assert_eq!(name_from_token_uri(uri).as_deref(), Some("%zz"));
     }
 
     /// 이름은 제어문자를 걷어내고 길이를 끊는다(외부 입력).

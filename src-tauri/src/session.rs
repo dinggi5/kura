@@ -201,6 +201,24 @@ pub(crate) async fn auto_approve_payment(
     let idle = auto_lock_secs(&settings);
     let signer = session_signer(&session, idle).ok_or_else(|| NEEDS_PASSWORD.to_string())?;
 
+    // 가스가 곧 USDC 인 체인(Arc): 보낼 금액과 가스가 **같은 잔액**에서 나간다 → 잔액에 딱 맞는
+    // 송금은 가스를 못 내 체인에서 실패한다. 보내기 화면(SendCard)과 승인 창은 여유분을 빼고
+    // 보여주지만 **자율 경로는 그 화면들을 안 지난다**(개발 50 이월 P2).
+    //
+    // 여기서 하는 일은 «승인된 금액을 깎는 것»이 아니라 **아직 아무도 승인하지 않은 자율 처리를
+    // 사람 앞으로 돌리는 것**이다(NEEDS_PASSWORD). 사람은 승인 창에서 이유를 보고 정한다 —
+    // 백엔드가 금액을 말없이 줄이는 것은 이 지갑이 하지 않는 일이다.
+    // 잔액을 못 읽으면(RPC 오류) 검사를 건너뛴다 — 조회 실패가 자율 결제를 막는 사유는 아니다.
+    // x402 는 제외: 우리는 서명만 하고 온체인 제출·가스는 페이실리테이터 몫이라 가스가 안 나간다.
+    if req.kind != "x402" && active_chain().native_is_usdc {
+        let reserve = parse_usdc_nonneg(active_chain().gas_reserve_usdc, dec).unwrap_or(U256::ZERO);
+        if let Ok(bal) = crate::transfer::usdc_balance_units(signer.address()).await {
+            if amount.saturating_add(reserve) > bal {
+                return Err(NEEDS_PASSWORD.into());
+            }
+        }
+    }
+
     // 실제 처리 — 긴급잠금·단일/일일 한도·내역·누적은 do_* 가 송금과 동일하게 적용.
     // 여기서 Err(잠금·한도 등)이면 요청을 치우지 않는다 → 프론트가 모달로 사람에게 넘긴다.
     let notice = auto_pay_notice(

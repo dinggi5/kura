@@ -158,6 +158,32 @@ pub(crate) async fn get_balances(addr_hex: String) -> Result<Balances, String> {
     Ok(Balances { eth, usdc })
 }
 
+/// 활성 체인의 USDC 잔액을 **base unit 정수**로 읽는다 (표시용 문자열 X — 비교에 쓰는 값).
+/// 자율 승인의 가스 여유분 검사(session.rs)가 쓴다. `get_balances` 와 달리 네이티브는 안 읽는다.
+pub(crate) async fn usdc_balance_units(addr: Address) -> Result<U256, String> {
+    let provider = ProviderBuilder::new()
+        .connect(&effective_rpc())
+        .await
+        .map_err(|e| {
+            tf!(
+                "RPC 연결 실패: {}",
+                "Couldn't reach the RPC server: {}",
+                redact_urls(&e.to_string())
+            )
+        })?;
+    IERC20::new(active_chain().usdc_address, &provider)
+        .balanceOf(addr)
+        .call()
+        .await
+        .map_err(|e| {
+            tf!(
+                "USDC 잔액 조회 실패: {}",
+                "Couldn't read your USDC balance: {}",
+                redact_urls(&e.to_string())
+            )
+        })
+}
+
 /// 받는 주소 문자열을 파싱한다 (ETH/USDC 송금·x402 서명 공용).
 pub(crate) fn parse_to_addr(to: &str) -> Result<Address, String> {
     to.trim().parse().map_err(|e| {

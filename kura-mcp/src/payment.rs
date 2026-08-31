@@ -64,6 +64,16 @@ pub struct PaymentResult {
 #[derive(Deserialize)]
 struct Heartbeat {
     ts: u64,
+    /// **승인 창을 실제로 띄울 수 있나** (개발 51). GUI 의 러스트 스레드는 프로세스가 살아 있는
+    /// 한 하트비트를 찍으므로, WebView 만 죽으면 「살아 있다」고 말하면서 창은 안 뜬다.
+    /// 그쪽이 창을 여러 번 깨워 보고도 안 되면 이 값을 false 로 내린다 → 즉시 정직하게 거절한다.
+    /// 없으면 true (이 필드가 없던 옛 앱과의 호환 — 예전과 똑같이 동작).
+    #[serde(default = "ui_ok_default")]
+    ui_ok: bool,
+}
+
+fn ui_ok_default() -> bool {
+    true
 }
 
 fn request_path() -> Result<PathBuf, String> {
@@ -184,13 +194,25 @@ fn is_fresh(now: u64, beat: u64) -> bool {
 }
 
 /// GUI 앱이 최근에 살아있었는지. 결제 요청을 띄울 사람이 있는지 확인용.
+/// 「살아 있다」 = 프로세스가 있다가 아니라 **여기서 사람이 승인까지 할 수 있다** → 화면이
+/// 죽은 상태(`ui_ok:false`)는 살아 있는 걸로 치지 않는다(개발 51).
 pub fn app_alive() -> bool {
-    heartbeat_path()
+    read_heartbeat().is_some_and(|h| h.ui_ok)
+}
+
+/// 신선한 하트비트(없거나 낡았으면 None). 이유를 갈라 안내하려고 `ui_ok` 까지 돌려준다.
+fn read_heartbeat() -> Option<Heartbeat> {
+    let h: Heartbeat = heartbeat_path()
         .ok()
         .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<Heartbeat>(&s).ok())
-        .map(|h| is_fresh(now_secs(), h.ts))
-        .unwrap_or(false)
+        .and_then(|s| serde_json::from_str(&s).ok())?;
+    is_fresh(now_secs(), h.ts).then_some(h)
+}
+
+/// 앱은 떠 있는데 **화면(WebView)이 죽어** 승인 창을 못 띄우는 상태인가 (개발 51).
+/// 「앱을 켜세요」와 「앱을 다시 시작하세요」는 사용자가 할 일이 다르므로 갈라서 안내한다.
+pub fn ui_stalled() -> bool {
+    read_heartbeat().is_some_and(|h| !h.ui_ok)
 }
 
 /// 이미 대기 중인 요청이 있는지 (single-flight 가드).
@@ -371,6 +393,17 @@ mod tests {
         assert_eq!(back.token, "USDC");
         assert_eq!(back.memo, "데이터 API 호출");
         assert_eq!(back.kind, "transfer");
+    }
+
+    /// 🔴 옛 앱이 쓴 하트비트에는 `ui_ok` 가 없다 → **true 로 읽혀야** 한다 (개발 51).
+    /// 기본값을 빠뜨리면 serde 가 false 로 채워 **모든 결제가 「화면이 죽었다」로 거절**된다 —
+    /// 앱만 업데이트가 늦어도 지갑이 통째로 먹통이 되는 자리라 테스트로 못박는다.
+    #[test]
+    fn heartbeat_without_ui_ok_is_alive() {
+        let h: Heartbeat = serde_json::from_str(r#"{"ts":100}"#).unwrap();
+        assert!(h.ui_ok, "옛 하트비트는 「띄울 수 있다」로 읽혀야 한다");
+        let h: Heartbeat = serde_json::from_str(r#"{"ts":100,"ui_ok":false}"#).unwrap();
+        assert!(!h.ui_ok);
     }
 
     /// 기존(Session 10) 요청 파일은 kind/resource 가 없다 → default 로 채워져야 한다(무손실 호환).

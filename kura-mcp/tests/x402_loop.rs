@@ -408,9 +408,6 @@ async fn live_real_endpoint_v2_parse() {
     let req = x402::pick_requirement(&required).expect("eip155:84532 USDC 요구 선택");
     assert_eq!(req.network, "eip155:84532");
     let amount = x402::base_units_to_usdc(&req.amount).unwrap();
-    println!(
-        "LIVE V2 ✓  amount={amount} USDC  payTo={}  resource={}",
-        req.pay_to,
-        required.display_resource(&req, url)
-    );
+    // 리소스 URL 은 **우리가 요청한 URL** 이다(개발 51) — 서버가 402 에 적어 보낸 주장값이 아니다.
+    println!("LIVE V2 ✓  amount={amount} USDC  payTo={}  resource={url}", req.pay_to);
 }

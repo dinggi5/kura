@@ -84,7 +84,21 @@ export function PaymentApprovalModal({
   const decimals = request.token === "ETH" ? 18 : 6; // USDC 는 세 체인 모두 6 (Arc 의 ERC-20 뷰 포함)
   const needUnits = toBaseUnits(request.amount, decimals);
   const haveUnits = haveStr != null ? toBaseUnits(haveStr, decimals) : null;
-  const insufficient = needUnits != null && haveUnits != null && needUnits > haveUnits;
+  // 가스가 곧 USDC 인 체인(Arc)에선 **보낼 금액과 가스가 같은 잔액에서 나간다** → 잔액을 딱 맞게
+  // 보내면 가스를 못 내 체인에서 실패한다. 보내기 화면은 이미 여유분을 빼는데(SendCard) 승인 창은
+  // 안 빼서, MCP `request_payment` 로 온 「잔액 전부」가 이 검사만 통과하고 실패했다(개발 50 이월).
+  //
+  // **x402 엔 안 건다** — 서명만 하고 온체인 제출·가스는 페이실리테이터 몫이라 우리 가스가 안 나간다.
+  // 여기에 여유분을 걸면 낼 수 있는 결제를 막는다.
+  const reserveUnits =
+    request.kind === "x402" || request.token === "ETH"
+      ? 0n
+      : (toBaseUnits(String(chain.gasReserveUsdc ?? 0), decimals) ?? 0n);
+  const insufficient =
+    needUnits != null && haveUnits != null && needUnits + reserveUnits > haveUnits;
+  /** 잔액 자체는 넘지 않는데 가스 여유분에 걸린 경우 — 이유가 다르니 문구도 달라야 한다. */
+  const onlyOverReserve =
+    insufficient && needUnits != null && haveUnits != null && needUnits <= haveUnits;
 
   async function approve() {
     setBusy(true);
@@ -227,10 +241,15 @@ export function PaymentApprovalModal({
         {insufficient && (
           <p className="mt-1 flex items-center gap-1.5 text-[11px] text-red-600 dark:text-red-500">
             <AlertTriangle size={12} className="shrink-0" />
-            {t(
-              `${request.token} 잔액이 부족해요 · 보유 ${fmtAmount(haveStr ?? "0", 6)} / 필요 ${fmtAmount(request.amount, 6)}`,
-              `Not enough ${request.token} · you have ${fmtAmount(haveStr ?? "0", 6)}, this needs ${fmtAmount(request.amount, 6)}`,
-            )}
+            {onlyOverReserve
+              ? t(
+                  `가스도 이 USDC에서 나가요 · 보유 ${fmtAmount(haveStr ?? "0", 6)} / 필요 ${fmtAmount(request.amount, 6)} + 가스 ${chain.gasReserveUsdc}`,
+                  `Gas comes out of this USDC too · you have ${fmtAmount(haveStr ?? "0", 6)}, this needs ${fmtAmount(request.amount, 6)} + ${chain.gasReserveUsdc} for gas`,
+                )
+              : t(
+                  `${request.token} 잔액이 부족해요 · 보유 ${fmtAmount(haveStr ?? "0", 6)} / 필요 ${fmtAmount(request.amount, 6)}`,
+                  `Not enough ${request.token} · you have ${fmtAmount(haveStr ?? "0", 6)}, this needs ${fmtAmount(request.amount, 6)}`,
+                )}
             {isX402 && t(" (정산 시 실패)", " (settlement would fail)")}
           </p>
         )}

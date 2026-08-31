@@ -348,16 +348,21 @@ async fn cmd_pay(cli: &Cli, rest: &[String]) -> Result<bool, String> {
     let token = cli.opts.get("token").map(String::as_str).unwrap_or("USDC");
     let memo = cli.opts.get("memo").map(String::as_str).unwrap_or("");
 
-    if !cli.json {
-        println!(
-            "{}",
-            ts!(
-                "지갑 앱 승인을 기다리는 중… (최대 5분, 앱 팝업에서 비번 입력)",
-                "Waiting for approval in the wallet app… (up to 5 minutes; type your password there)"
-            )
-        );
-    }
-    let out = flow::run_payment(token, to, amount, memo).await?;
+    // 「기다리는 중」은 **요청이 실제로 나간 뒤** 찍는다(개발 50 이월). 예전엔 이 줄이 먼저라,
+    // 토큰이 틀렸거나 앱이 꺼져 있어 요청이 나가지도 않았는데 기다린다고 말했다.
+    let quiet = cli.json;
+    let out = flow::run_payment(token, to, amount, memo, || {
+        if !quiet {
+            println!(
+                "{}",
+                ts!(
+                    "지갑 앱 승인을 기다리는 중… (최대 5분, 앱 팝업에서 비번 입력)",
+                    "Waiting for approval in the wallet app… (up to 5 minutes; type your password there)"
+                )
+            );
+        }
+    })
+    .await?;
     let success = out.status == "approved";
 
     if cli.json {

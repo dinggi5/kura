@@ -232,26 +232,6 @@ pub fn pick_requirement(pr: &PaymentRequired) -> Result<Requirement, String> {
 }
 
 impl PaymentRequired {
-    /// 사용자 팝업에 보일 리소스 URL: 요구별(V1) > 최상위(V2) > fallback(요청 URL).
-    pub fn display_resource(&self, req: &Requirement, fallback: &str) -> String {
-        if let Some(s) = str_field(&req.raw, "resource") {
-            if !s.trim().is_empty() {
-                return s.trim().to_string();
-            }
-        }
-        if let Some(s) = self
-            .raw
-            .get("resource")
-            .and_then(|r| r.get("url"))
-            .and_then(Value::as_str)
-        {
-            if !s.trim().is_empty() {
-                return s.trim().to_string();
-            }
-        }
-        fallback.to_string()
-    }
-
     /// 결제 사유 후보(없으면 빈 문자열): 요구별 설명(V1) > 최상위 설명(V2).
     pub fn description(&self, req: &Requirement) -> String {
         if let Some(s) = str_field(&req.raw, "description") {
@@ -464,10 +444,8 @@ mod tests {
         assert_eq!(req.amount, "10000");
         assert_eq!(req.pay_to, "0x1111111111111111111111111111111111111111");
         assert_eq!(pr.description(&req), "프리미엄 데이터");
-        assert_eq!(
-            pr.display_resource(&req, "fallback"),
-            "https://example.com/data"
-        );
+        // 요구의 `resource` 문자열은 **읽지 않는다**(개발 51) — 승인 창에 보이는 URL 은 우리가
+        // 실제로 요청한 최종 URL 이다. 서버 주장값을 표시에 쓰면 신뢰 도메인 사칭이 된다.
     }
 
     /// V2: payment-required 헤더(base64)에서 파싱 + eip155:84532 요구 선택(solana는 건너뜀).
@@ -480,10 +458,6 @@ mod tests {
         assert_eq!(req.network, "eip155:84532"); // solana 가 아니라 EVM 을 골라야 한다
         assert_eq!(req.amount, "10000"); // "amount" 필드도 읽힌다
         assert_eq!(req.pay_to, "0x209693Bc6afc0C5328bA36FaF03C514EF312287C");
-        assert_eq!(
-            pr.display_resource(&req, "fallback"),
-            "https://www.x402.org/protected"
-        );
         assert_eq!(pr.description(&req), "Access to protected content");
     }
 

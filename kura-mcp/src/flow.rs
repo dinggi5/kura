@@ -109,16 +109,59 @@ pub struct PayOutcome {
     pub explorer: String,
 }
 
+/// 승인 창을 띄울 수 없을 때의 안내. **하트비트가 없는 이유는 하나가 아니다.**
+///
+/// GUI 는 지갑이 아직 없으면(첫 실행·평문 마이그레이션 대기) 하트비트를 **일부러 안 찍는다**
+/// (`src-tauri/src/ipc.rs` watchdog: `!needs_setup()` 일 때만 찍는다 — 승인할 사람이 없는데
+/// 살아 있다고 하면 MCP 가 요청을 두고 5분을 조용히 기다린다). 그래서 `app_alive()==false` 는
+/// 「앱이 꺼짐」이거나 「앱은 켜져 있는데 지갑이 없음」이다. 둘을 한 문구로 뭉치면 사용자가
+/// **이미 켜져 있는 앱을 다시 켜려 한다**(개발 49 이월). 지갑 파일 상태로 갈라서 안내한다.
+fn app_unavailable() -> String {
+    // 앱은 떠 있는데 화면만 죽은 경우 — 켜라고 하면 안 된다(이미 켜져 있다). 다시 시작해야 한다.
+    if payment::ui_stalled() {
+        return ts!(
+            "지갑 앱 화면이 응답하지 않아요. 앱을 완전히 종료했다 다시 켠 뒤 시도하세요.",
+            "The wallet app's window isn't responding. Quit the app completely, open it again, then try."
+        )
+        .to_string();
+    }
+    match crate::wallet::wallet_status().map(|s| s.state) {
+        Ok(s) if s == "none" => ts!(
+            "지갑을 아직 만들지 않았어요. 지갑 앱에서 지갑을 만든 뒤 다시 시도하세요.",
+            "The wallet hasn't been created yet. Create one in the wallet app, then try again."
+        )
+        .to_string(),
+        Ok(s) if s == "legacy" => ts!(
+            "지갑에 비밀번호가 아직 없어요. 지갑 앱에서 비밀번호 설정을 끝낸 뒤 다시 시도하세요.",
+            "The wallet isn't password-protected yet. Finish setting a password in the wallet app, then try again."
+        )
+        .to_string(),
+        // 지갑은 있는데 하트비트가 없다 = 앱이 꺼져 있다. 상태를 못 읽는 경우도 여기로 —
+        // 「앱을 켜라」가 둘 다에 맞는 안내다(지갑 파일은 앱이 만든다).
+        _ => ts!(
+            "지갑 앱이 실행 중이 아니에요. 앱을 켠 뒤 다시 시도하세요.",
+            "The wallet app isn't running. Open it and try again."
+        )
+        .to_string(),
+    }
+}
+
 /// 결제(송금)를 사용자에게 요청한다. 앱이 켜져 있고 대기 중인 요청이 없어야 한다.
 /// 토큰 검증 → 앱 생존/single-flight 확인 → 요청 파일 작성 → 최대 5분 승인 대기.
 ///
 /// `Err` = 요청 자체를 띄울 수 없음(잘못된 토큰·앱 꺼짐·이미 대기 중·시간 초과).
 /// `Ok`  = 사용자가 응답함(status 가 approved/rejected/failed 중 하나).
+///
+/// `on_pending` 은 **요청 파일을 실제로 쓴 직후** 한 번 불린다 — 여기서부터가 진짜 대기 구간이다.
+/// CLI 가 「승인을 기다리는 중…」을 이 콜백에서 찍는다: 예전엔 호출 **전에** 찍어서, 토큰 오류나
+/// 앱 꺼짐으로 요청이 나가지도 않았는데 기다린다고 말했다(개발 50 이월). 검사를 CLI 에 복사하면
+/// 두 벌이 갈라지므로, 판단은 여기 한 곳에 두고 **시점만** 넘긴다.
 pub async fn run_payment(
     token: &str,
     to: &str,
     amount: &str,
     memo: &str,
+    on_pending: impl FnOnce(),
 ) -> Result<PayOutcome, String> {
     let token = token.trim().to_uppercase();
     if token != "USDC" && token != "ETH" {
@@ -140,11 +183,7 @@ pub async fn run_payment(
     }
     // 앱이 안 켜져 있으면 승인할 사람이 없다 → 즉시 안내(5분 대기 안 함).
     if !payment::app_alive() {
-        return Err(ts!(
-            "지갑 앱이 실행 중이 아니에요. 앱을 켠 뒤 다시 시도하세요.",
-            "The wallet app isn't running. Open it and try again."
-        )
-        .into());
+        return Err(app_unavailable());
     }
     // single-flight: 이미 대기 중인 요청이 있으면 거절.
     if payment::has_pending() {
@@ -156,6 +195,7 @@ pub async fn run_payment(
     }
 
     let id = payment::write_request(&token, to.trim(), amount.trim(), memo.trim())?;
+    on_pending();
 
     match payment::await_result(&id, payment::APPROVAL_TIMEOUT).await {
         Some(r) => {
@@ -274,7 +314,14 @@ pub async fn run_x402(
     })?;
     let req = x402::pick_requirement(&required)?;
     let amount_usdc = x402::base_units_to_usdc(&req.amount)?;
-    let resource = required.display_resource(&req, &url);
+    // 🔴 승인 창·내역·알림에 보이는 리소스 URL은 **우리가 실제로 요청한 최종 URL**이다 (개발 47 이월).
+    // 예전엔 402 응답이 주장한 `resource` 문자열을 우선 썼다 — 그러면 evil.example 이
+    // `resource: "https://api.trusted.io/x"` 라고 적어 두는 것만으로 **사람이 보는 창에 신뢰
+    // 도메인이 뜬다**(비번을 넣는 판단 근거가 공격자가 쓴 문자열이 된다). 개발 47 은 ERC-8004
+    // 도메인 대조만 final_url 로 옮겼고 **표시는 주장값 그대로 남아** 있었다 — 같은 창에서 위쪽
+    // URL(주장)과 아래쪽 경고의 「실제 요청 주소」(final_url)가 서로 다를 수 있었다.
+    // 서버의 주장은 프로토콜 제출(V2 raw 에코)에만 쓰고, 사람에게는 보여주지 않는다.
+    let resource = final_url.to_string();
     // 팝업에 보일 사유: 호출자 memo > 서버 description(V1 요구별/V2 최상위) > 빈 값.
     let memo = memo
         .map(str::trim)
@@ -290,11 +337,7 @@ pub async fn run_x402(
     // 요청이면 레지스트리를 4번 읽어 봐야 결과를 버릴 뿐이고, 느린 RPC 만큼 즉시 줘야 할
     // 안내가 늦어진다(코덱스 개발47 1차 P2).
     if !payment::app_alive() {
-        return Err(ts!(
-            "지갑 앱이 실행 중이 아니에요. 앱을 켠 뒤 다시 시도하세요.",
-            "The wallet app isn't running. Open it and try again."
-        )
-        .into());
+        return Err(app_unavailable());
     }
     if payment::has_pending() {
         return Err(ts!(
@@ -318,12 +361,9 @@ pub async fn run_x402(
             .to_string();
             None
         }
-        // 🔴 대조 상대는 `resource` 가 **아니라** `final_url` 이다(코덱스 개발47 2차 P1).
-        // `resource` 는 402 를 낸 서버가 본문/헤더로 주장한 문자열이라, evil.example 이
-        // "resource: https://api.trusted.io/x" 라고 적어 두면 도메인 대조가 통과한다 —
-        // 공격자의 주장을 레지스트리와 맞춰 보는 셈이 되어 검사 의미가 사라진다.
-        // 우리가 서명한 결제 헤더를 실제로 받는 곳은 final_url 이므로 그쪽과 맞춘다.
-        // (`resource` 는 표시·프로토콜 제출용으로만 계속 쓴다.)
+        // 🔴 대조 상대는 서버가 주장한 `resource` 가 **아니라** `final_url` 이다(코덱스 개발47 2차 P1).
+        // 공격자의 주장을 레지스트리와 맞춰 보면 검사 의미가 사라진다. 우리가 서명한 결제 헤더를
+        // 실제로 받는 곳이 final_url 이다. (개발 51 부터는 표시용 `resource` 도 같은 값이다.)
         Some(id) => match erc8004::lookup(id).await {
             Ok(rec) => Some(erc8004::trust_from(
                 &rec,
@@ -341,11 +381,7 @@ pub async fn run_x402(
     // 조회가 최대 10초를 먹을 수 있어 3)의 확인이 낡았을 수 있다 → 쓰기 직전에 한 번 더 본다
     // (코덱스 개발47 2차 P2). 승인할 UI 가 없는데 요청만 남기면 5분을 헛기다린다.
     if !payment::app_alive() {
-        return Err(ts!(
-            "지갑 앱이 실행 중이 아니에요. 앱을 켠 뒤 다시 시도하세요.",
-            "The wallet app isn't running. Open it and try again."
-        )
-        .into());
+        return Err(app_unavailable());
     }
     let id = payment::write_x402_request(
         req.pay_to.trim(),

@@ -127,6 +127,17 @@ pub(crate) struct PaymentResult {
 #[derive(Serialize, Deserialize)]
 struct Heartbeat {
     ts: u64,
+    /// **승인 창을 실제로 띄울 수 있는 상태인가** (개발 51). 러스트 스레드는 프로세스가 살아
+    /// 있는 한 계속 하트비트를 찍으므로, WebView 만 죽으면 「앱은 살아 있다」고 말하면서
+    /// 승인 창은 영영 안 뜬다 → MCP 가 요청을 받아 두고 5분을 조용히 기다린다.
+    /// 창을 여러 번 깨워도 폴링이 안 돌아오면 이 값을 false 로 내려 MCP 가 **즉시 정직하게**
+    /// 거절하게 한다. 기본 true = 이 필드가 없던 옛 파일과의 호환.
+    #[serde(default = "ui_ok_default")]
+    ui_ok: bool,
+}
+
+fn ui_ok_default() -> bool {
+    true
 }
 
 fn request_path() -> Result<PathBuf, String> {
@@ -218,6 +229,13 @@ const FRONT_STALE_SECS: u64 = 3;
 /// 경우에만 다시 시도한다(깨어나면 폴링이 돌아와 아래 조건에서 걸러진다).
 const WAKE_RETRY_SECS: u64 = 15;
 
+/// 창을 이만큼 깨워 봐도 폴링이 안 돌아오면 **WebView 가 죽었다**고 본다 (개발 51).
+/// `WAKE_RETRY_SECS` 간격이므로 3회 = 약 45초. 창을 띄우는 것 자체가 확인 절차다 — 살아만
+/// 있으면 숨어 있던 WebView 도 타이머가 되살아나 폴링이 돌아온다(개발 49 실측: 3~5초).
+/// 그래서 「숨은 채 시작해 한 번도 폴링 안 한 앱」을 죽었다고 오판하지 않는다(개발 49 가
+/// 선행 측정으로 남겨 둔 질문 — 깨운 뒤를 보면 답이 필요 없어진다).
+const DEAD_WAKES: u32 = 3;
+
 /// 프론트(WebView)가 마지막으로 폴링한 시각. 0 = 아직 한 번도.
 static LAST_POLL: AtomicU64 = AtomicU64::new(0);
 
@@ -234,9 +252,17 @@ fn watchdog(app: tauri::AppHandle) {
     let mut last_wake = 0u64;
     // 우리가 마지막으로 적용한 "항상 위" 값. None = 아직 한 번도 안 건드림.
     let mut last_pinned: Option<bool> = None;
+    // 창을 깨운 뒤에도 프론트가 폴링을 안 한 횟수. 폴링이 한 번이라도 돌아오면 0으로 리셋.
+    let mut wakes_without_poll: u32 = 0;
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let now = now_secs();
+        let front_alive = now.saturating_sub(LAST_POLL.load(Ordering::Relaxed)) <= FRONT_STALE_SECS;
+        if front_alive {
+            wakes_without_poll = 0;
+        }
+        // 창을 여러 번 깨워도 폴링이 안 돌아온다 = WebView 가 죽었다(개발 51).
+        let ui_ok = wakes_without_poll < DEAD_WAKES;
         // 하트비트가 뜻하는 건 "프로세스가 살아 있다"가 아니라 **"여기서 사람이 승인까지 할 수
         // 있다"**이다. 지갑이 아직 없으면(첫 실행·평문 마이그레이션 대기) 프론트는 SetupScreen 을
         // 그리고 WalletScreen 은 아예 안 뜬다 → 승인 창을 띄울 경로가 없다. 그 상태에서 살아
@@ -245,10 +271,13 @@ fn watchdog(app: tauri::AppHandle) {
         // 지갑이 없으면 안 찍혔다. 여기서 명시적으로 같은 선을 긋는다.
         if now.saturating_sub(last_beat) >= HEARTBEAT_SECS && !crate::wallet::needs_setup() {
             last_beat = now;
-            let _ = write_json(heartbeat_path().unwrap_or_default(), &Heartbeat { ts: now });
+            let _ = write_json(
+                heartbeat_path().unwrap_or_default(),
+                &Heartbeat { ts: now, ui_ok },
+            );
         }
         // 프론트가 살아 있다 → 폴링이 이미 같은 일(고정 수렴·모달·자율 승인)을 하고 있다.
-        if now.saturating_sub(LAST_POLL.load(Ordering::Relaxed)) <= FRONT_STALE_SECS {
+        if front_alive {
             last_pinned = None; // 주도권을 넘긴다 — 다시 잠들면 그때 처음부터 다시 맞춘다.
             continue;
         }
@@ -260,6 +289,33 @@ fn watchdog(app: tauri::AppHandle) {
         let wake = pinned && now.saturating_sub(last_wake) >= WAKE_RETRY_SECS;
         if wake {
             last_wake = now;
+            wakes_without_poll = wakes_without_poll.saturating_add(1);
+        }
+        // WebView 가 죽었다고 판정된 순간, **기다리는 요청을 5분 침묵으로 두지 않는다** (개발 51).
+        // 승인 창이 뜰 수 없다는 걸 아는 쪽이 러스트뿐이므로 여기서 끝내 준다. 「사람이 거부」가
+        // 아니라 「띄우지 못했다」라 status 는 failed 다 — 아무도 승인하지 않았고, AI 는 45초 안에
+        // 이유를 읽는다. 사람에게도 알린다: 화면이 죽은 걸 알 방법이 알림뿐이다(창이 안 뜬다).
+        if !ui_ok {
+            if let Some(req) = live_request() {
+                let _ = resolve_request(&PaymentResult {
+                    id: req.id,
+                    status: "failed".into(),
+                    tx_hash: String::new(),
+                    detail: ts!(
+                        "지갑 앱 화면이 응답하지 않아 승인 창을 띄우지 못했어요. 앱을 다시 시작한 뒤 다시 요청하세요.",
+                        "The wallet app's window isn't responding, so the approval prompt couldn't be shown. Restart the app and try again."
+                    )
+                    .into(),
+                    x402: None,
+                });
+                crate::notify::show_notification(
+                    ts!("지갑 화면이 응답하지 않아요", "The wallet window isn't responding"),
+                    ts!(
+                        "결제 승인 창을 띄우지 못했어요. 앱을 완전히 종료했다 다시 켜 주세요.",
+                        "A payment approval prompt couldn't be shown. Quit the app completely and open it again."
+                    ),
+                );
+            }
         }
         // **대기 요청이 없고 값도 그대로면 메인 스레드를 깨우지 않는다.** 트레이 상주 앱은
         // 하루 종일 이 상태로 있다 — 여기서 매초 메시지를 보내면 앱이 영영 못 쉰다.

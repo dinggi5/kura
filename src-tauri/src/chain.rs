@@ -36,6 +36,14 @@ pub(crate) struct ChainConfig {
     /// ERC-20 뷰(6dp)만 쓰고, 네이티브 송금 경로(send_eth)는 이 체인에서 **막는다**(같은 돈을 18dp 로
     /// 보내면 한도·장부·내역이 6dp 기준과 어긋난다). false 인 체인(Base)은 예전과 완전히 동일하다.
     pub(crate) native_is_usdc: bool,
+    /// **송금할 때 가스 몫으로 남겨 둬야 하는 USDC** (십진 문자열, `native_is_usdc` 인 체인만 0 초과).
+    ///
+    /// 가스가 같은 잔액에서 나가는 체인(Arc)에선 «잔액 전부» 송금이 가스를 못 내 실패한다.
+    /// 근거(개발 50 실측, Arc 테스트넷): ERC-20 transfer `eth_estimateGas` = 49,314 ·
+    /// `eth_gasPrice` = 21 gwei 상당 → 1회 약 0.00104 USDC. 여기 값은 그 10배(혼잡·가격 변동 여유).
+    /// 🔴 **Arc 메인넷을 붙일 땐 다시 재야 한다** — 메인넷 가스가 테스트넷과 같을 이유가 없다.
+    /// 프론트 `src/lib/chain.ts` 의 `gasReserveUsdc` 와 같은 값을 유지한다(평행 사본 정책).
+    pub(crate) gas_reserve_usdc: &'static str,
 }
 
 /// Base Sepolia (테스트넷). 기본 체인 — 데이터 파일이 접미사 없이 저장되는 "원본" 체인이기도 하다.
@@ -47,6 +55,7 @@ pub(crate) const BASE_SEPOLIA: ChainConfig = ChainConfig {
     usdc_eip712_name: "USDC",
     usdc_eip712_version: "2",
     native_is_usdc: false,
+    gas_reserve_usdc: "0", // 가스는 별도 ETH 라 USDC 를 남길 이유가 없다.
 };
 
 /// Base 메인넷 (실제 자금). USDC EIP-712 도메인 name 은 Sepolia("USDC")와 달리 "USD Coin" 이다
@@ -60,6 +69,7 @@ pub(crate) const BASE_MAINNET: ChainConfig = ChainConfig {
     usdc_eip712_name: "USD Coin",
     usdc_eip712_version: "2",
     native_is_usdc: false,
+    gas_reserve_usdc: "0", // 가스는 별도 ETH 라 USDC 를 남길 이유가 없다.
 };
 
 /// Arc 테스트넷 (Circle L1, 개발 50). USDC 가 **네이티브 가스 토큰**인 체인 — `native_is_usdc: true`.
@@ -77,6 +87,7 @@ pub(crate) const ARC_TESTNET: ChainConfig = ChainConfig {
     usdc_eip712_name: "USDC",
     usdc_eip712_version: "2",
     native_is_usdc: true,
+    gas_reserve_usdc: "0.01",
 };
 
 /// settings.json 에서 선택된 체인 ID만 읽는 가벼운 뷰(다른 필드는 무시). settings.rs 의 Settings 를
