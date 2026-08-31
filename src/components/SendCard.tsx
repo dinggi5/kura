@@ -78,8 +78,18 @@ export function SendCard({
     amountNum > 0 &&
     (singleUnlimited || amountNum <= single);
   const toOk = isAddressLike(to);
-  const overBalance =
-    cfg.balance != null && Number.isFinite(Number(cfg.balance)) && amountNum > Number(cfg.balance);
+  // 가스가 곧 USDC 인 체인(Arc)에선 **보낼 금액과 가스가 같은 잔액에서 나간다** → 잔액 전부를
+  // 보내면 가스를 못 내 체인에서 실패한다(코덱스 개발 50 P2). 그래서 여유분을 뺀 금액까지만 허용한다.
+  // Base 는 가스가 별도 ETH 라 여유분이 0 = 예전과 동일.
+  const reserve = chain.gasReserveUsdc ?? 0;
+  const spendable =
+    cfg.balance != null && Number.isFinite(Number(cfg.balance))
+      ? Math.max(0, Number(cfg.balance) - reserve)
+      : null;
+  const overBalance = spendable != null && amountNum > spendable;
+  /** 잔액 자체는 넘지 않는데 가스 여유분 때문에 막힌 경우 — 안내 문구가 달라야 한다. */
+  const onlyOverReserve =
+    overBalance && cfg.balance != null && amountNum <= Number(cfg.balance);
   const overDaily = remaining != null && amountNum > remaining;
   // USDC 송금도 가스는 ETH로 낸다. ETH가 0이면 전송이 실패하니 미리 안내.
   // 🔴 가스가 곧 USDC 인 체인(Arc)에선 ethBalance 가 **항상 undefined** 라(백엔드가 안 보낸다)
@@ -249,7 +259,14 @@ export function SendCard({
               </FieldHint>
             )}
             {amountTouched && amountOk && !overDaily && overBalance && (
-              <FieldHint>{t(`보유 ${token}보다 많아요.`, `That's more ${token} than you have.`)}</FieldHint>
+              <FieldHint>
+                {onlyOverReserve
+                  ? t(
+                      `가스도 이 USDC에서 나가요. ${reserve} USDC쯤 남기고 보내세요 (최대 ${fmtAmount(String(spendable), 2)}).`,
+                      `Gas comes out of this USDC too. Leave about ${reserve} USDC behind (up to ${fmtAmount(String(spendable), 2)}).`,
+                    )
+                  : t(`보유 ${token}보다 많아요.`, `That's more ${token} than you have.`)}
+              </FieldHint>
             )}
             {noGas && (
               <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-500">

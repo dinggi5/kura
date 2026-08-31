@@ -82,14 +82,14 @@ export function ReceiveCard({ address, onClose }: { address: string; onClose: ()
           <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--color-ink-300)]">
             {t(
               <>
-                거래소·다른 지갑에서 이 주소로 보낼 때 반드시 <b>Base</b> 네트워크를 고르세요. 다른
-                네트워크(이더리움 등)로 보내면 자금을 잃을 수 있어요. 에이전트 운영 예산만 소액
-                충전하세요.
+                거래소·다른 지갑에서 이 주소로 보낼 때 반드시 <b>{chain.depositNetwork ?? chain.name}</b>{" "}
+                네트워크를 고르세요. 다른 네트워크(이더리움 등)로 보내면 자금을 잃을 수 있어요. 에이전트 운영
+                예산만 소액 충전하세요.
               </>,
               <>
-                When sending from an exchange or another wallet, you must pick the <b>Base</b>{" "}
-                network. Sending over a different network (Ethereum, for example) can lose the funds.
-                Top up only what the agent needs to spend.
+                When sending from an exchange or another wallet, you must pick the{" "}
+                <b>{chain.depositNetwork ?? chain.name}</b> network. Sending over a different network (Ethereum, for example)
+                can lose the funds. Top up only what the agent needs to spend.
               </>,
             )}
           </p>

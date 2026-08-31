@@ -27,6 +27,11 @@ export interface ChainConfig {
   publicNode?: string;
   /** 테스트넷이면 true — 받기 화면의 Faucet 노출, 메인넷 경고 등에 쓴다. */
   testnet: boolean;
+  /** **거래소·다른 지갑의 네트워크 목록에 뜨는 이름** (메인넷만 필요). 표시 이름(`name`)과 다르다 —
+   *  거래소 드롭다운엔 「Base 메인넷」이 아니라 「Base」로 뜬다. 이 값을 틀리게 안내하면 사용자가
+   *  다른 네트워크로 입금해 **자금을 잃는다** → 체인을 추가할 때 반드시 같이 채운다.
+   *  테스트넷은 거래소에서 보낼 일이 없어 비워 둔다(받기 화면의 그 문단이 안 뜬다). */
+  depositNetwork?: string;
   /** **네이티브(가스) 토큰이 이 체인의 USDC 와 같은 자산인가** (개발 50, Arc).
    *  true 면 "USDC 잔액"과 "가스 잔액"이 같은 돈이라 따로 보여주면 두 번 세는 화면이 된다 →
    *  가스 줄·ETH 보내기 탭·ETH 한도·ETH Faucet 을 전부 감춘다. 백엔드도 같은 이유로 네이티브
@@ -36,6 +41,11 @@ export interface ChainConfig {
   usdcFaucet?: string;
   /** 테스트 가스 토큰 Faucet — nativeIsUsdc 인 체인엔 없다(가스가 곧 위 USDC). */
   gasFaucet?: string;
+  /** **송금할 때 가스 몫으로 남겨 둬야 하는 USDC** — nativeIsUsdc 인 체인에만 있다 (개발 50).
+   *  가스가 같은 잔액에서 나가므로 «잔액 전부»를 보내면 가스를 못 내 실패한다. 근거(개발 50 실측,
+   *  Arc 테스트넷): ERC-20 transfer `eth_estimateGas` = 49,314 · `eth_gasPrice` = 21 gwei 상당
+   *  → 한 번에 **약 0.00104 USDC**. 여기 값은 그 10배로 잡았다(혼잡·가격 변동 여유). */
+  gasReserveUsdc?: number;
   /** ERC-8004 레지스트리가 이 체인에 배포돼 있나 (개발 47). false 면 신원 조회 설정을
    *  아예 안 보여준다 — 켤 수 없는 스위치를 두는 것보다 없는 게 정직하다. */
   erc8004: boolean;
@@ -65,6 +75,7 @@ export const BASE_MAINNET: ChainConfig = {
   defaultRpc: "https://mainnet.base.org",
   publicNode: "https://base-rpc.publicnode.com",
   testnet: false,
+  depositNetwork: "Base",
   nativeIsUsdc: false,
   erc8004: true,
 };
@@ -81,6 +92,7 @@ export const ARC_TESTNET: ChainConfig = {
   testnet: true,
   nativeIsUsdc: true,
   usdcFaucet: "https://faucet.circle.com",
+  gasReserveUsdc: 0.01,
   // gasFaucet 없음 — 위 USDC 가 곧 가스다.
   erc8004: true,
 };

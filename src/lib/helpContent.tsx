@@ -72,8 +72,9 @@ export const HELP_SECTIONS: HelpSection[] = [
           <b className={em}>받기</b> 버튼을 누르면 당신 지갑 주소와 QR이 나와요.
         </p>
         <p>
-          거래소나 다른 지갑에서 이 주소로 보낼 때는 <b className={em}>반드시 Base 네트워크</b>
-          를 고르세요. 다른 네트워크(이더리움 등)로 보내면 자금을 잃을 수 있어요.
+          거래소나 다른 지갑에서 이 주소로 보낼 때는{" "}
+          <b className={em}>받기 화면에 적힌 네트워크</b>를 그대로 고르세요. 다른 네트워크로
+          보내면 자금을 잃을 수 있어요.
         </p>
         <p>
           기본 설정인 <b className={em}>테스트넷</b>에선 진짜 돈이 아니라서, 받기 화면의 Faucet
@@ -91,9 +92,9 @@ export const HELP_SECTIONS: HelpSection[] = [
           Tap <b className={em}>Receive</b> to see your address and its QR code.
         </p>
         <p>
-          When you send from an exchange or another wallet, you must pick the{" "}
-          <b className={em}>Base network</b>. Sending over a different network (Ethereum, for
-          example) can lose the funds.
+          When you send from an exchange or another wallet, pick{" "}
+          <b className={em}>the network named on the Receive screen</b>. Sending over a different
+          network can lose the funds.
         </p>
         <p>
           On <b className={em}>the testnet</b> nothing is real money, so you can practice with
