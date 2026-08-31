@@ -107,6 +107,10 @@ pub struct PayOutcome {
     pub detail: String,
     /// tx 해시가 있을 때의 익스플로러 링크(없으면 빈 문자열).
     pub explorer: String,
+    /// ERC-8004 대조 결과 (번호를 준 경우에만). 승인 창에도 같은 값이 붙는다.
+    pub agent: Option<AgentTrust>,
+    /// 조회를 못 한 이유(꺼짐·읽기 실패). 빈 문자열 = 할 말 없음.
+    pub agent_note: String,
 }
 
 /// 승인 창을 띄울 수 없을 때의 안내. **하트비트가 없는 이유는 하나가 아니다.**
@@ -161,6 +165,7 @@ pub async fn run_payment(
     to: &str,
     amount: &str,
     memo: &str,
+    agent_id: Option<u64>,
     on_pending: impl FnOnce(),
 ) -> Result<PayOutcome, String> {
     let token = token.trim().to_uppercase();
@@ -194,7 +199,48 @@ pub async fn run_payment(
         .into());
     }
 
-    let id = payment::write_request(&token, to.trim(), amount.trim(), memo.trim())?;
+    // ERC-8004 대조 (개발 51) — AI 가 번호를 준 경우에만. x402 와 달리 **도메인 앵커가 없다**
+    // (요청 URL 이라는 게 없으니 domain_check 는 늘 "unknown"). 남는 건 「받는 주소 ↔ 등록 지갑」
+    // 하나뿐인데, 그 값은 **비대칭**이다:
+    //   · 일치 = 안전의 증거가 아니다(등록은 무허가라 공격자도 자기 주소로 등록한다) → 승인 창은
+    //     회색 꼬리말 한 마디로만 붙인다. 개발 47 이 「신호 가치가 약하다」고 안 붙인 이유가 이것.
+    //   · 불일치 = 값이 있다. AI 가 「에이전트 42에게」라고 해 놓고 주소가 42의 등록 지갑과 다르면
+    //     **주소 바꿔치기 정황**이다 → 호박색 경고 + `agent_contradicts` 가 자율 승인도 막는다.
+    // 그래서 「일치를 자랑하려고」가 아니라 **「불일치를 잡으려고」** 붙인다.
+    // 여기서 실패해도 결제는 계속된다 — 조회는 판단 재료 하나이지 결제의 전제가 아니다.
+    let mut agent_note = String::new();
+    let agent = match agent_id {
+        None => None,
+        Some(_) if !erc8004::lookup_enabled() => {
+            agent_note = ts!(
+                "에이전트 신원 조회가 설정에서 꺼져 있어요.",
+                "Agent identity lookup is turned off in the wallet settings."
+            )
+            .to_string();
+            None
+        }
+        // 대조 상대는 받는 주소뿐 — 리소스 URL 이 없으므로 빈 문자열을 넘긴다(도메인 = 모름).
+        Some(id) => match erc8004::lookup(id).await {
+            Ok(rec) => Some(erc8004::trust_from(&rec, to.trim(), "")),
+            Err(e) => {
+                agent_note = e;
+                None
+            }
+        },
+    };
+
+    // 조회가 최대 10초를 먹을 수 있어 위 확인이 낡았을 수 있다 → 쓰기 직전에 한 번 더 본다
+    // (x402 경로와 같은 이유 — 승인할 UI 가 없는데 요청만 남기면 5분을 헛기다린다).
+    if agent_id.is_some() && !payment::app_alive() {
+        return Err(app_unavailable());
+    }
+    let id = payment::write_request_agent(
+        &token,
+        to.trim(),
+        amount.trim(),
+        memo.trim(),
+        agent.clone(),
+    )?;
     on_pending();
 
     match payment::await_result(&id, payment::APPROVAL_TIMEOUT).await {
@@ -209,6 +255,8 @@ pub async fn run_payment(
                 tx_hash: r.tx_hash,
                 detail: r.detail,
                 explorer,
+                agent,
+                agent_note,
             })
         }
         None => {

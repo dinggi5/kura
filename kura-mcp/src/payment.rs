@@ -234,6 +234,18 @@ pub fn write_request(token: &str, to: &str, amount: &str, memo: &str) -> Result<
     write_request_kind(token, to, amount, memo, "transfer", "", None)
 }
 
+/// 온체인 송금 요청 + ERC-8004 대조 결과 (개발 51). `resource` 는 빈 문자열 — 송금엔
+/// 요청 URL 이라는 게 없어 도메인 대조가 성립하지 않는다(승인 창도 그렇게 읽는다).
+pub fn write_request_agent(
+    token: &str,
+    to: &str,
+    amount: &str,
+    memo: &str,
+    agent: Option<AgentTrust>,
+) -> Result<String, String> {
+    write_request_kind(token, to, amount, memo, "transfer", "", agent)
+}
+
 /// x402 결제 서명 요청을 파일에 쓴다 (kind="x402", USDC 고정).
 /// amount 는 십진 USDC 문자열, resource 는 결제 대상 URL.
 pub fn write_x402_request(

@@ -51,6 +51,13 @@ struct PayArgs {
     /// What the payment is for — the user reads this in the approval window, so fill it in.
     #[serde(default)]
     memo: Option<String>,
+    /// Optional: the recipient's ERC-8004 agent number, if you know it from the service's own
+    /// documentation or agent card. The wallet reads that agent's on-chain record and tells the
+    /// user whether the address you are paying is the one registered for that agent. A mismatch
+    /// is the useful part — a match is not proof of anything, since anyone can register.
+    /// Leave it out if you don't know it; a wrong number just produces a "no such agent" note.
+    #[serde(default)]
+    agent_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -139,7 +146,9 @@ impl WalletServer {
         exception is autopay, which the user turns on themselves — only then can a payment be approved \
         automatically, and only within an unlocked session, a small limit, and a trusted address. \
         Arguments: to (recipient address), amount (decimal string), token (USDC by default, or ETH), memo \
-        (what the payment is for — the user reads it to decide, so always fill it in). Per-payment and daily \
+        (what the payment is for — the user reads it to decide, so always fill it in), and optionally \
+        agent_id (the recipient's ERC-8004 number, if a service told you one — the wallet then shows the \
+        user whether the address matches that agent's registered wallet). Per-payment and daily \
         limits and the emergency lock are enforced by the app. Never send a password as an argument — the \
         user types it in the app. Returns: status (approved/rejected/failed), tx_hash, and an explorer link."
     )]
@@ -153,17 +162,26 @@ impl WalletServer {
             args.to.trim(),
             args.amount.trim(),
             args.memo.as_deref().unwrap_or("").trim(),
+            args.agent_id,
             // MCP 는 도구 호출당 응답이 한 번뿐이라 "기다리는 중"을 중간에 알릴 상대가 없다.
             || {},
         )
         .await
         .map_err(|e| McpError::internal_error(e, None))?;
-        json_result(&serde_json::json!({
+        let mut body = serde_json::json!({
             "status": out.status,   // approved | rejected | failed
             "tx_hash": out.tx_hash,
             "detail": out.detail,
             "explorer": out.explorer,
-        }))
+        });
+        // 대조 결과는 **있을 때만** 붙인다 — 번호를 안 준 결제의 응답은 예전과 완전히 같다.
+        if let Some(a) = out.agent {
+            body["agent"] = serde_json::to_value(a).unwrap_or(serde_json::Value::Null);
+        }
+        if !out.agent_note.is_empty() {
+            body["agent_note"] = serde_json::Value::String(out.agent_note);
+        }
+        json_result(&body)
     }
 
     #[tool(

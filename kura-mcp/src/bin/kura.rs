@@ -31,6 +31,7 @@ Kura — AI 에이전트 전용 로컬 지갑 CLI
   kura pay <주소> <금액> [옵션]    결제(송금) 요청 → 지갑 앱에서 비번 승인
        --token USDC|ETH        토큰 (기본 USDC)
        --memo \"사유\"            승인 팝업에 보일 결제 사유
+       --agent N               받는 쪽 ERC-8004 번호 (등록 지갑과 대조)
   kura fetch <URL> [--memo \"사유\"] [--agent N]   x402 유료 리소스를 결제하고 가져온다
 
 전역 옵션:
@@ -52,6 +53,7 @@ Usage:
   kura pay <address> <amount>     ask to pay → approve with your password in the app
        --token USDC|ETH           token (USDC by default)
        --memo \"reason\"            what the payment is for, shown in the approval window
+       --agent N                  recipient's ERC-8004 number (compared with the registered wallet)
   kura fetch <URL> [--memo \"reason\"] [--agent N]   pay for an x402 resource and fetch it
 
 Global options:
@@ -347,11 +349,12 @@ async fn cmd_pay(cli: &Cli, rest: &[String]) -> Result<bool, String> {
     })?;
     let token = cli.opts.get("token").map(String::as_str).unwrap_or("USDC");
     let memo = cli.opts.get("memo").map(String::as_str).unwrap_or("");
+    let agent_id = agent_opt(cli)?;
 
     // 「기다리는 중」은 **요청이 실제로 나간 뒤** 찍는다(개발 50 이월). 예전엔 이 줄이 먼저라,
     // 토큰이 틀렸거나 앱이 꺼져 있어 요청이 나가지도 않았는데 기다린다고 말했다.
     let quiet = cli.json;
-    let out = flow::run_payment(token, to, amount, memo, || {
+    let out = flow::run_payment(token, to, amount, memo, agent_id, || {
         if !quiet {
             println!(
                 "{}",
@@ -366,13 +369,25 @@ async fn cmd_pay(cli: &Cli, rest: &[String]) -> Result<bool, String> {
     let success = out.status == "approved";
 
     if cli.json {
-        print_json(&serde_json::json!({
+        let mut body = serde_json::json!({
             "status": out.status,
             "tx_hash": out.tx_hash,
             "detail": out.detail,
             "explorer": out.explorer,
-        }))?;
+        });
+        if let Some(a) = &out.agent {
+            body["agent"] = serde_json::to_value(a).unwrap_or(serde_json::Value::Null);
+        }
+        if !out.agent_note.is_empty() {
+            body["agent_note"] = serde_json::Value::String(out.agent_note.clone());
+        }
+        print_json(&body)?;
     } else {
+        if let Some(a) = &out.agent {
+            println!("{}", agent_line(a));
+        } else if !out.agent_note.is_empty() {
+            println!("{}", out.agent_note);
+        }
         match out.status.as_str() {
             "approved" => {
                 println!("{}", ts!("✓ 승인됨", "✓ Approved"));
@@ -417,16 +432,7 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
     })?;
     let memo = cli.opts.get("memo").map(String::as_str);
     // --agent N: 상대의 ERC-8004 번호(선택). 주면 온체인 기록과 대조해 사실 한 줄을 덧붙인다.
-    // 숫자가 아니면 조용히 무시하지 않고 바로 알린다(오타가 "조회 안 함"으로 묻히지 않게).
-    let agent_id = match cli.opts.get("agent") {
-        Some(v) => Some(v.trim().parse::<u64>().map_err(|_| {
-            tf!(
-                "--agent 는 숫자여야 해요: {v:?}",
-                "--agent must be a number: {v:?}"
-            )
-        })?),
-        None => None,
-    };
+    let agent_id = agent_opt(cli)?;
 
     if !cli.json {
         println!(
@@ -551,6 +557,11 @@ fn agent_line(a: &AgentTrust) -> String {
         "unset" => ts!("등록 지갑 없음", "no wallet on record"),
         _ => ts!("등록 지갑 모름", "wallet unknown"),
     };
+    // 대조할 도메인이 **아예 없는** 경우(직접 송금 — 요청 URL 이라는 게 없다)엔 그 칸을 안 쓴다.
+    // "모름"을 찍으면 「알아보려다 실패했다」로 읽히는데, 여기선 알아볼 대상 자체가 없다.
+    if a.resource_domain.trim().is_empty() {
+        return tf!("에이전트 #{} · {}", "Agent #{} · {}", a.agent_id, w);
+    }
     let d = match a.domain_check.as_str() {
         "match" => ts!("기재 도메인 일치", "listed domain matches"),
         "differs" => ts!("⚠ 기재 도메인과 다름", "⚠ differs from listed domain"),
@@ -563,6 +574,20 @@ fn agent_line(a: &AgentTrust) -> String {
         w,
         d
     )
+}
+
+/// `--agent N` 파싱 (pay·fetch 공용). 숫자가 아니면 **조용히 무시하지 않고** 바로 알린다 —
+/// 오타가 "조회 안 함"으로 묻히면 사용자는 대조가 된 줄 안다.
+fn agent_opt(cli: &Cli) -> Result<Option<u64>, String> {
+    match cli.opts.get("agent") {
+        Some(v) => Ok(Some(v.trim().parse::<u64>().map_err(|_| {
+            tf!(
+                "--agent 는 숫자여야 해요: {v:?}",
+                "--agent must be a number: {v:?}"
+            )
+        })?)),
+        None => Ok(None),
+    }
 }
 
 fn x402_json(

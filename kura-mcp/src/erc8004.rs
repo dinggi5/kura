@@ -557,6 +557,23 @@ mod tests {
         );
     }
 
+    /// 직접 송금(`request_payment --agent N`, 개발 51)엔 **요청 URL 이 없다** → 도메인 대조는
+    /// 성립하지 않고(unknown), 남는 신호는 「받는 주소 ↔ 등록 지갑」 하나다.
+    /// 값이 있는 쪽은 **불일치**다 — 일치는 안전의 증거가 아니다(등록은 무허가).
+    #[test]
+    fn transfer_has_no_domain_anchor() {
+        let r = rec("0xAbC", "api.example.com");
+        let t = trust_from(&r, "0xabc", "");
+        assert_eq!(t.wallet_check, "match"); // 체크섬 대소문자는 무시
+        assert_eq!(t.domain_check, "unknown", "대조할 URL 이 없으면 모름이어야 한다");
+        assert!(t.resource_domain.is_empty());
+
+        // 주소 바꿔치기 정황 = 이 기능을 붙인 이유.
+        let t = trust_from(&r, "0xdeadbeef", "");
+        assert_eq!(t.wallet_check, "differs");
+        assert_eq!(t.domain_check, "unknown");
+    }
+
     /// 깨진 base64·JSON 아님·services 없음 → 조용히 "모름"(패닉·오탐 금지).
     #[test]
     fn broken_data_uri_is_unknown() {
