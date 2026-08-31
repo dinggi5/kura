@@ -234,12 +234,15 @@ pub async fn run_payment(
     if agent_id.is_some() && !payment::app_alive() {
         return Err(app_unavailable());
     }
-    let id = payment::write_request_agent(
+    // 요청에 실린 대조 = 응답에 실리는 대조 (코덱스 개발51 1차 P2). 조회 도중 사용자가 네트워크를
+    // 바꿨으면 write 쪽이 대조를 버리는데, 여기서 필터 전 값을 돌려주면 **승인 창에도 안 뜬 대조**를
+    // AI 에게 사실처럼 말하게 된다.
+    let (id, agent) = payment::write_request_agent(
         &token,
         to.trim(),
         amount.trim(),
         memo.trim(),
-        agent.clone(),
+        agent,
     )?;
     on_pending();
 
@@ -431,12 +434,13 @@ pub async fn run_x402(
     if !payment::app_alive() {
         return Err(app_unavailable());
     }
-    let id = payment::write_x402_request(
+    // 여기도 같은 규칙 — 요청에 실린 대조만 결과로 돌려준다(개발 47 부터 있던 어긋남).
+    let (id, agent) = payment::write_x402_request(
         req.pay_to.trim(),
         &amount_usdc,
         &memo,
         &resource,
-        agent.clone(),
+        agent,
     )?;
     let result = match payment::await_result(&id, payment::APPROVAL_TIMEOUT).await {
         Some(r) => r,

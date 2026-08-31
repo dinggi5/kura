@@ -197,12 +197,48 @@ pub(crate) fn has_pending() -> bool {
 }
 
 /// 처리 결과를 기록하고 대기 요청을 치운다 (single-flight 해제).
+///
+/// 🔴 **요청 파일은 그게 「이 결과의 요청」일 때만 치운다** (코덱스 개발51 1차 P1).
+/// 예전엔 무조건 지웠다 — 늦게 끝난 승인이 그 사이 새로 들어온 **다른 요청**을 치워
+/// single-flight 를 깨고, 그 요청을 기다리던 쪽은 영영 답을 못 받는다.
 pub(crate) fn resolve_request(result: &PaymentResult) -> Result<(), String> {
     write_json(result_path()?, result)?;
-    if let Ok(p) = request_path() {
-        let _ = fs::remove_file(p);
+    let pending = read_request().map(|r| r.id);
+    if clears_pending(pending.as_deref(), &result.id) {
+        if let Ok(p) = request_path() {
+            let _ = fs::remove_file(p);
+        }
     }
     Ok(())
+}
+
+/// 이 결과가 「지금 대기 중인 그 요청」의 것인가 = 요청 파일을 치워도 되는가 (순수 — 테스트용).
+/// 대기 요청이 없으면 치울 것도 없다. **다른 id** 면 남의 요청이므로 절대 건드리지 않는다.
+fn clears_pending(pending_id: Option<&str>, result_id: &str) -> bool {
+    pending_id == Some(result_id)
+}
+
+/// 지금 **승인 처리가 진행 중인** 결제 수. 0 이 아니면 서명·전송이 체인으로 나가는 중일 수 있다.
+static APPROVALS_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// 승인 처리 구간을 표시하는 RAII 가드. 중간에 `?` 로 빠져나가도 Drop 이 카운터를 되돌린다.
+pub(crate) struct ApprovalGuard;
+
+impl ApprovalGuard {
+    pub(crate) fn new() -> Self {
+        APPROVALS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ApprovalGuard {
+    fn drop(&mut self) {
+        APPROVALS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn approval_in_flight() -> bool {
+    APPROVALS_IN_FLIGHT.load(Ordering::SeqCst) > 0
 }
 
 // ---------- 생존 감시 (개발 49) ----------
@@ -295,7 +331,11 @@ fn watchdog(app: tauri::AppHandle) {
         // 승인 창이 뜰 수 없다는 걸 아는 쪽이 러스트뿐이므로 여기서 끝내 준다. 「사람이 거부」가
         // 아니라 「띄우지 못했다」라 status 는 failed 다 — 아무도 승인하지 않았고, AI 는 45초 안에
         // 이유를 읽는다. 사람에게도 알린다: 화면이 죽은 걸 알 방법이 알림뿐이다(창이 안 뜬다).
-        if !ui_ok {
+        // 🔴 **승인이 진행 중이면 손대지 않는다** (코덱스 개발51 1차 P1). 사람이 비번을 넣은
+        // 직후 WebView 가 죽으면 러스트는 아직 서명·전송 중일 수 있다 — 그때 「실패」라고 답하면
+        // AI 가 재시도해 **같은 돈이 두 번** 나갈 수 있다. 진짜로 나가는 중인 결제는
+        // 5분 대기가 정직한 답이다(그 5분 안에 성공하면 성공이 그대로 전달된다).
+        if !ui_ok && !approval_in_flight() {
             if let Some(req) = live_request() {
                 let _ = resolve_request(&PaymentResult {
                     id: req.id,
@@ -379,6 +419,9 @@ pub(crate) async fn approve_payment(id: String, password: String) -> Result<Paym
         .into());
     }
     ensure_request_chain(&req)?; // 요청 시점 체인 ≠ 현재 체인이면 거부(메인넷 오발사 차단)
+
+    // 여기서부터는 돈이 나갈 수 있는 구간 — 감시 스레드가 이 요청을 실패로 끝내면 안 된다.
+    let _in_flight = ApprovalGuard::new();
 
     // kind 에 따라 처리 경로가 다르다. 둘 다 잠금·한도·내역을 자동 적용한다(같은 하부 함수 재사용).
     // 실패하면 ?로 즉시 반환(요청 파일 유지) → 팝업에서 재시도/거부 가능.
@@ -500,6 +543,32 @@ mod tests {
             chain_id: 0,
             agent: None,
         }
+    }
+
+    /// 🔴 늦게 끝난 승인이 **그 사이 들어온 다른 요청**을 치우면 안 된다
+    /// (코덱스 개발51 1차 P1). single-flight 가 깨지고, 새 요청을 기다리던 쪽은 답을 못 받는다.
+    #[test]
+    fn resolve_only_clears_its_own_request() {
+        assert!(clears_pending(Some("A"), "A"), "같은 요청이면 치운다");
+        assert!(!clears_pending(Some("B"), "A"), "남의 요청은 건드리지 않는다");
+        assert!(!clears_pending(None, "A"), "대기 요청이 없으면 치울 것도 없다");
+    }
+
+    /// 승인 처리 중에는 감시 스레드가 요청을 실패로 끝내면 안 된다 — 가드가 그 구간을 표시한다.
+    /// Drop 으로 되돌아가야 `?` 로 중간에 빠져나가도 카운터가 새지 않는다.
+    #[test]
+    fn approval_guard_marks_in_flight() {
+        assert!(!approval_in_flight());
+        {
+            let _g = ApprovalGuard::new();
+            assert!(approval_in_flight());
+            {
+                let _g2 = ApprovalGuard::new(); // 겹쳐도(자율+수동) 카운트로 버틴다
+                assert!(approval_in_flight());
+            }
+            assert!(approval_in_flight(), "안쪽 하나가 끝나도 바깥은 진행 중");
+        }
+        assert!(!approval_in_flight());
     }
 
     // 방금 만들어진 요청은 살아 있다 = 팝오버를 붙잡아야 한다.

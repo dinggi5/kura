@@ -2,7 +2,7 @@
 //
 // 비번은 절대 여기로 들어오지 않는다. MCP는 ~/.jigap에 요청 파일만 쓰고, 실제 서명·전송은
 // GUI 앱(src-tauri)이 한다. 흐름:
-//   write_request() → GUI가 팝업으로 사람 승인 → GUI가 결과 파일 작성 → await_result()가 읽어 반환.
+//   write_request_agent() → GUI가 팝업으로 사람 승인 → GUI가 결과 파일 작성 → await_result()가 읽어 반환.
 //
 // single-flight: 한 번에 대기 요청 1건. 앱이 안 켜져 있으면(하트비트 신선도) 즉시 안내.
 
@@ -230,19 +230,15 @@ fn new_id() -> String {
 }
 
 /// 온체인 송금 요청을 파일에 쓴다 (kind="transfer"). 반환된 id로 결과를 매칭한다.
-pub fn write_request(token: &str, to: &str, amount: &str, memo: &str) -> Result<String, String> {
-    write_request_kind(token, to, amount, memo, "transfer", "", None)
-}
-
-/// 온체인 송금 요청 + ERC-8004 대조 결과 (개발 51). `resource` 는 빈 문자열 — 송금엔
-/// 요청 URL 이라는 게 없어 도메인 대조가 성립하지 않는다(승인 창도 그렇게 읽는다).
+/// `agent` = ERC-8004 대조 결과(개발 51, 번호를 준 경우에만). `resource` 는 빈 문자열 —
+/// 송금엔 요청 URL 이라는 게 없어 도메인 대조가 성립하지 않는다(승인 창도 그렇게 읽는다).
 pub fn write_request_agent(
     token: &str,
     to: &str,
     amount: &str,
     memo: &str,
     agent: Option<AgentTrust>,
-) -> Result<String, String> {
+) -> Result<(String, Option<AgentTrust>), String> {
     write_request_kind(token, to, amount, memo, "transfer", "", agent)
 }
 
@@ -254,12 +250,16 @@ pub fn write_x402_request(
     memo: &str,
     resource: &str,
     agent: Option<AgentTrust>,
-) -> Result<String, String> {
+) -> Result<(String, Option<AgentTrust>), String> {
     write_request_kind("USDC", to, amount, memo, "x402", resource, agent)
 }
 
 /// 공통 요청 작성기 — kind/resource 만 다르고 나머지 single-flight 로직은 동일.
 #[allow(clippy::too_many_arguments)]
+/// 반환: (요청 id, **실제로 요청에 실린** 대조 결과). 두 번째 값을 돌려주는 이유 —
+/// 아래 체인 필터가 대조를 버릴 수 있는데, 호출자가 필터 전 값을 그대로 응답에 실으면
+/// **승인 창에도 안 뜨고 자율 차단에도 안 쓰인 대조**를 AI 에게 사실처럼 말하게 된다
+/// (코덱스 개발51 1차 P2). 요청에 실린 것과 응답에 실리는 것이 같아야 한다.
 fn write_request_kind(
     token: &str,
     to: &str,
@@ -268,7 +268,7 @@ fn write_request_kind(
     kind: &str,
     resource: &str,
     agent: Option<AgentTrust>,
-) -> Result<String, String> {
+) -> Result<(String, Option<AgentTrust>), String> {
     let id = new_id();
     let chain_id = crate::chain::active_chain().chain_id;
     // 조회 시점과 요청 각인 시점 사이(조회 상한 10초)에 사용자가 네트워크를 바꿨을 수 있다.
@@ -286,7 +286,7 @@ fn write_request_kind(
         kind: kind.to_string(),
         resource: resource.to_string(),
         chain_id, // 요청 시점 활성 체인 각인(승인 시 GUI가 대조)
-        agent,
+        agent: agent.clone(),
     };
     let json = serde_json::to_string_pretty(&req)
         .map_err(|e| tf!("직렬화 실패: {e}", "Couldn't serialize the request: {e}"))?;
@@ -299,7 +299,7 @@ fn write_request_kind(
     if let Ok(p) = result_path() {
         let _ = fs::remove_file(p);
     }
-    Ok(id)
+    Ok((id, agent))
 }
 
 /// 요청 파일을 create_new(O_EXCL)로 원자적으로 만들어 single-flight 슬롯을 획득한다.
