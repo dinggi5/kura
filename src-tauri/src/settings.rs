@@ -340,6 +340,17 @@ pub(crate) fn get_settings() -> Settings {
     read_settings()
 }
 
+/// 설정 파일이 **있는데 못 읽고 있는가** (개발 52). `read_settings` 는 그때 보수적 기본값
+/// (테스트넷 · 공식 RPC)으로 조용히 접는데, 그 폴백은 사용자가 고른 **커스텀 RPC 를 버리고
+/// 공식 엔드포인트에 붙는다** — 「로그 안 남김」으로 고른 RPC 가 사용자 모르게 바뀌는 것이라
+/// 화면에 알려야 한다(개발 51 하네스에서 필드 하나 빠진 파일로 발견). 동작은 안 바꾼다 —
+/// 알림만. 판정은 `read_settings_for_update` 와 같다: 파일 없음은 정상(false), 깨짐·권한·
+/// 홈 못 정함이 true. 저장이 막히는 조건과 같은 하나의 술어라 문구도 같은 상황을 가리킨다.
+#[tauri::command]
+pub(crate) fn settings_file_broken() -> bool {
+    read_settings_for_update().is_none()
+}
+
 /// 시작 시 업데이트 자동 확인 토글 (개발 31).
 /// 앱 관리 필드라 "저장하고 닫기"와 무관하게 즉시 적용된다(자동 시작 토글과 같은 결).
 #[tauri::command]
@@ -604,6 +615,13 @@ mod tests {
         assert!(settings_for_update(Some("{ 이건 JSON 이 아니다"), true).is_none());
         assert!(settings_for_update(Some(r#"{"single_usdc": 5}"#), true).is_none()); // 문자열이어야 함
         assert!(settings_for_update(Some(""), true).is_none());
+        // 필수 필드(serde default 없음) 하나만 빠져도 통째로 못 읽는다 — 개발 51 하네스에서
+        // 손으로 쓴 파일이 이렇게 접혀 커스텀 RPC 가 무시됐다. 이 경우가 화면 알림의 대상이다.
+        assert!(settings_for_update(
+            Some(r#"{"daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05","chain_id":8453,"rpc_url":"https://example.invalid"}"#),
+            true
+        )
+        .is_none());
     }
 
     // 🔴 폼 저장이 앱 관리 필드를 지우면 안 된다.

@@ -133,6 +133,7 @@ pub fn run() {
             transfer::send_eth,
             transfer::send_usdc,
             settings::get_settings,
+            settings::settings_file_broken,
             settings::set_settings,
             limits::get_today_spend,
             lock::is_locked,

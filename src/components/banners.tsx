@@ -39,6 +39,34 @@ export function BackupNag({ onBackup }: { onBackup: () => void }) {
   );
 }
 
+/** 설정 파일을 못 읽어 기본값으로 도는 중 (개발 52).
+ *
+ *  백엔드는 깨진 settings.json 을 보수적 기본값(테스트넷·공식 RPC)으로 조용히 접는다 —
+ *  앱이 안 뜨는 것보단 낫지만, 사용자가 「로그 안 남김」으로 고른 커스텀 RPC 가 모르는 새
+ *  공식 엔드포인트로 바뀐 상태다. 동작은 그대로 두고 그 사실만 알린다. 버튼은 없다 — 설정
+ *  화면의 저장도 같은 이유로 막혀 있어서(read_settings_for_update) 안에서 할 수 있는 게 없다. */
+export function SettingsBrokenBanner() {
+  return (
+    <motion.div
+      {...enter}
+      className={cn(
+        "w-full max-w-md flex items-center gap-3 px-4 py-3",
+        "rounded-[var(--radius-card)]",
+        "bg-amber-50 dark:bg-amber-950/30",
+        "border border-amber-200 dark:border-amber-900/50",
+      )}
+    >
+      <AlertTriangle size={16} className="shrink-0 text-amber-600 dark:text-amber-500" />
+      <p className="flex-1 min-w-0 text-[12px] leading-snug text-amber-800 dark:text-amber-300">
+        {t(
+          "설정 파일(~/.jigap/settings.json)을 읽지 못해 기본값으로 돌고 있어요 — 테스트넷, 공식 RPC. 고른 RPC는 지금 안 쓰여요. 파일을 고치거나 지우면 돌아와요.",
+          "Couldn't read the settings file (~/.jigap/settings.json), so Kura is running on defaults — testnet, official RPC. The RPC you chose isn't in use. Fix or delete the file to get it back.",
+        )}
+      </p>
+    </motion.div>
+  );
+}
+
 /** 업데이트 알림 (개발 31).
  *
  *  메뉴바 상주 앱이라 사용자가 설정 화면을 안 열면 새 버전이 나온 걸 영영 모른다 —

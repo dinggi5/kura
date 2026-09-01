@@ -31,7 +31,7 @@ import { BalanceCard } from "@/components/BalanceCard";
 import { ReceiveCard } from "@/components/ReceiveCard";
 import { SendCard } from "@/components/SendCard";
 import { PaymentApprovalModal } from "@/components/PaymentApprovalModal";
-import { BackupNag, LockBanner, UpdateBanner } from "@/components/banners";
+import { BackupNag, LockBanner, SettingsBrokenBanner, UpdateBanner } from "@/components/banners";
 import { useUpdate } from "@/lib/useUpdate";
 import { SessionBar, UnlockSessionModal } from "@/components/SessionBar";
 import { BackupFlow } from "@/screens/BackupFlow";
@@ -60,6 +60,8 @@ export function WalletScreen({
   const [showBackup, setShowBackup] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
+  // 설정 파일이 있는데 못 읽는 중인가 (개발 52) — 그때 위 settings 는 기본값이고, 그 사실을 배너로 알린다.
+  const [settingsBroken, setSettingsBroken] = useState(false);
   const [spend, setSpend] = useState<SpendView | null>(null);
   const [locked, setLocked] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -152,6 +154,7 @@ export function WalletScreen({
   // 한도 설정 + 오늘 사용액 (송금 후 갱신).
   const loadLimits = useCallback(() => {
     invoke<Settings>("get_settings").then(setSettings).catch(() => {});
+    invoke<boolean>("settings_file_broken").then(setSettingsBroken).catch(() => {});
     invoke<SpendView>("get_today_spend").then(setSpend).catch(() => {});
   }, []);
 
@@ -472,6 +475,9 @@ export function WalletScreen({
           />
         )}
         {!backedUp && <BackupNag onBackup={() => setShowBackup(true)} />}
+        {/* 설정 파일 못 읽음(개발 52) — 백업보다 아래, 업데이트보다 위. 돈은 안 걸렸지만
+            「고른 RPC 가 안 쓰인다」는 프라이버시 사실이라 새 버전 안내보다 먼저다. */}
+        {settingsBroken && <SettingsBrokenBanner />}
         {/* 업데이트 안내는 맨 아래 — 긴급 잠금·시드 백업이 먼저다(돈이 걸린 순서).
             버튼은 설치가 아니라 설정의 정보 카드로 보낸다: 릴리스 노트를 보고 누르는 게 승인. */}
         {update.info && !update.bannerHidden && (
