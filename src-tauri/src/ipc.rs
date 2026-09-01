@@ -227,11 +227,21 @@ fn owns_pending(pending_id: Option<&str>, result_id: &str) -> bool {
 /// 지금 **승인 처리가 진행 중인** 결제 수. 0 이 아니면 서명·전송이 체인으로 나가는 중일 수 있다.
 static APPROVALS_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 
+/// 🔴 **승인 시작과 감시 스레드의 실패 처리를 한 줄로 세우는 잠금** (코덱스 개발51 4차 P1).
+///
+/// 카운터를 각자 읽고 각자 행동하면 원자적이지 않다: 감시 스레드가 「진행 중 아님」을 본
+/// **직후** 승인이 시작되면, 승인은 체인으로 돈을 보내는데 감시 스레드는 같은 요청을 실패로
+/// 적고 치운다 → 상대는 실패로 알고 재시도한다(이중 결제). 두 쪽이 이 잠금 안에서
+/// **「요청이 아직 대기 중인가」를 보고 상태를 바꾸므로** 순서가 하나로 정해진다.
+static APPROVAL_ARBITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 승인 처리 구간을 표시하는 RAII 가드. 중간에 `?` 로 빠져나가도 Drop 이 카운터를 되돌린다.
 pub(crate) struct ApprovalGuard;
 
 impl ApprovalGuard {
-    pub(crate) fn new() -> Self {
+    /// 카운터만 올린다. **`begin_approval` 안에서만 쓴다** — 밖에서 쓰면 「요청이 아직 대기
+    /// 중인가」 확인과 잠금을 건너뛰어 4차 P1 의 경합이 되살아난다.
+    fn acquire() -> Self {
         APPROVALS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
         Self
     }
@@ -241,6 +251,25 @@ impl Drop for ApprovalGuard {
     fn drop(&mut self) {
         APPROVALS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// 이 요청의 승인 처리를 시작한다. **감시 스레드가 이미 실패로 끝냈으면 시작하지 않는다** —
+/// 그 경우 상대는 이미 실패를 받아 재시도했을 수 있으므로, 여기서 또 보내면 이중 결제다.
+pub(crate) fn begin_approval(id: &str) -> Result<ApprovalGuard, String> {
+    let _lock = APPROVAL_ARBITER.lock().map_err(|_| {
+        ts!(
+            "승인을 시작할 수 없어요. 앱을 다시 시작해 주세요.",
+            "Couldn't start the approval. Please restart the app."
+        )
+    })?;
+    if read_request().map(|r| r.id).as_deref() != Some(id) {
+        return Err(ts!(
+            "결제 요청이 이미 취소됐거나 시간이 지났어요.",
+            "That payment request was already cancelled or timed out."
+        )
+        .into());
+    }
+    Ok(ApprovalGuard::acquire())
 }
 
 fn approval_in_flight() -> bool {
@@ -354,32 +383,40 @@ fn watchdog(app: tauri::AppHandle) {
         // 직후 WebView 가 죽으면 러스트는 아직 서명·전송 중일 수 있다 — 그때 「실패」라고 답하면
         // AI 가 재시도해 **같은 돈이 두 번** 나갈 수 있다. 진짜로 나가는 중인 결제는
         // 5분 대기가 정직한 답이다(그 5분 안에 성공하면 성공이 그대로 전달된다).
-        if !ui_ok && !approval_in_flight() {
-            if let Some(req) = live_request() {
-                let _ = resolve_request(&PaymentResult {
-                    id: req.id,
-                    status: "failed".into(),
-                    tx_hash: String::new(),
-                    detail: ts!(
-                        "지갑 앱 화면이 응답하지 않아 승인 창을 띄우지 못했어요. 앱을 다시 시작한 뒤 다시 요청하세요.",
-                        "The wallet app's window isn't responding, so the approval prompt couldn't be shown. Restart the app and try again."
-                    )
-                    .into(),
-                    x402: None,
-                });
-                crate::notify::show_notification(
-                    ts!("지갑 화면이 응답하지 않아요", "The wallet window isn't responding"),
-                    ts!(
-                        "결제 승인 창을 띄우지 못했어요. 앱을 완전히 종료했다 다시 켜 주세요.",
-                        "A payment approval prompt couldn't be shown. Quit the app completely and open it again."
-                    ),
-                );
+        //
+        // 판단과 실행을 **한 잠금 안에서** 한다 (4차 P1): 보고 나서 놓으면 그 틈에 승인이
+        // 시작돼, 돈은 나가는데 여기선 실패로 적는 상태가 된다. 알림은 잠금 밖에서 띄운다.
+        let mut told_dead = false;
+        if !ui_ok {
+            if let Ok(_lock) = APPROVAL_ARBITER.lock() {
+                if !approval_in_flight() {
+                    if let Some(req) = live_request() {
+                        told_dead = true;
+                        let _ = resolve_request(&PaymentResult {
+                            id: req.id,
+                            status: "failed".into(),
+                            tx_hash: String::new(),
+                            detail: ts!(
+                                "지갑 앱 화면이 응답하지 않아 승인 창을 띄우지 못했어요. 앱을 다시 시작한 뒤 다시 요청하세요.",
+                                "The wallet app's window isn't responding, so the approval prompt couldn't be shown. Restart the app and try again."
+                            )
+                            .into(),
+                            x402: None,
+                        });
+                    }
+                }
             }
         }
-        // **대기 요청이 없고 값도 그대로면 메인 스레드를 깨우지 않는다.** 트레이 상주 앱은
-        // 하루 종일 이 상태로 있다 — 여기서 매초 메시지를 보내면 앱이 영영 못 쉰다.
-        // 반대로 승인 대기 중(pinned=true)에는 매초 다시 적용한다: 그 몇 초가 돈이 걸린
-        // 구간이고, tray::set_pinned 의 자가 치유(값을 캐시하지 않는다)가 필요한 곳이다.
+        // 사람에게도 알린다: 화면이 죽은 걸 알 방법이 알림뿐이다(창이 안 뜬다).
+        if told_dead {
+            crate::notify::show_notification(
+                ts!("지갑 화면이 응답하지 않아요", "The wallet window isn't responding"),
+                ts!(
+                    "결제 승인 창을 띄우지 못했어요. 앱을 완전히 종료했다 다시 켜 주세요.",
+                    "A payment approval prompt couldn't be shown. Quit the app completely and open it again."
+                ),
+            );
+        }
         let converge = pinned || last_pinned == Some(true);
         if !converge && !wake {
             continue;
@@ -440,7 +477,8 @@ pub(crate) async fn approve_payment(id: String, password: String) -> Result<Paym
     ensure_request_chain(&req)?; // 요청 시점 체인 ≠ 현재 체인이면 거부(메인넷 오발사 차단)
 
     // 여기서부터는 돈이 나갈 수 있는 구간 — 감시 스레드가 이 요청을 실패로 끝내면 안 된다.
-    let _in_flight = ApprovalGuard::new();
+    // (감시 스레드가 이미 끝낸 뒤면 여기서 거절된다 — 그 경우 상대는 재시도했을 수 있다.)
+    let _in_flight = begin_approval(&req.id)?;
 
     // kind 에 따라 처리 경로가 다르다. 둘 다 잠금·한도·내역을 자동 적용한다(같은 하부 함수 재사용).
     // 실패하면 ?로 즉시 반환(요청 파일 유지) → 팝업에서 재시도/거부 가능.
@@ -580,10 +618,10 @@ mod tests {
     fn approval_guard_marks_in_flight() {
         assert!(!approval_in_flight());
         {
-            let _g = ApprovalGuard::new();
+            let _g = ApprovalGuard::acquire();
             assert!(approval_in_flight());
             {
-                let _g2 = ApprovalGuard::new(); // 겹쳐도(자율+수동) 카운트로 버틴다
+                let _g2 = ApprovalGuard::acquire(); // 겹쳐도(자율+수동) 카운트로 버틴다
                 assert!(approval_in_flight());
             }
             assert!(approval_in_flight(), "안쪽 하나가 끝나도 바깥은 진행 중");

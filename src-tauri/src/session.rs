@@ -218,7 +218,7 @@ async fn auto_approve_pinned(
 
     // 여기서부터는 돈이 나갈 수 있는 구간 — 감시 스레드가 이 요청을 실패로 끝내면 안 된다
     // (코덱스 개발51 1차 P1: 자율 경로는 창이 없어 「프론트가 잔다」와 구별이 더 어렵다).
-    let _in_flight = crate::ipc::ApprovalGuard::new();
+    let _in_flight = crate::ipc::begin_approval(&req.id)?;
 
     // 세션이 잠금 해제돼 있어야 키가 메모리에 있다(유휴 타임아웃도 여기서 검사).
     let idle = auto_lock_secs(&settings);

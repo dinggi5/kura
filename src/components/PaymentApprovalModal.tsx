@@ -374,13 +374,21 @@ function AgentTrustLines({ agent }: { agent: AgentTrust }) {
   }
 
   const cmp = comparison(agent);
+  // 🔴 **대조가 실제로 일어났을 때만** 기재 도메인을 보여준다 (코덱스 개발51 4차 P1).
+  // `uri_domain` 은 등록 문서가 놓인 호스트 = **등록자가 고른 문자열**이다. 등록은 무허가라
+  // 누구나 `coinbase.com` 짜리 문서를 올려 두고 자기 지갑을 등록할 수 있다. 직접 송금엔
+  // 대조할 URL 이 없어(`resource_domain` 이 빈 값) 아무것도 안 맞춰 봤는데, 그 이름을 승인 창에
+  // 띄우면 「온체인 기재 · #42 · coinbase.com · 주소 일치」가 되어 **사칭의 통로**가 된다.
+  // 같은 이유로 이름(declared_name)을 안 쓰기로 한 개발 47 결정과 한 줄기다.
+  // (CLI 의 agent_line 엔 같은 규칙을 넣어 뒀는데 창에는 빠져 있었다.)
+  const domainCompared = agent.domain_check === "match" || agent.domain_check === "differs";
   return (
     <>
       <p className={cn(gray, "max-w-full break-all text-center")}>
         <Fingerprint size={11} className="shrink-0" />
         <span>
           {t("온체인 기재", "On-chain record")} · #{agent.agent_id}
-          {agent.uri_domain && ` · ${agent.uri_domain}`}
+          {domainCompared && agent.uri_domain && ` · ${agent.uri_domain}`}
           {!cmp.warn && ` · ${cmp.text}`}
         </span>
       </p>
