@@ -142,7 +142,7 @@ fn selected_chain_id() -> u64 {
 
 /// settings.json 본문에서 chain_id 를 뽑는다(깨졌거나 필드가 없으면 테스트넷).
 /// selected_chain_id 의 파싱 판단만 떼어낸 순수 함수 (IO 없이 테스트하려고).
-fn chain_id_in(text: &str) -> u64 {
+pub(crate) fn chain_id_in(text: &str) -> u64 {
     serde_json::from_str::<ChainSel>(text)
         .map(|c| c.chain_id)
         .unwrap_or(BASE_SEPOLIA.chain_id)

@@ -59,8 +59,8 @@ export function SettingsBrokenBanner() {
       <AlertTriangle size={16} className="shrink-0 text-amber-600 dark:text-amber-500" />
       <p className="flex-1 min-w-0 text-[12px] leading-snug text-amber-800 dark:text-amber-300">
         {t(
-          "설정 파일(~/.jigap/settings.json)을 읽지 못해 기본값으로 돌고 있어요 — 테스트넷, 공식 RPC. 고른 RPC는 지금 안 쓰여요. 파일을 고치거나 지우면 돌아와요.",
-          "Couldn't read the settings file (~/.jigap/settings.json), so Kura is running on defaults — testnet, official RPC. The RPC you chose isn't in use. Fix or delete the file to get it back.",
+          "설정 파일(~/.jigap/settings.json)을 읽지 못했어요. 한도·옵션은 기본값이고, 고른 RPC 대신 공식 RPC를 쓰고 있어요. 파일을 고치거나 지우면 돌아와요.",
+          "Couldn't read the settings file (~/.jigap/settings.json). Limits and options are at their defaults, and the official RPC is in use instead of the one you chose. Fix or delete the file to get them back.",
         )}
       </p>
     </motion.div>

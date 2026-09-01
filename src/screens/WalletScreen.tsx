@@ -202,6 +202,10 @@ export function WalletScreen({
       if (document.hidden || Date.now() - last < 5_000) return;
       last = Date.now();
       void refreshBalancesSilent();
+      // 설정도 다시 읽는다(코덱스 개발 52 P2): 이 화면은 창이 숨어도 마운트된 채라, 사용자가
+      // 배너대로 settings.json 을 고쳐도 다음 결제·설정 닫기·재시작 전엔 배너와 체인 라벨이
+      // 옛 값에 머문다. 창이 돌아올 때 한 번 재확인하면 그 사이가 사라진다(파일 읽기 둘뿐).
+      loadLimits();
     };
     document.addEventListener("visibilitychange", onReturn);
     window.addEventListener("focus", onReturn);
@@ -210,7 +214,7 @@ export function WalletScreen({
       document.removeEventListener("visibilitychange", onReturn);
       window.removeEventListener("focus", onReturn);
     };
-  }, [refreshBalancesSilent]);
+  }, [refreshBalancesSilent, loadLimits]);
 
   // 1초 폴링: ① AI 연결 상태 ② 세션 상태 ③ 결제 요청(=앱 생존 하트비트 갱신, 자율 승인 우선 시도).
   // 새 결제 요청 1건당 자율 승인을 먼저 시도 → 자율 불가면(NEEDS_PASSWORD·차단) 사람 승인 모달.
