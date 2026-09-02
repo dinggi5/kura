@@ -7,6 +7,10 @@
 //   · 팝오버 위치는 TrayIcon::rect() 로 직접 계산한다 → 위치 플러그인 의존성 0.
 //   · 승인 대기 중에는 blur 로 창을 숨기지 않는다(hold). 비번 입력 중 다른 창을 클릭해 팝오버가
 //     사라지면 승인 자체를 못 하게 되기 때문.
+//   · 단 **사용자가 일부러 닫는 건 존중한다**(개발 53) — 트레이 클릭·Cmd+W 는 승인 대기 중에도
+//     창을 숨긴다(승인 전에 브라우저를 잠깐 봐야 할 때가 있다). 그 요청에 한해 「닫아 둠」을
+//     기억해 감시 스레드가 다시 띄우지 않고, 만료 직전 한 번만 되살린다(REMIND_SECS).
+//     blur 는 여전히 닫기가 아니다 — 다른 창을 클릭하는 건 「잠깐 저쪽」이지 「치워」가 아니다.
 
 use crate::i18n::ts;
 use std::sync::Mutex;
@@ -43,11 +47,82 @@ const REOPEN_GUARD: Duration = Duration::from_millis(250);
 const ICON_NORMAL: &[u8] = include_bytes!("../icons/tray-normal.png");
 const ICON_LOCKED: &[u8] = include_bytes!("../icons/tray-locked.png");
 
+/// 닫아 둔 승인 창을 만료 이만큼 전에 한 번 되살린다(초). 개발 53.
+///
+/// 사용자가 닫은 건 「지금 말고」지 「영영」이 아니다 — 그런데 MCP 는 5분이 지나면 요청을 거둬
+/// 가고, 닫힌 채로는 그 사실을 알 길이 없다(개발 49 가 막으려던 «조용한 실패» 그대로).
+/// 그래서 한 번, 비번을 넣기에 충분한 시간을 남기고 되살린다. 다시 닫으면 그걸로 끝이다.
+/// 5분 자체를 늘리지 않는 이유: 그 값은 두 크레이트(앱·사이드카)의 파일 계약이자 승인 창
+/// 카운트다운이자 AI 클라이언트 쪽 도구 타임아웃과도 맞물려 있다.
+pub(crate) const REMIND_SECS: u64 = 60;
+
 /// 팝오버 런타임 상태.
 #[derive(Default)]
 pub(crate) struct PopoverState {
     /// blur 로 자동으로 숨긴 시각 (REOPEN_GUARD 참고).
     last_auto_hide: Mutex<Option<Instant>>,
+    /// 사용자가 **일부러 닫아 둔** 승인 요청의 id (개발 53). 요청 id 단위라 다음 요청은
+    /// 평소대로 창을 깨운다. 어떤 경로로든 창이 다시 뜨면(`show`) 지운다 — 그 뒤 또 닫으면
+    /// 그때 다시 기록된다.
+    dismissed: Mutex<Option<String>>,
+    /// 만료 직전 한 번 되살린 요청의 id — 같은 요청을 두 번 되살리지 않는다.
+    reminded: Mutex<Option<String>>,
+}
+
+/// 사용자가 닫아 둔 요청인가 (개발 53).
+pub(crate) fn user_dismissed<R: Runtime>(app: &AppHandle<R>, req_id: &str) -> bool {
+    app.state::<PopoverState>()
+        .dismissed
+        .lock()
+        .map(|g| g.as_deref() == Some(req_id))
+        .unwrap_or(false)
+}
+
+/// 닫아 둔 승인 창을 지금 어떻게 할지 (순수 — 테스트 가능).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Dismissal {
+    /// 닫아 둔 요청이 아니다 — 평소 규칙(잠든 프론트면 깨운다)대로.
+    No,
+    /// 닫아 둔 채 둔다.
+    Hold,
+    /// 만료 직전 — 한 번 되살린다.
+    Remind,
+}
+
+/// `dismissed`·`reminded` = 상태에 적힌 id, `req_id` = 지금 대기 중인 요청, `secs_left` = 그
+/// 요청의 남은 승인 시간. 이미 0 이면 되살리지 않는다 — MCP 가 곧 거둬 갈 요청을 띄워 봐야
+/// 비번을 넣는 순간 「시간이 지났어요」다(살아 있는 요청으로 잡히는 유예 60초 동안의 일).
+pub(crate) fn dismissal(
+    dismissed: Option<&str>,
+    reminded: Option<&str>,
+    req_id: &str,
+    secs_left: u64,
+) -> Dismissal {
+    if dismissed != Some(req_id) {
+        return Dismissal::No;
+    }
+    if reminded == Some(req_id) || secs_left == 0 || secs_left > REMIND_SECS {
+        return Dismissal::Hold;
+    }
+    Dismissal::Remind
+}
+
+/// 감시 스레드용: 닫아 둔 요청을 지금 되살려야 하면 **되살린 것으로 적고** Remind 를 돌려준다.
+/// 적는 것과 판단을 한 잠금 순서로 묶어 두 번 되살리는 일이 없게 한다(스레드는 하나지만).
+pub(crate) fn dismissal_for<R: Runtime>(
+    app: &AppHandle<R>,
+    req_id: &str,
+    secs_left: u64,
+) -> Dismissal {
+    let st = app.state::<PopoverState>();
+    let (Ok(d), Ok(mut r)) = (st.dismissed.lock(), st.reminded.lock()) else {
+        return Dismissal::No;
+    };
+    let verdict = dismissal(d.as_deref(), r.as_deref(), req_id, secs_left);
+    if verdict == Dismissal::Remind {
+        *r = Some(req_id.to_string());
+    }
+    verdict
 }
 
 /// 승인 대기 중인가 = 지금 대기 중인 결제 요청이 있는가.
@@ -79,21 +154,21 @@ pub(crate) fn sync_always_on_top<R: Runtime>(app: &AppHandle<R>) {
     set_pinned(app, is_held());
 }
 
-/// 승인 대기 중이면 창을 숨기지 말고 앞으로 가져온다. 실제로 숨겼으면 true.
-/// (트레이 토글·창 닫기 같은 명시적 숨김 경로가 승인 창을 치우지 않게 —
-/// 승인 창을 치우면 사용자가 다시 열지 않는 한 요청이 그대로 5분 타임아웃된다.)
-pub(crate) fn hide_unless_held<R: Runtime>(app: &AppHandle<R>) -> bool {
+/// 사용자가 **명시적으로** 창을 닫는다(트레이 토글·Cmd+W). 실제로 숨겼으면 true.
+///
+/// 개발 53 전엔 승인 대기 중이면 숨기지 않고 앞으로만 가져왔다(치우면 5분 타임아웃을 놓치니까).
+/// 지금은 숨기되 **그 요청을 「닫아 둠」으로 적는다** — 감시 스레드가 잠든 프론트를 깨우는
+/// 경로(ipc::watchdog)와 프론트의 raise_main_window 가 이 표식을 보고 다시 띄우지 않는다.
+/// 만료 직전 한 번 되살리는 건 감시 스레드 몫(REMIND_SECS).
+pub(crate) fn hide_by_user<R: Runtime>(app: &AppHandle<R>) -> bool {
     let Some(win) = app.get_webview_window("main") else {
         return false;
     };
-    if is_held() {
-        // 앞으로 가져오는 김에 자리도 다시 잡는다. 재배치 경로가 show 하나뿐이라, 창이 보이는
-        // 동안 모니터를 뽑거나 해상도·독이 바뀌면 엉뚱한 자리에 남는다 — 승인 대기 중엔 숨지도
-        // 않으니 스스로 복구될 기회가 없다. 사용자가 트레이로 "이리 와"라고 부른 이 순간이
-        // 유일한 기회다. 자리·크기가 이미 맞으면 같은 값이라 창은 움직이지 않는다.
-        position_at_tray(app, &win, false);
-        let _ = win.set_focus();
-        return false;
+    // 숨기기 전에 적는다 — 숨긴 뒤 적으면 그 사이 1초 루프가 「깨울 요청」으로 볼 수 있다.
+    if let Some(req) = crate::ipc::live_request() {
+        if let Ok(mut g) = app.state::<PopoverState>().dismissed.lock() {
+            *g = Some(req.id);
+        }
     }
     win.hide().is_ok()
 }
@@ -308,6 +383,12 @@ pub(crate) fn show<R: Runtime>(app: &AppHandle<R>) {
     let _ = win.unminimize();
     let _ = win.show();
     let _ = win.set_focus();
+    // 어떤 경로로든 창이 다시 떴다 = 「닫아 둠」은 끝났다(개발 53). 트레이·독·메뉴 '열기'·
+    // 만료 직전 되살리기 전부. 여기서 지우지 않으면 되살린 창을 사용자가 그대로 두고 승인해도
+    // 표식이 남아, 같은 id 가 아닌 한 해가 없긴 하지만 상태가 사실과 어긋난 채 남는다.
+    if let Ok(mut g) = app.state::<PopoverState>().dismissed.lock() {
+        *g = None;
+    }
 }
 
 /// 트레이 아이콘 좌클릭 — 열려 있으면 닫고, 닫혀 있으면 연다.
@@ -326,10 +407,17 @@ fn toggle<R: Runtime>(app: &AppHandle<R>) {
     }
 
     if win.is_visible().unwrap_or(false) {
-        // 보이지만 뒤에 있으면 닫지 말고 앞으로. 승인 대기 중이면 아예 안 닫는다
-        // (hide_unless_held) — 승인 창을 치우면 요청이 그대로 타임아웃된다.
+        // 승인 대기 중이면 포커스를 따지지 않고 닫는다(개발 53). 이때 창은 항상-위라 「뒤에
+        // 있어서 앞으로」가 성립하지 않고, 트레이 클릭이 먼저 blur 를 일으켜 is_focused 가
+        // 이미 false 일 수 있다(on_blur 는 hold 라 숨기지도, 재열림 가드를 걸지도 않는다) —
+        // 그래서 예전엔 승인 창을 트레이로 눌러도 «앞으로 가져오기»만 되고 안 닫혔다.
+        if is_held() {
+            hide_by_user(app);
+            return;
+        }
+        // 보이지만 뒤에 있으면 닫지 말고 앞으로.
         if win.is_focused().unwrap_or(false) {
-            hide_unless_held(app);
+            hide_by_user(app);
         } else {
             // 숨김 없이 앞으로만 올리는 경로에서도 자리를 다시 잡는다
             // (hide_unless_held 의 hold 분기와 같은 이유 — 보이는 동안은 재배치가 없다).
@@ -446,6 +534,40 @@ mod tests {
 
     fn origin(tray: Option<Rect4>) -> (f64, f64) {
         popover_origin(tray, W, H, SCREEN, WORK, 1.0).expect("작업 영역을 아는 한 위치가 나온다")
+    }
+
+    // ---------- 닫아 둔 승인 창 (개발 53) ----------
+
+    // 닫아 둔 요청이 아니면 평소 규칙 — 다른 id 도, 아무것도 안 닫았을 때도.
+    #[test]
+    fn dismissal_ignores_other_requests() {
+        assert_eq!(dismissal(None, None, "b", 200), Dismissal::No);
+        assert_eq!(dismissal(Some("a"), None, "b", 200), Dismissal::No);
+        // 되살린 기록만 있고 닫힌 기록이 없으면(창이 다시 떠서 지워짐) 평소 규칙.
+        assert_eq!(dismissal(None, Some("b"), "b", 30), Dismissal::No);
+    }
+
+    // 닫아 둔 동안은 깨우지 않는다 — 남은 시간이 넉넉한 동안.
+    #[test]
+    fn dismissed_holds_until_deadline_nears() {
+        assert_eq!(dismissal(Some("a"), None, "a", 299), Dismissal::Hold);
+        assert_eq!(dismissal(Some("a"), None, "a", REMIND_SECS + 1), Dismissal::Hold);
+    }
+
+    // 만료 REMIND_SECS 전부터는 한 번 되살린다. 경계는 리터럴로 — 상수를 상수로 검증하면
+    // 값을 0 으로 바꿔도 통과한다(위 sits_flush_under_menubar 와 같은 이유).
+    #[test]
+    fn dismissed_reminds_once_near_deadline() {
+        assert_eq!(dismissal(Some("a"), None, "a", 60), Dismissal::Remind);
+        assert_eq!(dismissal(Some("a"), None, "a", 1), Dismissal::Remind);
+        // 이미 되살렸으면 다시 닫아도 그대로 둔다.
+        assert_eq!(dismissal(Some("a"), Some("a"), "a", 30), Dismissal::Hold);
+    }
+
+    // 이미 만료된(유예 구간의) 요청은 되살려 봐야 승인이 안 된다 → 그대로 둔다.
+    #[test]
+    fn dismissed_expired_is_not_revived() {
+        assert_eq!(dismissal(Some("a"), None, "a", 0), Dismissal::Hold);
     }
 
     // 가로는 트레이 아이콘 가운데, 세로는 메뉴바 바로 아래에 "딱 붙는다".

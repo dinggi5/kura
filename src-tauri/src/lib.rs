@@ -54,11 +54,17 @@ use session::SessionKey;
 #[tauri::command]
 fn raise_main_window(app: tauri::AppHandle) {
     // 이미 처리된 요청에 대한 늦은 호출이면 아무것도 하지 않는다(항상-위가 켜진 채 남지 않게).
-    if !ipc::has_pending() {
+    let Some(req) = ipc::live_request() else {
         return;
-    }
+    };
     // set_pinned 를 거쳐야 폴링 쪽 캐시와 어긋나지 않는다.
     tray::set_pinned(&app, true);
+    // 사용자가 이 요청의 창을 일부러 닫아 뒀으면 다시 띄우지 않는다(개발 53). 프론트는 요청
+    // id 가 바뀔 때 한 번 부르지만, 감시 스레드가 깨운 창을 프론트가 요청을 그리기 전에 닫으면
+    // 그 한 번이 닫은 **뒤**에 도착한다.
+    if tray::user_dismissed(&app, &req.id) {
+        return;
+    }
     tray::show(&app);
 }
 
@@ -105,9 +111,9 @@ pub fn run() {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 use tauri::Manager;
                 api.prevent_close();
-                // 승인 대기 중이면 숨기지 않는다 — Cmd+W 로 승인 창을 치워버리면
-                // 다시 열지 않는 한 요청이 그대로 타임아웃된다.
-                tray::hide_unless_held(window.app_handle());
+                // 승인 대기 중에도 숨긴다(개발 53) — 단 「닫아 둠」으로 적어, 감시 스레드가
+                // 도로 띄우지 않고 만료 직전 한 번만 되살린다(tray::hide_by_user).
+                tray::hide_by_user(window.app_handle());
             }
             tauri::WindowEvent::Focused(false) => {
                 use tauri::Manager;

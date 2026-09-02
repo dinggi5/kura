@@ -182,6 +182,12 @@ fn is_stale(req: &PaymentRequest) -> bool {
     now.saturating_sub(req.created) > APPROVAL_WINDOW_SECS + STALE_GRACE_SECS
 }
 
+/// 이 요청의 남은 승인 시간(초) — 승인 창 카운트다운(format.ts secsLeft)과 같은 식.
+/// created 가 미래면(시계 오차) 경과 0 으로 본다(is_stale 의 유예를 넘는 미래는 거기서 걸러진다).
+pub(crate) fn secs_left(req: &PaymentRequest, now: u64) -> u64 {
+    APPROVAL_WINDOW_SECS.saturating_sub(now.saturating_sub(req.created))
+}
+
 /// 지금 사람 승인을 기다리는 살아 있는 요청 (없거나 만료면 None).
 /// 팝오버 자동 숨김·항상 위 고정(tray)과 프론트 승인 모달이 **같은 이 값**에서 나와야
 /// "모달은 떠 있는데 게이트는 꺼진" 불일치가 생기지 않는다.
@@ -360,17 +366,39 @@ fn watchdog(app: tauri::AppHandle) {
                 &Heartbeat { ts: now, ui_ok },
             );
         }
+        // 사용자가 **일부러 닫아 둔** 승인 창(개발 53, tray::hide_by_user)은 아래 깨우기에서
+        // 빼고, 만료 REMIND_SECS 전에 한 번만 되살린다. 프론트 생사보다 먼저 본다 — 닫힌 창의
+        // WebView 는 아직 폴링 중일 수도(숨긴 뒤 ~7초), 이미 잠들었을 수도 있는데 어느 쪽이든
+        // 창은 숨어 있고 되살릴 수 있는 건 러스트뿐이다. 파일은 한 번만 읽어 아래 고정 수렴과
+        // 같은 값을 쓴다.
+        let live = live_request();
+        let dismissal = live
+            .as_ref()
+            .map(|r| crate::tray::dismissal_for(&app, &r.id, secs_left(r, now)))
+            .unwrap_or(crate::tray::Dismissal::No);
+        if dismissal == crate::tray::Dismissal::Remind {
+            // show 가 「닫아 둠」을 지우므로 다음 루프부턴 평소 규칙이다. 되살린 직후 아래
+            // 깨우기가 곧바로 한 번 더 show 하지 않게 깨운 시각도 맞춘다.
+            last_wake = now;
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || crate::tray::show(&handle));
+        }
         // 프론트가 살아 있다 → 폴링이 이미 같은 일(고정 수렴·모달·자율 승인)을 하고 있다.
         if front_alive {
             last_pinned = None; // 주도권을 넘긴다 — 다시 잠들면 그때 처음부터 다시 맞춘다.
             continue;
         }
         // 여기서부터는 "프론트가 잔다" — 고정 수렴도 우리가 대신한다.
-        let pinned = has_pending();
+        let pinned = live.is_some();
         if !pinned {
             last_wake = 0;
         }
-        let wake = pinned && now.saturating_sub(last_wake) >= WAKE_RETRY_SECS;
+        // 닫아 둔 요청은 깨우지 않는다(Hold·Remind 둘 다 — Remind 는 위에서 이미 띄웠다).
+        // 그래서 사망 판정 카운터(wakes_without_poll)도 안 오른다: 폴링이 멎은 건 WebView 가
+        // 죽어서가 아니라 사용자가 닫아서다.
+        let wake = pinned
+            && dismissal == crate::tray::Dismissal::No
+            && now.saturating_sub(last_wake) >= WAKE_RETRY_SECS;
         if wake {
             last_wake = now;
             wakes_without_poll = wakes_without_poll.saturating_add(1);
@@ -644,6 +672,19 @@ mod tests {
     }
 
     // 유예분까지 지나면 죽은 요청 — MCP 가 죽어 남긴 파일이 팝오버를 영영 붙잡지 못하게.
+    // 남은 승인 시간 — 승인 창 카운트다운과 같은 5분 기준. 유예 구간(살아 있는 요청이지만
+    // MCP 는 이미 거둬 갔을 수 있는 60초)에선 0 이라 되살리기(tray::dismissal)가 안 걸린다.
+    #[test]
+    fn secs_left_counts_down_from_five_minutes() {
+        let r = req_created(1_000);
+        assert_eq!(secs_left(&r, 1_000), 300);
+        assert_eq!(secs_left(&r, 1_240), 60);
+        assert_eq!(secs_left(&r, 1_300), 0);
+        assert_eq!(secs_left(&r, 1_350), 0);
+        // created 가 미래(시계 오차)면 아직 안 흘렀다고 본다.
+        assert_eq!(secs_left(&r, 900), 300);
+    }
+
     #[test]
     fn long_expired_request_is_stale() {
         let old = now_secs() - (APPROVAL_WINDOW_SECS + STALE_GRACE_SECS + 10);
