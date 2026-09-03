@@ -475,13 +475,21 @@ pub(crate) fn get_wallet_status() -> Result<WalletStatus, String> {
 /// 각인돼 있어(MCP 가 `from` 을 적는다) 바꾼 뒤 승인하면 어차피 거절된다 — 거절될 전환을
 /// 허용해 「승인 창엔 계정 1, 화면엔 계정 2」를 잠깐이라도 만들 이유가 없다. 먼저 처리(또는
 /// 거부)하고 바꾸면 된다. 만료된 요청은 막지 않는다(live_request).
-fn ensure_no_pending_payment() -> Result<(), String> {
-    if crate::ipc::live_request().is_some() {
-        return Err(ts!(
-            "승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 계정을 바꾸세요.",
-            "A payment is waiting for approval. Handle it first, then switch accounts."
-        )
-        .into());
+///
+/// 예외 = **요청이 각인한 바로 그 계정으로 가는 전환**(코덱스 개발54 1차 P2). 이 검사와 파일
+/// 쓰기 사이에 MCP 가 요청을 만들 수 있다(프로세스가 달라 잠글 수 없다) — 그러면 요청은 옛
+/// 계정으로 각인된 채 활성은 새 계정이라 승인마다 거절되고, 전환도 막혀 거부밖에 못 한다.
+/// 각인 계정으로 돌아가는 건 그 어긋남을 **푸는** 전환이라 허용한다(그러면 승인이 된다).
+/// 각인 없는 옛 요청의 계정은 0 이다(ipc::request_account_index).
+fn ensure_no_pending_payment(target: Option<u32>) -> Result<(), String> {
+    if let Some(req) = crate::ipc::live_request() {
+        if target != Some(crate::ipc::request_account_index(&req)) {
+            return Err(ts!(
+                "승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 계정을 바꾸세요.",
+                "A payment is waiting for approval. Handle it first, then switch accounts."
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -492,7 +500,7 @@ fn ensure_no_pending_payment() -> Result<(), String> {
 #[tauri::command]
 pub(crate) fn add_account(password: String) -> Result<WalletStatus, String> {
     let password = Zeroizing::new(password);
-    ensure_no_pending_payment()?;
+    ensure_no_pending_payment(None)?; // 새 계정은 어떤 요청도 각인했을 수 없다
     let mut w = read_encrypted()?;
     let phrase = decrypt_wallet(&w, &password)?;
     let list = w.accounts();
@@ -514,7 +522,7 @@ pub(crate) fn add_account(password: String) -> Result<WalletStatus, String> {
 /// 활성 계정을 바꾼다. 없는 인덱스는 거부.
 #[tauri::command]
 pub(crate) fn switch_account(index: u32) -> Result<WalletStatus, String> {
-    ensure_no_pending_payment()?;
+    ensure_no_pending_payment(Some(index))?;
     let mut w = read_encrypted()?;
     if !w.accounts().iter().any(|a| a.index == index) {
         return Err(ts!(
@@ -1078,7 +1086,7 @@ mod tests {
         assert_eq!(pinned, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
 
         // ⑦ 요청 계정 대조: 계정 1 로 각인된 요청은 활성 0 에서 거부, 1 로 바꾸면 통과.
-        //    옛 요청(from 빈 값)은 어디서나 통과. 주소가 맞아도 인덱스가 다르면 거부.
+        //    옛 요청(from 빈 값)은 계정 0 의 요청 — 활성 0 에서만 통과. 주소가 맞아도 인덱스가 다르면 거부.
         let mut req = crate::ipc::PaymentRequest {
             id: "1".into(),
             token: "USDC".into(),
@@ -1099,10 +1107,13 @@ mod tests {
         req.account = 2; // 주소는 1 인데 인덱스 2 → 거부
         assert!(crate::ipc::ensure_request_account(&req).is_err());
         req.account = 1;
-        req.from = String::new(); // 옛 요청
+        req.from = String::new(); // 옛 요청(각인 없음) = 계정 0 의 요청
         switch_account(0).unwrap();
         assert!(crate::ipc::ensure_request_account(&req).is_ok());
         assert_eq!(crate::ipc::request_account_index(&req), 0);
+        switch_account(2).unwrap(); // 활성이 0 이 아니면 옛 요청은 거절 (코덱스 1차 P1)
+        assert!(crate::ipc::ensure_request_account(&req).is_err());
+        switch_account(0).unwrap();
 
         // ⑧ 내역은 계정별 파일: 고정한 계정 1 의 시도는 history-a1.json 에, 활성 0 의 것은 history.json 에.
         //    (settings.json 이 없고 지갑이 있으니 체인은 Sepolia = 접미 없음.)
@@ -1132,7 +1143,10 @@ mod tests {
         );
         assert!(!dir.join("x402_settlements.json").exists());
 
-        // ⑩ 승인 대기 중엔 전환·추가를 막는다. 요청을 치우면 다시 된다.
+        // ⑩ 승인 대기 중엔 전환·추가를 막는다 — 단 **요청이 각인한 계정으로 돌아가는 전환**은
+        //    허용(코덱스 1차 P2: 전환과 요청 생성이 경합해 옛 계정으로 각인된 요청의 탈출구).
+        //    활성 1 인 채로 계정 0 각인 요청이 놓인 상황을 만든다.
+        switch_account(1).unwrap();
         req.from = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".into();
         req.account = 0;
         fs::write(
@@ -1140,8 +1154,11 @@ mod tests {
             serde_json::to_string(&req).unwrap(),
         )
         .unwrap();
-        assert!(switch_account(1).is_err());
+        assert!(switch_account(2).is_err()); // 딴 계정으로는 못 간다
         assert!(add_account("pw".into()).is_err());
+        assert!(switch_account(0).is_ok()); // 각인 계정으로는 간다 → 이제 승인이 된다
+        assert!(crate::ipc::ensure_request_account(&req).is_ok());
+        assert!(switch_account(1).is_err()); // 되돌아가는 건 다시 막힌다
         fs::remove_file(dir.join("payment_request.json")).unwrap();
         assert!(switch_account(1).is_ok());
 

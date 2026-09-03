@@ -44,9 +44,11 @@ fn legacy_path() -> Result<PathBuf, String> {
 }
 
 /// 활성 계정의 내역 파일 (개발 54: 체인별 + 계정별). src-tauri 의 account_file 과 같은 규칙.
+/// wallet.enc 를 못 읽으면(옛 평문 wallet.json 만 있는 지갑) 계정 0 — 그 지갑은 계정이 하나고
+/// 내역은 예전 이름 그대로다(코덱스 개발54 1차 P2: 여기서 에러를 내면 내역이 통째로 빈다).
 fn history_path() -> Result<PathBuf, String> {
-    let active = active_account()?;
-    Ok(jigap_dir()?.join(account_file_name(&chain_file("history"), active.index)))
+    let index = active_account().map(|a| a.index).unwrap_or(0);
+    Ok(jigap_dir()?.join(account_file_name(&chain_file("history"), index)))
 }
 
 /// 계정별 데이터 파일 이름 (개발 54) — 계정 0 은 체인 이름 그대로(무손실), 그 외는 `-a{n}` 접미.

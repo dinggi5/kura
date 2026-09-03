@@ -47,7 +47,7 @@ pub(crate) struct PaymentRequest {
     pub(crate) chain_id: u64,
     /// 요청이 만들어진 시점의 **활성 계정** (개발 54) — MCP 가 wallet.enc 의 활성 계정을 각인한다.
     /// 승인 시 지금 계정과 다르면 거부하고, 승인 작업 전체를 이 계정으로 고정한다(체인과 같은 처방).
-    /// `from` 이 빈 값 = 미각인(옛 요청 파일·옛 MCP) → 계정 검사 건너뜀, 활성 계정으로.
+    /// `from` 이 빈 값 = 미각인(옛 요청 파일·옛 MCP) → **계정 0 의 요청**으로 본다(활성이 0 일 때만 승인).
     #[serde(default)]
     pub(crate) account: u32,
     #[serde(default)]
@@ -118,9 +118,22 @@ pub(crate) fn ensure_request_chain(req: &PaymentRequest) -> Result<(), String> {
 /// 대기 요청이 각인한 계정과 지금 활성 계정이 같은지 검사한다 (개발 54). 다르면 거부 —
 /// 승인/자율 경로 공용. MCP 는 요청을 쓸 때 wallet.enc 의 활성 계정(인덱스+주소)을 적고, GUI 는
 /// 승인 순간 같은 파일을 다시 읽어 대조한다. 그 사이 사용자가 계정을 바꿨으면 「화면 계정 ≠ 돈
-/// 나가는 계정」이므로 보내지 않는다. `from` 빈 값 = 옛 요청 → 건너뜀(후방호환).
+/// 나가는 계정」이므로 보내지 않는다. `from` 빈 값 = 옛 요청 → 계정 0 의 요청으로(아래).
 pub(crate) fn ensure_request_account(req: &PaymentRequest) -> Result<(), String> {
     if req.from.is_empty() {
+        // 각인이 없는 요청은 **계정 0 의 요청**이다 (코덱스 개발54 1차 P1). 이 앱보다 먼저 떠 있던
+        // 옛 사이드카는 계정을 모르고 `address` 필드(= 계정 0)의 주소·잔액을 AI 에게 말해 왔다 —
+        // 그 정보로 만든 결제를 지금 활성인 다른 계정에서 내보내면 AI 가 본 계정과 돈이 나가는
+        // 계정이 갈린다. 지갑을 못 읽으면(옛 평문 지갑) 예전 동작 그대로 — 어차피 승인은 못 한다.
+        if let Ok(w) = crate::wallet::read_encrypted() {
+            if w.active_account().index != 0 {
+                return Err(ts!(
+                    "이 결제 요청엔 계정 정보가 없어요(옛 AI 연결). 계정 1로 바꾸거나, AI 연결을 다시 한 뒤 요청하세요.",
+                    "This request carries no account (an older AI connection made it). Switch to Account 1, or reconnect the AI and ask again."
+                )
+                .into());
+            }
+        }
         return Ok(());
     }
     let active = crate::wallet::active_account()?;
@@ -134,10 +147,11 @@ pub(crate) fn ensure_request_account(req: &PaymentRequest) -> Result<(), String>
     Ok(())
 }
 
-/// 승인 작업을 고정할 계정 인덱스 — 각인된 요청은 그 계정, 옛 요청은 지금 활성 계정.
+/// 승인 작업을 고정할 계정 인덱스 — 각인된 요청은 그 계정, 각인 없는 옛 요청은 계정 0
+/// (ensure_request_account 가 그때 활성도 0 임을 이미 확인했다).
 pub(crate) fn request_account_index(req: &PaymentRequest) -> u32 {
     if req.from.is_empty() {
-        crate::wallet::active_account_index()
+        0
     } else {
         req.account
     }
@@ -852,17 +866,20 @@ mod tests {
         assert_eq!(r.account, 0);
     }
 
-    /// 계정 각인이 없는(옛) 요청은 지금 활성 계정으로 고정된다 — 고정값이 이미 있으면 그 값.
+    /// 각인된 요청은 그 계정, 각인 없는(옛) 요청은 계정 0.
     #[tokio::test]
-    async fn request_account_index_prefers_stamp_then_pinned() {
+    async fn request_account_index_stamp_or_zero() {
         let mut r = req_created(1);
         r.account = 3;
         r.from = "0xabc".into();
         assert_eq!(request_account_index(&r), 3);
+        // 각인 없는(옛) 요청은 계정 0 — 이미 고정된 값이 있어도 바뀌지 않는다
+        // (코덱스 개발54 1차 P1: 옛 사이드카는 계정 0 만 안다).
         let legacy = req_created(1);
+        assert_eq!(request_account_index(&legacy), 0);
         let got =
             crate::wallet::with_pinned_account(7, async { request_account_index(&legacy) }).await;
-        assert_eq!(got, 7); // 옛 요청 = 활성 계정(여기선 고정값)
+        assert_eq!(got, 0);
     }
 
     // 결제 결과 JSON 왕복 — GUI가 쓰고 MCP가 읽는 형식.
