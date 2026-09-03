@@ -50,7 +50,10 @@ while IFS= read -r f; do
   [[ -z "$SRC_NEWEST" || "$f" -nt "$SRC_NEWEST" ]] && SRC_NEWEST="$f"
 # 스크립트 자신도 소스다(코덱스 개발35 3차와 같은 급): 빌드 방식(BINS·플래그)이 바뀌어도
 # 크레이트 소스 mtime 은 그대로라 옛 산출물이 "최신"으로 통과한다.
-done < <(find kura-mcp/src kura-mcp/Cargo.toml kura-mcp/Cargo.lock scripts/build-sidecars.sh -type f)
+# shared/ 도 소스다(개발 56): kura-mcp 는 `#[path]` 로 shared/policy.rs 를 제 모듈로 컴파일한다.
+# 여기를 빼면 policy.rs 만 고친 커밋에서 옛 사이드카가 "최신"으로 통과해 — 이 파일이 없애려던
+# 바로 그 「GUI 와 사이드카가 같은 파일을 다르게 읽는」 상태가 릴리스에 실린다(대체 리뷰 P1).
+done < <(find kura-mcp/src shared kura-mcp/Cargo.toml kura-mcp/Cargo.lock scripts/build-sidecars.sh -type f)
 [[ -n "$SRC_NEWEST" ]] || die "kura-mcp 소스를 찾지 못했다 (리포 루트에서 도는 게 맞는지 확인)"
 
 needs_build() {
