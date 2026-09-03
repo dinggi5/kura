@@ -108,32 +108,50 @@ pub fn chain_id_for(file: &SettingsFile, wallet_exists: impl FnOnce() -> bool) -
 /// 필드 하나가 깨진 파일에서 GUI 는 Settings 파싱에 실패해 공식 RPC 로 접고 MCP 는 이 필드만 읽어
 /// 커스텀 RPC 를 쓰던 것(개발 51 하네스 실측·개발 56 대체 리뷰 P3)이 두 판정의 뿌리였다.
 ///
-/// 🔴 **단, 파일의 `chain_id` 를 못 알아보면 지정 RPC 도 버린다**(코덱스 개발 57 P1). 지정 RPC 는 파일이
-/// 말하는 체인의 엔드포인트다. chain_id 가 깨졌거나(타입 틀림·null) 미지원 값이면 크레이트는 체인을
-/// Base Sepolia 로 접는데, 그 RPC 가 메인넷 것이면 화면·한도는 「연습용」인 채 서명 provider 는
+/// 🔴 **단, 파일의 `chain_id` 를 못 알아보면 지정 RPC 도 버린다**(코덱스 개발 57 1차 P1). 지정 RPC 는 파일이
+/// 말하는 체인의 엔드포인트다. chain_id 가 깨졌거나(타입 틀림·null·키 중복) 미지원 값이면 크레이트는
+/// 체인을 Base Sepolia 로 접는데, 그 RPC 가 메인넷 것이면 화면·한도는 「연습용」인 채 서명 provider 는
 /// 메인넷에 붙는다 — 서명자는 체인 ID 를 못박지 않고 RPC 가 답하는 값을 쓰므로 진짜 송금이 나간다.
 /// `pick_rpc` 의 `forced_other_chain` 과 같은 이유(딴 체인의 RPC 는 쓰지 않는다). 필드가 **없는** 옛 파일
 /// (개발 20 이전, Sepolia 뿐이던 시절)은 그 RPC 도 Sepolia 것이라 유지 — `chain_id_in` 도 같은 답(Sepolia).
 ///
+/// 🔴 chain_id 는 **`chain_id_in` 과 같은 방식(serde 파생)** 으로 읽는다(코덱스 2차 P1). `serde_json::Value`
+/// 로 읽으면 같은 키가 두 번 있을 때 마지막 값을 조용히 쓰는데 파생은 중복을 거부한다 —
+/// `{"chain_id":84532,"chain_id":8453,"rpc_url":메인넷}` 에서 체인은 Sepolia 로 접히고 RPC 만 메인넷이
+/// 살아남는 갈림이 생긴다. 파생끼리면 「체인을 못 읽는 파일 = RPC 도 못 읽는 파일」이 구조로 보장된다
+/// (`rpc_kept_implies_chain_recognized` 테스트).
+///
 /// 값 자체는 검사하지 않는다 — http(s) 여부는 저장 경로(set_settings)의 몫이고, 이미 파일에 있는 값은
 /// 어느 프로세스든 **같은 값**을 써야 한다.
 pub fn rpc_url_in(text: &str) -> String {
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(text) else {
+    let Ok(sel) = serde_json::from_str::<RpcSel>(text) else {
         return String::new();
     };
-    let chain_known = match map.get("chain_id") {
+    let chain_known = match sel.chain_id {
         None => true, // 옛 파일 — Sepolia 시절
-        Some(v) => v
-            .as_u64()
-            .is_some_and(|id| SUPPORTED_CHAIN_IDS.contains(&id)),
+        Some(id) => SUPPORTED_CHAIN_IDS.contains(&id),
     };
-    if !chain_known {
-        return String::new();
+    if chain_known {
+        sel.rpc_url.trim().to_string()
+    } else {
+        String::new()
     }
-    map.get("rpc_url")
-        .and_then(serde_json::Value::as_str)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+}
+
+/// `rpc_url_in` 의 뷰 — 다른 필드는 무시하되 **이 두 필드의 형식은 ChainSel 만큼 엄격**하다(중복 키·
+/// 타입 틀림·null 이면 파일 전체를 못 읽은 것으로). `chain_id` 가 없는 건 허용(옛 파일)하지만 null 은
+/// 아니다 — `Option` 기본 역직렬화는 null 을 None 으로 받으므로 `present_u64` 로 막는다.
+#[derive(Deserialize)]
+struct RpcSel {
+    #[serde(default, deserialize_with = "present_u64")]
+    chain_id: Option<u64>,
+    #[serde(default)]
+    rpc_url: String,
+}
+
+/// 필드가 **있으면** u64 여야 한다(null·문자열·실수는 오류). 없을 때만 serde default(None).
+fn present_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    u64::deserialize(d).map(Some)
 }
 
 /// **사용자가 지정한 RPC — 유일한 판정.** 파일이 없거나 못 읽으면 빈 값(공식 RPC). 체인 판정과
@@ -325,6 +343,21 @@ mod tests {
         assert_eq!(rpc_url_in(&format!(r#"{{"chain_id":null,{custom}}}"#)), "");
         assert_eq!(rpc_url_in(&format!(r#"{{"chain_id":1,{custom}}}"#)), ""); // 미지원
         assert_eq!(rpc_url_in(&format!(r#"{{"chain_id":-1,{custom}}}"#)), "");
+        // 키 중복(코덱스 2차 P1)·실수 — Value 로 읽으면 마지막 값이 조용히 이기지만 파생은 거부한다.
+        assert_eq!(
+            rpc_url_in(&format!(r#"{{"chain_id":84532,"chain_id":8453,{custom}}}"#)),
+            ""
+        );
+        assert_eq!(
+            rpc_url_in(&format!(
+                r#"{{"chain_id":8453,{custom},"rpc_url":"https://other.invalid"}}"#
+            )),
+            ""
+        );
+        assert_eq!(
+            rpc_url_in(&format!(r#"{{"chain_id":8453.0,{custom}}}"#)),
+            ""
+        );
         // 지원 체인이면 유지, 필드가 없는 옛 파일도 유지(Sepolia 시절 — chain_id_in 과 같은 답).
         for id in SUPPORTED_CHAIN_IDS {
             assert_eq!(
@@ -345,6 +378,45 @@ mod tests {
             )),
             "https://x.invalid"
         );
+    }
+
+    // 🔴 구조 계약(코덱스 개발 57 1·2차 P1): **지정 RPC 를 살린 파일이면 `chain_id_in` 이 알아본 체인**
+    // (지원 목록 안)이어야 한다. 한쪽만 못 읽는 파일이 하나라도 있으면 「연습용」 화면 뒤에서 메인넷
+    // RPC 에 서명이 나갈 수 있다. 새 케이스는 여기에 보태라 — 두 함수가 서로 다른 파서를 쓰기 시작하면
+    // 여기서 잡힌다.
+    #[test]
+    fn rpc_kept_implies_chain_recognized() {
+        let rpc = r#""rpc_url":"https://base-mainnet.example/v2/KEY""#;
+        let cases = [
+            format!("{{{rpc}}}"),
+            format!(r#"{{"chain_id":8453,{rpc}}}"#),
+            format!(r#"{{"chain_id":84532,{rpc}}}"#),
+            format!(r#"{{"chain_id":5042002,{rpc}}}"#),
+            format!(r#"{{"chain_id":1,{rpc}}}"#),
+            format!(r#"{{"chain_id":"8453",{rpc}}}"#),
+            format!(r#"{{"chain_id":null,{rpc}}}"#),
+            format!(r#"{{"chain_id":8453.0,{rpc}}}"#),
+            format!(r#"{{"chain_id":-8453,{rpc}}}"#),
+            format!(r#"{{"chain_id":84532,"chain_id":8453,{rpc}}}"#),
+            format!(r#"{{"chain_id":8453,"chain_id":84532,{rpc}}}"#),
+            format!(r#"{{"chain_id":8453,{rpc},{rpc}}}"#),
+            format!(r#"{{"single_usdc":5,"chain_id":8453,{rpc}}}"#),
+            format!(r#"[{{"chain_id":8453,{rpc}}}]"#),
+            "{ 깨진 JSON".to_string(),
+        ];
+        for text in &cases {
+            let kept = !rpc_url_in(text).is_empty();
+            let chain = chain_id_in(text);
+            if kept {
+                assert!(
+                    SUPPORTED_CHAIN_IDS.contains(&chain),
+                    "RPC 는 살았는데 체인은 못 알아봄: {text}"
+                );
+            }
+        }
+        // 살아남는 쪽도 실제로 있다(전부 버리는 구현이 이 검사를 공짜로 통과하지 않게).
+        assert!(!rpc_url_in(&cases[1]).is_empty());
+        assert!(!rpc_url_in(&cases[0]).is_empty());
     }
 
     // RPC 선택 (개발 49). 환경변수로 체인을 갈아탄 경우엔 settings 의 커스텀 RPC 를 버린다 —

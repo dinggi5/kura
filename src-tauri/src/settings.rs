@@ -621,6 +621,7 @@ mod tests {
             r#"{"daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05","chain_id":8453,"rpc_url":"http://127.0.0.1:8545"}"#, // 개발 51 하네스
             r#"{"single_usdc":"7","daily_usdc":"30","single_eth":"0.1","daily_eth":"0.5"}"#, // rpc_url 없음(옛 파일)
             r#"{"single_usdc":"7","daily_usdc":"30","single_eth":"0.1","daily_eth":"0.5","rpc_url":" https://y.invalid "}"#, // 정상 + 공백
+            r#"{"chain_id":84532,"chain_id":8453,"rpc_url":"https://x.invalid"}"#, // 키 중복(코덱스 2차 P1)
         ];
         for text in cases {
             let file = SettingsFile::Text(text.to_string());
