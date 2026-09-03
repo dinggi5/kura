@@ -6,12 +6,13 @@
 // 않는다 — Tauri 빌드 위험 0」 정책은 그대로), 그러나 정본은 하나다. 개발 52·54 에 생긴 「같은 파일을
 // 두 곳(세 곳)에서 다르게 읽는」 뿌리를 여기서 뽑는다:
 //   - settings.json → 어느 체인인가 (chain.rs 의 단독 읽기 vs settings.rs 의 Settings 파싱, + MCP 사본)
+//   - settings.json → 사용자 지정 RPC (app 은 Settings 전체 파싱, MCP 는 rpc_url 단독 읽기 — 개발 57)
 //   - wallet.enc   → 계정 목록·활성 계정 정규화 (app EncryptedWallet vs MCP EncMeta)
 //   - 체인별·계정별 데이터 파일 이름 (chain_file · account_file_name, 양쪽 사본)
 //   - 「지갑이 이미 있는가」 (설정·체인·언어 기본값이 전부 이 질문으로 신규/기존을 가른다)
 //
-// 여기 두는 것의 조건: **IO 판정과 순수 규칙만.** i18n 매크로(`ts!`/`tf!`)·체인 상수 묶음(ChainConfig)·
-// RPC·에러 문구는 각 크레이트가 계속 따로 가진다 — 이 파일은 두 크레이트 어느 쪽의 모듈도 참조하지
+// 여기 두는 것의 조건: **IO 판정과 순수 규칙만.** i18n 매크로(`ts!`/`tf!`)·체인 상수 묶음(ChainConfig —
+// 공식 RPC 주소 포함)·에러 문구는 각 크레이트가 계속 따로 가진다 — 이 파일은 두 크레이트 어느 쪽의 모듈도 참조하지
 // 않아야 양쪽에서 그대로 컴파일된다(의존은 std + serde + serde_json 만).
 
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,50 @@ pub fn chain_id_for(file: &SettingsFile, wallet_exists: impl FnOnce() -> bool) -
         SettingsFile::Missing => BASE_MAINNET_ID,
         SettingsFile::Unreadable => BASE_SEPOLIA_ID,
         SettingsFile::Text(text) => chain_id_in(text),
+    }
+}
+
+// ── settings.json → RPC ────────────────────────────────────────────────────────────────────
+
+/// settings.json 에서 사용자 지정 RPC 만 읽는 가벼운 뷰 — ChainSel 과 같은 이유로 **다른 필드는
+/// 무시**한다. 한도 필드 하나가 깨진 파일에서 GUI 는 Settings 파싱에 실패해 공식 RPC 로 접고 MCP 는
+/// 이 필드만 읽어 커스텀 RPC 를 쓰던 것(개발 51 하네스 실측·개발 56 대체 리뷰 P3)이 두 판정의 뿌리였다.
+#[derive(Deserialize, Default)]
+struct RpcSel {
+    #[serde(default)]
+    rpc_url: String,
+}
+
+/// settings.json 본문 → 사용자 지정 RPC(앞뒤 공백 제거). 없거나 비었거나 깨졌으면 빈 값 =
+/// 「활성 체인의 공식 RPC 를 따라간다」. 값은 검사하지 않는다 — http(s) 여부는 저장 경로(set_settings)
+/// 의 몫이고, 이미 파일에 있는 값은 어느 프로세스든 **같은 값**을 써야 한다.
+pub fn rpc_url_in(text: &str) -> String {
+    serde_json::from_str::<RpcSel>(text)
+        .map(|s| s.rpc_url.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// **사용자가 지정한 RPC — 유일한 판정.** 파일이 없거나 못 읽으면 빈 값(공식 RPC). 체인 판정과
+/// 달리 지갑 유무는 묻지 않는다 — 어느 갈래든 「지정한 게 없다」 는 같은 답이다.
+pub fn rpc_url_for(file: &SettingsFile) -> String {
+    match file {
+        SettingsFile::Missing | SettingsFile::Unreadable => String::new(),
+        SettingsFile::Text(text) => rpc_url_in(text),
+    }
+}
+
+/// 지정 RPC 와 활성 체인의 공식 RPC 중 무엇을 쓸지.
+///
+/// `forced_other_chain` = 환경변수(`KURA_CHAIN_ID`, MCP·CLI 만)가 settings 와 **다른** 체인을
+/// 강제한 상태. 그때 settings 의 rpc_url 은 **딴 체인의 엔드포인트**다 — 그대로 쓰면 이 체인의
+/// 컨트랙트를 저쪽 체인에 물어 잔액이 `returned no data ("0x")` 로 죽는다(개발 48 실측 → 개발 49).
+/// 커스텀 RPC 를 조용히 버리는 셈이지만, 대안이 「조용히 안 되는 것」이라 이쪽이 낫다. GUI 에는
+/// 환경변수로 체인을 갈아타는 경로가 없으므로 항상 false 를 준다.
+pub fn pick_rpc(custom: &str, forced_other_chain: bool, default_rpc: &str) -> String {
+    if custom.is_empty() || forced_other_chain {
+        default_rpc.to_string()
+    } else {
+        custom.to_string()
     }
 }
 
@@ -223,6 +268,58 @@ mod tests {
             chain_id_for(&text("{ 깨진 JSON"), || unreachable!()),
             BASE_SEPOLIA_ID
         );
+    }
+
+    // settings.json 본문 → rpc_url. 한도 필드가 깨져 Settings 로는 못 읽는 파일에서도 지정 RPC 는
+    // 그대로 — GUI(Settings 파싱)와 MCP(단독 읽기)가 같은 답을 내야 한다(개발 56 대체 리뷰 P3 → 개발 57).
+    #[test]
+    fn rpc_url_in_reads_only_rpc_url() {
+        assert_eq!(
+            rpc_url_in(r#"{"rpc_url":"https://example.invalid/v2/KEY"}"#),
+            "https://example.invalid/v2/KEY"
+        );
+        // 앞뒤 공백은 잘린다(양쪽 effective_rpc 가 trim 하던 값).
+        assert_eq!(
+            rpc_url_in(r#"{"rpc_url":"  https://x.invalid  "}"#),
+            "https://x.invalid"
+        );
+        assert_eq!(rpc_url_in(r#"{"chain_id":8453}"#), ""); // 필드 없음(옛 파일) = 공식
+        assert_eq!(rpc_url_in(r#"{"rpc_url":""}"#), "");
+        assert_eq!(rpc_url_in("{ 깨진 JSON"), "");
+        assert_eq!(rpc_url_in(""), "");
+        // 타입 틀림 → 못 읽음 → 공식.
+        assert_eq!(rpc_url_in(r#"{"rpc_url":7}"#), "");
+        // 개발 51 하네스의 그 파일 — single_usdc 가 빠져 Settings 파싱은 실패하지만 RPC 는 살아 있다.
+        assert_eq!(
+            rpc_url_in(
+                r#"{"daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05","chain_id":8453,"rpc_url":"http://127.0.0.1:8545"}"#
+            ),
+            "http://127.0.0.1:8545"
+        );
+        // 파일 갈래: 없음·못 읽음은 빈 값, 본문은 rpc_url_in.
+        assert_eq!(rpc_url_for(&SettingsFile::Missing), "");
+        assert_eq!(rpc_url_for(&SettingsFile::Unreadable), "");
+        assert_eq!(
+            rpc_url_for(&SettingsFile::Text(
+                r#"{"rpc_url":"https://x.invalid"}"#.to_string()
+            )),
+            "https://x.invalid"
+        );
+    }
+
+    // RPC 선택 (개발 49). 환경변수로 체인을 갈아탄 경우엔 settings 의 커스텀 RPC 를 버린다 —
+    // 그 URL 은 **딴 체인의 엔드포인트**라 그대로 쓰면 잔액 조회가 조용히 죽는다(개발 48 실측).
+    #[test]
+    fn pick_rpc_drops_custom_when_env_forces_other_chain() {
+        let custom = "https://base-mainnet.example/v2/KEY";
+        let default = "https://sepolia.base.org";
+        // 평소: 커스텀이 있으면 커스텀.
+        assert_eq!(pick_rpc(custom, false, default), custom);
+        // 커스텀이 비면 언제나 기본값.
+        assert_eq!(pick_rpc("", false, default), default);
+        assert_eq!(pick_rpc("", true, default), default);
+        // 환경변수가 다른 체인을 강제 → 커스텀을 버리고 그 체인의 기본 RPC 로.
+        assert_eq!(pick_rpc(custom, true, default), default);
     }
 
     // 파일 → 세 갈래. Unreadable 은 「디렉터리를 파일처럼 읽기」로 만든다(권한 조작 없이 재현).

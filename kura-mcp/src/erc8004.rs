@@ -112,7 +112,8 @@ pub struct AgentTrust {
 }
 
 /// settings.json 에서 ERC-8004 조회 스위치만 읽는 가벼운 뷰(다른 필드 무시).
-/// GUI 와 같은 파일을 공유한다 — wallet.rs 의 RpcSettings 와 같은 패턴.
+/// GUI 와 같은 파일을 공유한다 — policy 의 ChainSel/RpcSel 과 같은 「한 필드 뷰」 패턴(단, 이건 아직
+/// 여기 사본이다 — GUI 는 Settings 파싱값을 쓴다. 돈이 안 움직이는 스위치라 policy 로 안 옮겼다).
 #[derive(Deserialize)]
 struct LookupSel {
     #[serde(default = "yes")]

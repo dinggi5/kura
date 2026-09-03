@@ -60,6 +60,8 @@ pub(crate) struct Settings {
     pub(crate) auto_lock_mins: String,
     /// 잔액 조회·송금에 쓸 RPC 엔드포인트. 사용자가 프라이버시·속도 이유로 바꿀 수 있다(Session 14).
     /// **빈 값 = "활성 체인의 공식 RPC를 따라간다"** (effective_rpc 가 active_chain().default_rpc 로 해석).
+    /// 읽기는 chain_id 처럼 `policy::rpc_url_for` 가 정본이다(개발 57) — read_settings 가 어느 갈래든
+    /// 이 필드를 그 답으로 덮는다(MCP 와 같은 함수).
     /// 기본을 구체 URL 로 박아 저장하면 active_chain() 을 메인넷으로 바꿔도 옛 RPC 에 고정되는
     /// 함정이 생긴다 → 기본은 빈 값으로 둬서 체인 전환을 자동으로 따라가게 한다. (개발 18 코덱스 리뷰)
     #[serde(default)]
@@ -238,6 +240,10 @@ fn settings_for_read(file: &SettingsFile, wallet_exists: bool) -> Settings {
         }
     };
     s.chain_id = policy::chain_id_for(file, || wallet_exists);
+    // RPC 도 같다(개발 57) — `effective_rpc`(잔액·송금이 붙는 쪽)와 MCP 가 같은 `policy::rpc_url_for`
+    // 로 같은 파일을 읽는다. 한도 필드 하나가 깨진 파일에서 화면은 「공식」이라 그리는데 잔액은
+    // 커스텀 RPC 에 붙거나(또는 그 반대) MCP 만 커스텀을 쓰는 상태를 없앤다(개발 51 하네스 실측).
+    s.rpc_url = policy::rpc_url_for(file);
     s
 }
 
@@ -278,14 +284,15 @@ pub(crate) fn save_settings(settings: &Settings) -> Result<(), String> {
     write_json(settings_path()?, settings)
 }
 
-/// 설정의 RPC를 돌려준다. 비어 있으면 공식 RPC로 폴백.
+/// 잔액·송금·서명이 실제로 붙는 RPC. 판정은 `policy::rpc_url_for` + `policy::pick_rpc` — MCP
+/// `effective_rpc` 와 **같은 함수**로 같은 settings.json 을 읽는다(개발 57). 지정한 게 없으면 활성
+/// 체인의 공식 RPC. GUI 에는 환경변수로 체인을 갈아타는 경로가 없어 `forced_other_chain` 은 늘 false.
 pub(crate) fn effective_rpc() -> String {
-    let url = read_settings().rpc_url.trim().to_string();
-    if url.is_empty() {
-        active_chain().default_rpc.to_string()
-    } else {
-        url
-    }
+    policy::pick_rpc(
+        &policy::rpc_url_for(&settings_file()),
+        false,
+        active_chain().default_rpc,
+    )
 }
 
 /// 사용자/AI 에 노출되는 에러·로그 문자열에서 URL 을 통째로 `[RPC]` 로 가린다.
@@ -597,6 +604,47 @@ mod tests {
                 policy::chain_id_for(&SettingsFile::Missing, || wallet)
             );
         }
+    }
+
+    // 🔴 화면이 그리는 RPC(read_settings → rpc_url)와 잔액·송금이 붙는 RPC(effective_rpc →
+    // policy::rpc_url_for)가 **같은 파일에 같은 답**을 내야 한다(개발 57). 개발 51 하네스·개발 56 대체
+    // 리뷰 P3: 한도 필드가 깨진 파일에서 GUI 는 공식 RPC 로 접고 MCP 는 커스텀 RPC 를 봤다. 이제 셋이
+    // 같은 함수라 못 갈리지만, 누가 Settings 파싱값을 다시 정본으로 삼으면 여기서 잡힌다.
+    #[test]
+    fn read_rpc_matches_backend_selection() {
+        let cases = [
+            "{ 이건 JSON 이 아니다",
+            "",
+            r#"{"rpc_url":"https://x.invalid"}"#, // 한도 필드 전부 없음 → Settings 파싱 실패
+            r#"{"single_usdc":5,"rpc_url":"https://x.invalid"}"#, // 타입 틀림
+            r#"{"daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05","chain_id":8453,"rpc_url":"http://127.0.0.1:8545"}"#, // 개발 51 하네스
+            r#"{"single_usdc":"7","daily_usdc":"30","single_eth":"0.1","daily_eth":"0.5"}"#, // rpc_url 없음(옛 파일)
+            r#"{"single_usdc":"7","daily_usdc":"30","single_eth":"0.1","daily_eth":"0.5","rpc_url":" https://y.invalid "}"#, // 정상 + 공백
+        ];
+        for text in cases {
+            let file = SettingsFile::Text(text.to_string());
+            let backend = policy::rpc_url_for(&file);
+            let front = settings_for_read(&file, true).rpc_url;
+            assert_eq!(front, backend, "갈렸다: {text}");
+        }
+        // 개발 51 의 그 파일 — Settings 로는 못 읽지만 지정 RPC 와 체인은 살아 있어야 한다.
+        let f = settings_for_read(
+            &SettingsFile::Text(
+                r#"{"daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05","chain_id":8453,"rpc_url":"http://127.0.0.1:8545"}"#.into(),
+            ),
+            true,
+        );
+        assert_eq!(f.rpc_url, "http://127.0.0.1:8545");
+        assert_eq!(f.chain_id, BASE_MAINNET.chain_id);
+        // 나머지는 보수적 기본.
+        assert_eq!(f.single_usdc, "5");
+        // 파일 없음·못 읽음은 지정 RPC 없음(공식).
+        assert!(settings_for_read(&SettingsFile::Missing, true)
+            .rpc_url
+            .is_empty());
+        assert!(settings_for_read(&SettingsFile::Unreadable, true)
+            .rpc_url
+            .is_empty());
     }
 
     // 옛 settings.json(자율 결제 필드 없음)도 손실 없이 로드되고 새 필드는 기본값이 된다.

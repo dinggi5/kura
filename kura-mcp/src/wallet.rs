@@ -4,8 +4,9 @@
 // 잔액은 공개 RPC로 조회한다. → 비번 없이도 안전하게 노출 가능한 정보들.
 //
 // ⚠️ 체인 기본값(RPC·USDC 주소·decimals)은 chain.rs 의 active_chain() 에서 온다. 실제 RPC는
-//    effective_rpc() 가 settings.json(GUI와 공유)을 읽어 결정하므로 사용자가 RPC를 바꾸면
-//    두 프로세스가 자동으로 같은 RPC를 쓴다. default_rpc 는 설정이 비었을 때의 폴백.
+//    effective_rpc() 가 settings.json(GUI와 공유)을 **GUI 와 같은 함수**(shared/policy.rs, 개발 57)로
+//    읽어 결정하므로 사용자가 RPC를 바꾸면 두 프로세스가 자동으로 같은 RPC를 쓴다. default_rpc 는
+//    설정이 비었을 때의 폴백.
 
 use crate::{tf, ts};
 use alloy::primitives::{
@@ -19,6 +20,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::chain::{active_chain, chain_file};
+use crate::policy::{self, SettingsFile};
 
 sol! {
     #[sol(rpc)]
@@ -75,39 +77,17 @@ fn settings_path() -> Result<PathBuf, String> {
     Ok(jigap_dir()?.join("settings.json"))
 }
 
-/// settings.json 에서 RPC 만 읽는다(다른 필드는 무시). src-tauri 와 같은 파일을 공유한다.
-#[derive(Deserialize, Default)]
-struct RpcSettings {
-    #[serde(default)]
-    rpc_url: String,
-}
-
-/// settings 의 rpc_url 과 활성 체인의 기본 RPC 중 무엇을 쓸지 — 순수 판정(테스트용).
-///
-/// `forced_other_chain` = `KURA_CHAIN_ID` 가 settings 와 **다른** 체인을 강제한 상태.
-/// 그때 settings 의 rpc_url 은 **딴 체인의 엔드포인트**다 — 그대로 쓰면 이 체인의 컨트랙트를
-/// 저쪽 체인에 물어 잔액이 `returned no data ("0x")` 로 죽는다(개발 48 실측 → 개발 49 수정).
-/// 커스텀 RPC 를 조용히 버리는 셈이지만, 대안이 "조용히 안 되는 것"이라 이쪽이 낫다.
-fn pick_rpc(custom: &str, forced_other_chain: bool, default_rpc: &str) -> String {
-    if custom.is_empty() || forced_other_chain {
-        default_rpc.to_string()
-    } else {
-        custom.to_string()
-    }
-}
-
-/// 사용자가 설정한 RPC를 돌려준다. 없거나 비어 있으면 활성 체인의 공식 RPC(default_rpc)로 폴백.
-/// GUI(src-tauri)와 동일한 settings.json 을 읽으므로 두 프로세스의 RPC가 자동으로 일치한다.
-/// 단, 환경변수로 체인을 갈아탄 경우엔 그 rpc_url 이 딴 체인 것이므로 쓰지 않는다(pick_rpc).
+/// 잔액·내역 조회·x402 제출이 붙는 RPC. 판정은 `policy::rpc_url_for` + `policy::pick_rpc` — GUI
+/// `effective_rpc` 와 **같은 함수**로 같은 settings.json 을 읽으므로 두 프로세스의 RPC 가 어긋날 길이
+/// 없다(개발 57. 그 전엔 GUI 가 Settings 전체를 파싱해 한도 필드 하나 깨진 파일에서 공식 RPC 로 접는
+/// 동안 여기는 rpc_url 만 읽어 커스텀 RPC 를 썼다 — 개발 51 하네스 실측). 지정한 게 없으면 활성 체인의
+/// 공식 RPC. 단, 환경변수로 체인을 갈아탄 경우엔 그 rpc_url 이 딴 체인 것이므로 쓰지 않는다(pick_rpc 주석).
 pub fn effective_rpc() -> String {
-    let url = settings_path()
-        .ok()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<RpcSettings>(&s).ok())
-        .map(|s| s.rpc_url.trim().to_string())
-        .unwrap_or_default();
-    pick_rpc(
-        &url,
+    let file = settings_path()
+        .map(|p| SettingsFile::read(&p))
+        .unwrap_or(SettingsFile::Unreadable);
+    policy::pick_rpc(
+        &policy::rpc_url_for(&file),
         crate::chain::env_forces_other_chain(),
         active_chain().default_rpc,
     )
@@ -376,20 +356,7 @@ pub fn read_history() -> Vec<HistoryEntry> {
 mod tests {
     use super::*;
 
-    /// RPC 선택 (개발 49). 환경변수로 체인을 갈아탄 경우엔 settings 의 커스텀 RPC 를 버린다 —
-    /// 그 URL 은 **딴 체인의 엔드포인트**라 그대로 쓰면 잔액 조회가 조용히 죽는다(개발 48 실측).
-    #[test]
-    fn pick_rpc_drops_custom_when_env_forces_other_chain() {
-        let custom = "https://base-mainnet.example/v2/KEY";
-        let default = "https://sepolia.base.org";
-        // 평소: 커스텀이 있으면 커스텀.
-        assert_eq!(pick_rpc(custom, false, default), custom);
-        // 커스텀이 비면 언제나 기본값.
-        assert_eq!(pick_rpc("", false, default), default);
-        assert_eq!(pick_rpc("", true, default), default);
-        // 환경변수가 다른 체인을 강제 → 커스텀을 버리고 그 체인의 기본 RPC 로.
-        assert_eq!(pick_rpc(custom, true, default), default);
-    }
+    // RPC 선택(pick_rpc)·rpc_url 읽기 테스트는 policy::tests 가 본다(정본이 그쪽으로 갔다, 개발 57).
 
     /// 핵심 계약: wallet.enc 를 읽을 때 주소만 가져오고 ciphertext(니모닉)는 무시한다.
     /// EncMeta 에 ciphertext 필드 자체가 없으므로 역직렬화 결과에 비밀이 들어올 수 없다.

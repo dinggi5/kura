@@ -13,7 +13,7 @@ default-run = "kura-mcp"
 # 독립 크레이트: src-tauri(Tauri 앱)와 분리. 파일 읽기 + RPC만 하므로 Tauri 의존성 불필요.
 # RPC_URL / USDC_ADDRESS 등 체인 상수는 src-tauri/src/chain.rs 와 의도적으로 중복(공유 크레이트
 # 안 만드는 정책 — Tauri 빌드 위험 0). 단, ~/.jigap 파일을 **읽는 규칙**(체인 선택·계정 정규화·
-# 데이터 파일 이름)은 두 크레이트가 갈리면 돈이 딴 체인·딴 계정으로 가므로 shared/policy.rs 한 파일을
+# 데이터 파일 이름·지정 RPC)은 두 크레이트가 갈리면 돈이 딴 체인·딴 계정으로 가므로 shared/policy.rs 한 파일을
 # `#[path]` 모듈로 양쪽에서 컴파일한다(개발 56) — 크레이트가 아니라 여기 의존성엔 아무것도 안 붙는다.
 
 [dependencies]
