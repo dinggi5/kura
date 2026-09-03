@@ -180,10 +180,12 @@ export function WalletScreen({
 
   // 계정을 바꾸면 옛 계정의 잔액을 새 이름 아래 1초라도 보여주지 않는다 (개발 54) —
   // 새 조회가 올 때까지 「—」. 첫 마운트엔 어차피 null 이라 무해하다. 받기/보내기 카드도
-  // 옛 계정 기준이었으니 잔액 카드로 돌아온다.
+  // 옛 계정 기준이었으니 잔액 카드로 돌아온다. 내역도 같다(코덱스 개발54 2차 P2): 계정별
+  // 파일이라 옛 계정 것을 비우고 재로드를 기다린다 — 안 비우면 IPC 가 실패할 때 영영 남는다.
   useEffect(() => {
     setBalances(null);
     setBalanceError(null);
+    setHistory(null);
     setMode("balance");
   }, [address]);
 
@@ -222,15 +224,19 @@ export function WalletScreen({
       void refreshBalancesSilent();
     };
     const h = setInterval(tick, 30_000);
-    // 복귀 1회 — 직전 갱신과 겹치지 않게 5초 스로틀.
+    // 복귀 1회.
     const onReturn = () => {
-      if (document.hidden || Date.now() - last < 5_000) return;
+      if (document.hidden) return;
+      // 설정을 다시 읽는다(코덱스 개발 52 P2): 이 화면은 창이 숨어도 마운트된 채라, 사용자가
+      // 배너대로 settings.json 을 고쳐도 다음 결제·설정 닫기·재시작 전엔 배너와 체인 라벨이
+      // 옛 값에 머문다. 창이 돌아올 때 재확인하면 그 사이가 사라진다(파일 읽기 셋뿐). 아래
+      // 잔액 스로틀 **앞**에 둔다(코덱스 개발 52 2차 P2): 30초 틱 직후 5초 안에 돌아오면 잔액은
+      // 건너뛰어도 되지만 설정은 RPC 가 아니라 건너뛸 이유가 없다.
+      loadLimits();
+      // 잔액은 직전 갱신과 겹치지 않게 5초 스로틀(RPC).
+      if (Date.now() - last < 5_000) return;
       last = Date.now();
       void refreshBalancesSilent();
-      // 설정도 다시 읽는다(코덱스 개발 52 P2): 이 화면은 창이 숨어도 마운트된 채라, 사용자가
-      // 배너대로 settings.json 을 고쳐도 다음 결제·설정 닫기·재시작 전엔 배너와 체인 라벨이
-      // 옛 값에 머문다. 창이 돌아올 때 한 번 재확인하면 그 사이가 사라진다(파일 읽기 둘뿐).
-      loadLimits();
     };
     document.addEventListener("visibilitychange", onReturn);
     window.addEventListener("focus", onReturn);

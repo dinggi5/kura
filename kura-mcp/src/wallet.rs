@@ -44,11 +44,27 @@ fn legacy_path() -> Result<PathBuf, String> {
 }
 
 /// 활성 계정의 내역 파일 (개발 54: 체인별 + 계정별). src-tauri 의 account_file 과 같은 규칙.
-/// wallet.enc 를 못 읽으면(옛 평문 wallet.json 만 있는 지갑) 계정 0 — 그 지갑은 계정이 하나고
-/// 내역은 예전 이름 그대로다(코덱스 개발54 1차 P2: 여기서 에러를 내면 내역이 통째로 빈다).
+/// 계정 0 폴백은 **wallet.enc 가 없을 때뿐**(옛 평문 wallet.json 만 있는 지갑 — 계정이 하나고
+/// 내역은 예전 이름 그대로다. 코덱스 개발54 1차 P2: 여기서 에러를 내면 내역이 통째로 빈다).
+/// 파일은 있는데 못 읽거나 깨졌으면 에러 — 그것까지 0 으로 접으면 활성이 딴 계정일 때 **남의
+/// 계정 내역**을 활성 계정 것처럼 AI 에게 준다(코덱스 개발54 2차 P2). read_history 는 에러를
+/// 빈 목록으로 다룬다.
 fn history_path() -> Result<PathBuf, String> {
-    let index = active_account().map(|a| a.index).unwrap_or(0);
+    let index = history_account_index(enc_path()?.exists(), active_account)?;
     Ok(jigap_dir()?.join(account_file_name(&chain_file("history"), index)))
+}
+
+/// 내역 파일의 계정 인덱스 — 순수 판정(테스트용). 암호화 지갑이 없으면 0, 있으면 활성 계정을
+/// 읽되 실패는 그대로 에러(폴백 금지).
+fn history_account_index(
+    enc_exists: bool,
+    active: impl FnOnce() -> Result<Account, String>,
+) -> Result<u32, String> {
+    if enc_exists {
+        Ok(active()?.index)
+    } else {
+        Ok(0)
+    }
 }
 
 /// 계정별 데이터 파일 이름 (개발 54) — 계정 0 은 체인 이름 그대로(무손실), 그 외는 `-a{n}` 접미.
@@ -462,6 +478,23 @@ mod tests {
             "history-8453-a3.json"
         );
         assert_eq!(account_file_name("history.json", 1), "history-a1.json");
+    }
+
+    /// 내역 파일의 계정: 계정 0 폴백은 wallet.enc 가 없을 때뿐. 파일이 있는데 깨졌으면 에러 —
+    /// 0 으로 접으면 남의 계정 내역을 준다(코덱스 개발54 2차 P2).
+    #[test]
+    fn history_account_index_falls_back_to_zero_only_without_enc() {
+        let broken = || Err::<Account, String>("broken".into());
+        assert_eq!(history_account_index(false, broken), Ok(0));
+        assert!(history_account_index(true, broken).is_err());
+        let active = || {
+            Ok(Account {
+                index: 2,
+                address: "0xabc".into(),
+                label: String::new(),
+            })
+        };
+        assert_eq!(history_account_index(true, active), Ok(2));
     }
 
     /// 옛 파일에 backed_up 필드가 없어도 기본값 false 로 로드된다.

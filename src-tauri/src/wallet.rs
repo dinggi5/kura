@@ -514,6 +514,11 @@ pub(crate) fn add_account(password: String) -> Result<WalletStatus, String> {
         label: String::new(),
     });
     w.accounts = accounts;
+    // 비번 검증(KDF, 0.5초+) 동안 MCP 가 요청을 만들었을 수 있다(코덱스 개발54 2차 P2). 그 요청은
+    // 옛 계정으로 각인돼 있는데 여기서 활성을 새 계정으로 바꾸면 승인 창이 계정 칩을 덮어 사용자는
+    // 거부밖에 못 한다. 활성을 바꾸기 직전에 한 번 더 본다 — 창을 좁힐 뿐 없애진 못한다(프로세스가
+    // 달라 잠글 수 없다). 남은 틈은 승인 시 ensure_request_account 가 잡는다.
+    ensure_no_pending_payment(None)?;
     w.active = next;
     write_encrypted(&w)?;
     Ok(status_of(&w))
