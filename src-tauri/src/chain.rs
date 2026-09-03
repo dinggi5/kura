@@ -212,4 +212,20 @@ mod tests {
         assert_ne!(ARC_TESTNET.chain_id, BASE_SEPOLIA.chain_id);
     }
     // settings.json 본문 → chain_id 해석은 policy::tests 가 본다(정본이 그쪽으로 갔다, 개발 56).
+
+    // policy::SUPPORTED_CHAIN_IDS 와 chain_by_id 가 같은 집합이어야 한다(개발 57) — policy 는 이 목록으로
+    // 「chain_id 를 못 알아보는 파일의 지정 RPC 를 버릴지」 정한다. 체인을 한쪽에만 추가하면 그 체인의
+    // 커스텀 RPC 가 조용히 공식 RPC 로 바뀌거나(목록에 없음) 미지원 체인의 RPC 가 살아남는다(탐색에 없음).
+    #[test]
+    fn supported_chain_ids_match_chain_by_id() {
+        for id in policy::SUPPORTED_CHAIN_IDS {
+            assert!(
+                chain_by_id(id).is_some(),
+                "policy 엔 있는데 chain_by_id 엔 없다: {id}"
+            );
+        }
+        for c in [BASE_SEPOLIA, BASE_MAINNET, ARC_TESTNET] {
+            assert!(policy::SUPPORTED_CHAIN_IDS.contains(&c.chain_id));
+        }
+    }
 }

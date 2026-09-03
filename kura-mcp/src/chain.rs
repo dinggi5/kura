@@ -245,4 +245,19 @@ mod tests {
         const { assert!(!BASE_SEPOLIA.native_is_usdc) };
         const { assert!(!BASE_MAINNET.native_is_usdc) };
     }
+
+    // policy::SUPPORTED_CHAIN_IDS 와 이 크레이트의 체인 셋(active_chain 의 match·env_chain_id 의 검사)이
+    // 같은 집합이어야 한다(개발 57) — policy 는 이 목록으로 「chain_id 를 못 알아보는 파일의 지정 RPC 를
+    // 버릴지」 정한다. src-tauri 의 같은 테스트와 짝.
+    #[test]
+    fn supported_chain_ids_match_this_crate() {
+        let mine = [BASE_SEPOLIA, BASE_MAINNET, ARC_TESTNET].map(|c| c.chain_id);
+        assert_eq!(mine.len(), policy::SUPPORTED_CHAIN_IDS.len());
+        for id in policy::SUPPORTED_CHAIN_IDS {
+            assert!(
+                mine.contains(&id),
+                "policy 엔 있는데 이 크레이트엔 없다: {id}"
+            );
+        }
+    }
 }

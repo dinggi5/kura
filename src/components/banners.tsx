@@ -41,9 +41,11 @@ export function BackupNag({ onBackup }: { onBackup: () => void }) {
 
 /** 설정 파일을 못 읽어 기본값으로 도는 중 (개발 52).
  *
- *  백엔드는 깨진 settings.json 을 보수적 기본값(테스트넷·공식 RPC)으로 조용히 접는다 —
- *  앱이 안 뜨는 것보단 낫지만, 사용자가 「로그 안 남김」으로 고른 커스텀 RPC 가 모르는 새
- *  공식 엔드포인트로 바뀐 상태다. 동작은 그대로 두고 그 사실만 알린다. 버튼은 없다 — 설정
+ *  백엔드는 깨진 settings.json 의 한도·옵션을 보수적 기본값으로 조용히 접는다 — 앱이 안 뜨는
+ *  것보단 낫지만 사용자가 고른 값이 아니다. 체인과 RPC 는 다르다(개발 56·57): 파일의 그 두 필드만
+ *  따로 읽어 화면·송금·MCP 가 같은 값을 쓴다 — 그래서 문구는 「화면에 보이는 대로」 라고만
+ *  말한다(chain_id 까지 깨졌으면 연습용 체인·공식 RPC 로 접히고 화면도 그렇게 보인다).
+ *  동작은 그대로 두고 그 사실만 알린다. 버튼은 없다 — 설정
  *  화면의 저장도 같은 이유로 막혀 있어서(read_settings_for_update) 안에서 할 수 있는 게 없다. */
 export function SettingsBrokenBanner() {
   return (
@@ -59,8 +61,8 @@ export function SettingsBrokenBanner() {
       <AlertTriangle size={16} className="shrink-0 text-amber-600 dark:text-amber-500" />
       <p className="flex-1 min-w-0 text-[12px] leading-snug text-amber-800 dark:text-amber-300">
         {t(
-          "설정 파일(~/.jigap/settings.json)을 읽지 못했어요. 한도·옵션은 기본값이고, 고른 RPC 대신 공식 RPC를 쓰고 있어요. 파일을 고치거나 지우면 돌아와요.",
-          "Couldn't read the settings file (~/.jigap/settings.json). Limits and options are at their defaults, and the official RPC is in use instead of the one you chose. Fix or delete the file to get them back.",
+          "설정 파일(~/.jigap/settings.json)을 읽지 못했어요. 한도·옵션은 기본값이고, 체인과 RPC는 지금 화면에 보이는 대로예요. 파일을 고치거나 지우면 돌아와요.",
+          "Couldn't read the settings file (~/.jigap/settings.json). Limits and options are at their defaults; the chain and RPC are what the screens show. Fix or delete the file to get the rest back.",
         )}
       </p>
     </motion.div>

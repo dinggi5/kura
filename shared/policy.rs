@@ -28,6 +28,9 @@ pub const BASE_SEPOLIA_ID: u64 = 84_532;
 pub const BASE_MAINNET_ID: u64 = 8453;
 /// Arc 테스트넷 (Circle L1, 개발 50).
 pub const ARC_TESTNET_ID: u64 = 5_042_002;
+/// 두 크레이트가 아는 체인 전부 — settings.json 의 chain_id 가 이 밖이면 크레이트가 Base Sepolia 로 접는다.
+/// 체인을 추가하면 여기와 양쪽 ChainConfig 탐색에 같이 넣는다(각 크레이트 테스트가 짝을 검사한다).
+pub const SUPPORTED_CHAIN_IDS: [u64; 3] = [BASE_SEPOLIA_ID, BASE_MAINNET_ID, ARC_TESTNET_ID];
 
 // ── 지갑 유무 ───────────────────────────────────────────────────────────────────────────────
 
@@ -100,21 +103,36 @@ pub fn chain_id_for(file: &SettingsFile, wallet_exists: impl FnOnce() -> bool) -
 
 // ── settings.json → RPC ────────────────────────────────────────────────────────────────────
 
-/// settings.json 에서 사용자 지정 RPC 만 읽는 가벼운 뷰 — ChainSel 과 같은 이유로 **다른 필드는
-/// 무시**한다. 한도 필드 하나가 깨진 파일에서 GUI 는 Settings 파싱에 실패해 공식 RPC 로 접고 MCP 는
-/// 이 필드만 읽어 커스텀 RPC 를 쓰던 것(개발 51 하네스 실측·개발 56 대체 리뷰 P3)이 두 판정의 뿌리였다.
-#[derive(Deserialize, Default)]
-struct RpcSel {
-    #[serde(default)]
-    rpc_url: String,
-}
-
 /// settings.json 본문 → 사용자 지정 RPC(앞뒤 공백 제거). 없거나 비었거나 깨졌으면 빈 값 =
-/// 「활성 체인의 공식 RPC 를 따라간다」. 값은 검사하지 않는다 — http(s) 여부는 저장 경로(set_settings)
-/// 의 몫이고, 이미 파일에 있는 값은 어느 프로세스든 **같은 값**을 써야 한다.
+/// 「활성 체인의 공식 RPC 를 따라간다」. ChainSel 과 같은 이유로 **다른 필드는 무시**한다 — 한도
+/// 필드 하나가 깨진 파일에서 GUI 는 Settings 파싱에 실패해 공식 RPC 로 접고 MCP 는 이 필드만 읽어
+/// 커스텀 RPC 를 쓰던 것(개발 51 하네스 실측·개발 56 대체 리뷰 P3)이 두 판정의 뿌리였다.
+///
+/// 🔴 **단, 파일의 `chain_id` 를 못 알아보면 지정 RPC 도 버린다**(코덱스 개발 57 P1). 지정 RPC 는 파일이
+/// 말하는 체인의 엔드포인트다. chain_id 가 깨졌거나(타입 틀림·null) 미지원 값이면 크레이트는 체인을
+/// Base Sepolia 로 접는데, 그 RPC 가 메인넷 것이면 화면·한도는 「연습용」인 채 서명 provider 는
+/// 메인넷에 붙는다 — 서명자는 체인 ID 를 못박지 않고 RPC 가 답하는 값을 쓰므로 진짜 송금이 나간다.
+/// `pick_rpc` 의 `forced_other_chain` 과 같은 이유(딴 체인의 RPC 는 쓰지 않는다). 필드가 **없는** 옛 파일
+/// (개발 20 이전, Sepolia 뿐이던 시절)은 그 RPC 도 Sepolia 것이라 유지 — `chain_id_in` 도 같은 답(Sepolia).
+///
+/// 값 자체는 검사하지 않는다 — http(s) 여부는 저장 경로(set_settings)의 몫이고, 이미 파일에 있는 값은
+/// 어느 프로세스든 **같은 값**을 써야 한다.
 pub fn rpc_url_in(text: &str) -> String {
-    serde_json::from_str::<RpcSel>(text)
-        .map(|s| s.rpc_url.trim().to_string())
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(text) else {
+        return String::new();
+    };
+    let chain_known = match map.get("chain_id") {
+        None => true, // 옛 파일 — Sepolia 시절
+        Some(v) => v
+            .as_u64()
+            .is_some_and(|id| SUPPORTED_CHAIN_IDS.contains(&id)),
+    };
+    if !chain_known {
+        return String::new();
+    }
+    map.get("rpc_url")
+        .and_then(serde_json::Value::as_str)
+        .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
 
@@ -295,6 +313,28 @@ mod tests {
                 r#"{"daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05","chain_id":8453,"rpc_url":"http://127.0.0.1:8545"}"#
             ),
             "http://127.0.0.1:8545"
+        );
+        // 🔴 chain_id 를 못 알아보는 파일은 지정 RPC 도 버린다(코덱스 개발 57 P1) — 체인은 Sepolia 로
+        // 접히는데 RPC 는 메인넷 것이면 「연습용」 화면 뒤에서 진짜 송금이 나간다.
+        let custom = r#""rpc_url":"https://base-mainnet.example/v2/KEY""#;
+        // 타입 틀림·null·미지원·음수 — 전부 「못 알아봄」.
+        assert_eq!(
+            rpc_url_in(&format!(r#"{{"chain_id":"8453",{custom}}}"#)),
+            ""
+        );
+        assert_eq!(rpc_url_in(&format!(r#"{{"chain_id":null,{custom}}}"#)), "");
+        assert_eq!(rpc_url_in(&format!(r#"{{"chain_id":1,{custom}}}"#)), ""); // 미지원
+        assert_eq!(rpc_url_in(&format!(r#"{{"chain_id":-1,{custom}}}"#)), "");
+        // 지원 체인이면 유지, 필드가 없는 옛 파일도 유지(Sepolia 시절 — chain_id_in 과 같은 답).
+        for id in SUPPORTED_CHAIN_IDS {
+            assert_eq!(
+                rpc_url_in(&format!(r#"{{"chain_id":{id},{custom}}}"#)),
+                "https://base-mainnet.example/v2/KEY"
+            );
+        }
+        assert_eq!(
+            rpc_url_in(&format!("{{{custom}}}")),
+            "https://base-mainnet.example/v2/KEY"
         );
         // 파일 갈래: 없음·못 읽음은 빈 값, 본문은 rpc_url_in.
         assert_eq!(rpc_url_for(&SettingsFile::Missing), "");
