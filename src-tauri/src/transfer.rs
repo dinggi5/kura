@@ -20,7 +20,7 @@ use crate::limits::{parse_eth_nonneg, parse_usdc_nonneg, refund_spend, reserve_s
 use crate::lock::read_lock;
 use crate::settings::{effective_rpc, read_settings, redact_urls};
 use crate::trusted::record_trusted;
-use crate::wallet::unlock_signer;
+use crate::wallet::{active_account_index, unlock_signer, with_pinned_account};
 
 /// 잔액 — 보기 좋게 다듬기 전의 십진수 문자열.
 ///
@@ -219,6 +219,19 @@ pub(crate) async fn send_eth(
     amount_eth: String,
 ) -> Result<String, String> {
     let password = Zeroizing::new(password);
+    // 진입 시 계정을 한 번 고정 (개발 54) — 비번 검증·서명·내역이 모두 같은 계정을 본다.
+    with_pinned_account(
+        active_account_index(),
+        send_eth_pinned(password, to, amount_eth),
+    )
+    .await
+}
+
+async fn send_eth_pinned(
+    password: Zeroizing<String>,
+    to: String,
+    amount_eth: String,
+) -> Result<String, String> {
     // 비번 → 서명자. 실패하면(비번 오류 등) 시도로 기록하고 거부.
     let signer = match unlock_signer(&password) {
         Ok(s) => s,
@@ -240,10 +253,13 @@ pub(crate) async fn do_send_eth(
     to: String,
     amount_eth: String,
 ) -> Result<String, String> {
-    // 작업 진입 시 체인을 한 번 고정 — 이 송금의 한도·장부·RPC·내역이 모두 같은 체인을 본다.
+    // 작업 진입 시 체인·계정을 한 번 고정 — 이 송금의 한도·장부·RPC·내역이 모두 같은 체인·계정을 본다.
     with_pinned_chain(
         active_chain().chain_id,
-        do_send_eth_inner(signer, to, amount_eth),
+        with_pinned_account(
+            active_account_index(),
+            do_send_eth_inner(signer, to, amount_eth),
+        ),
     )
     .await
 }
@@ -345,6 +361,19 @@ pub(crate) async fn send_usdc(
     amount_usdc: String,
 ) -> Result<String, String> {
     let password = Zeroizing::new(password);
+    // 진입 시 계정을 한 번 고정 (개발 54) — send_eth 와 같은 이유.
+    with_pinned_account(
+        active_account_index(),
+        send_usdc_pinned(password, to, amount_usdc),
+    )
+    .await
+}
+
+async fn send_usdc_pinned(
+    password: Zeroizing<String>,
+    to: String,
+    amount_usdc: String,
+) -> Result<String, String> {
     let signer = match unlock_signer(&password) {
         Ok(s) => s,
         Err(e) => {
@@ -364,10 +393,13 @@ pub(crate) async fn do_send_usdc(
     to: String,
     amount_usdc: String,
 ) -> Result<String, String> {
-    // 작업 진입 시 체인 고정 — decimals·USDC 컨트랙트·RPC·한도·장부·내역이 모두 같은 체인.
+    // 작업 진입 시 체인·계정 고정 — decimals·USDC 컨트랙트·RPC·한도·장부·내역이 모두 같은 체인·계정.
     with_pinned_chain(
         active_chain().chain_id,
-        do_send_usdc_inner(signer, to, amount_usdc),
+        with_pinned_account(
+            active_account_index(),
+            do_send_usdc_inner(signer, to, amount_usdc),
+        ),
     )
     .await
 }

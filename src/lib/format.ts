@@ -19,6 +19,12 @@ export function fmtCountdown(s: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** 계정 표시 이름 (개발 54) — 사람이 붙인 라벨, 없으면 「계정 N」(N = 파생 인덱스 + 1,
+ *  메타마스크의 Account 1·2 와 같은 셈법). */
+export function accountName(a: { index: number; label: string }): string {
+  return a.label || t(`계정 ${a.index + 1}`, `Account ${a.index + 1}`);
+}
+
 export function shortenAddress(addr: string): string {
   if (!addr || addr.length < 12) return addr;
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;

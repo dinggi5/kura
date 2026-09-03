@@ -45,6 +45,13 @@ pub(crate) struct PaymentRequest {
     /// 0 = 미각인(옛 요청 파일 호환) → 체인 검사 건너뜀.
     #[serde(default)]
     pub(crate) chain_id: u64,
+    /// 요청이 만들어진 시점의 **활성 계정** (개발 54) — MCP 가 wallet.enc 의 활성 계정을 각인한다.
+    /// 승인 시 지금 계정과 다르면 거부하고, 승인 작업 전체를 이 계정으로 고정한다(체인과 같은 처방).
+    /// `from` 이 빈 값 = 미각인(옛 요청 파일·옛 MCP) → 계정 검사 건너뜀, 활성 계정으로.
+    #[serde(default)]
+    pub(crate) account: u32,
+    #[serde(default)]
+    pub(crate) from: String,
     /// ERC-8004 대조 결과 (개발 47) — AI 가 에이전트 번호를 함께 준 x402 결제에만 붙는다.
     /// 없으면 승인 창은 예전 그대로다(**말할 사실이 있을 때만 한 줄이 붙는다**).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,6 +113,34 @@ pub(crate) fn ensure_request_chain(req: &PaymentRequest) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// 대기 요청이 각인한 계정과 지금 활성 계정이 같은지 검사한다 (개발 54). 다르면 거부 —
+/// 승인/자율 경로 공용. MCP 는 요청을 쓸 때 wallet.enc 의 활성 계정(인덱스+주소)을 적고, GUI 는
+/// 승인 순간 같은 파일을 다시 읽어 대조한다. 그 사이 사용자가 계정을 바꿨으면 「화면 계정 ≠ 돈
+/// 나가는 계정」이므로 보내지 않는다. `from` 빈 값 = 옛 요청 → 건너뜀(후방호환).
+pub(crate) fn ensure_request_account(req: &PaymentRequest) -> Result<(), String> {
+    if req.from.is_empty() {
+        return Ok(());
+    }
+    let active = crate::wallet::active_account()?;
+    if active.index != req.account || !active.address.eq_ignore_ascii_case(&req.from) {
+        return Err(ts!(
+            "결제 요청이 만들어진 계정과 지금 계정이 달라요 — 계정을 확인하고 다시 요청하세요.",
+            "This request was made for a different account than the one that's active now — check the account and ask again."
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// 승인 작업을 고정할 계정 인덱스 — 각인된 요청은 그 계정, 옛 요청은 지금 활성 계정.
+pub(crate) fn request_account_index(req: &PaymentRequest) -> u32 {
+    if req.from.is_empty() {
+        crate::wallet::active_account_index()
+    } else {
+        req.account
+    }
 }
 
 /// 결제 요청 처리 결과. GUI가 쓰고 MCP가 읽는다.
@@ -503,7 +538,18 @@ pub(crate) async fn approve_payment(id: String, password: String) -> Result<Paym
         .into());
     }
     ensure_request_chain(&req)?; // 요청 시점 체인 ≠ 현재 체인이면 거부(메인넷 오발사 차단)
+    ensure_request_account(&req)?; // 요청 시점 계정 ≠ 현재 계정이면 거부 (개발 54)
 
+    // 🔴 **여기서부터 계정을 못박는다** (개발 54). 위 검사는 *그 순간*만 본다 — 아래 비번 검증·
+    // RPC 왕복 사이에 사용자가 계정을 바꾸면 `unlock_signer` 가 **그때 활성인 계정의 키**로
+    // 서명하고 내역도 그 계정 파일에 적힌다. 요청의 계정으로 작업 전체를 묶으면 그 창이 사라진다.
+    // (체인은 안쪽 do_* 가 진입 시 고정한다 — 개발 20·51.)
+    let pinned = request_account_index(&req);
+    crate::wallet::with_pinned_account(pinned, approve_pinned(req, password)).await
+}
+
+/// 계정이 고정된 채로 도는 승인 본체 — 서명 키·내역 파일이 모두 요청의 계정을 본다.
+async fn approve_pinned(req: PaymentRequest, password: String) -> Result<PaymentResult, String> {
     // 여기서부터는 돈이 나갈 수 있는 구간 — 감시 스레드가 이 요청을 실패로 끝내면 안 된다.
     // (감시 스레드가 이미 끝낸 뒤면 여기서 거절된다 — 그 경우 상대는 재시도했을 수 있다.)
     let _in_flight = begin_approval(&req.id)?;
@@ -626,6 +672,8 @@ mod tests {
             kind: "transfer".into(),
             resource: String::new(),
             chain_id: 0,
+            account: 0,
+            from: String::new(),
             agent: None,
         }
     }
@@ -637,7 +685,10 @@ mod tests {
     fn resolve_only_touches_its_own_request() {
         assert!(owns_pending(Some("A"), "A"), "같은 요청이면 기록한다");
         assert!(!owns_pending(Some("B"), "A"), "남의 요청은 건드리지 않는다");
-        assert!(!owns_pending(None, "A"), "이미 거둬간 요청이면 남길 것도 없다");
+        assert!(
+            !owns_pending(None, "A"),
+            "이미 거둬간 요청이면 남길 것도 없다"
+        );
     }
 
     /// 승인 처리 중에는 감시 스레드가 요청을 실패로 끝내면 안 된다 — 가드가 그 구간을 표시한다.
@@ -775,11 +826,14 @@ mod tests {
             kind: "transfer".into(),
             resource: String::new(),
             chain_id: 84_532,
+            account: 2,
+            from: "0xF39f".into(),
             agent: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: PaymentRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, "1780623842000000000");
+        assert_eq!((back.account, back.from.as_str()), (2, "0xF39f"));
         assert_eq!(back.token, "USDC");
         assert_eq!(back.memo, "데이터 API 1회 호출");
         assert_eq!(back.created, 1780623842);
@@ -794,6 +848,21 @@ mod tests {
         assert_eq!(r.kind, "transfer");
         assert!(r.resource.is_empty());
         assert_eq!(r.chain_id, 0); // 옛 요청엔 chain_id 없음 → 0(=체인 검사 건너뜀, 후방호환)
+        assert!(r.from.is_empty()); // 옛 요청엔 계정 각인 없음 → 계정 검사 건너뜀 (개발 54)
+        assert_eq!(r.account, 0);
+    }
+
+    /// 계정 각인이 없는(옛) 요청은 지금 활성 계정으로 고정된다 — 고정값이 이미 있으면 그 값.
+    #[tokio::test]
+    async fn request_account_index_prefers_stamp_then_pinned() {
+        let mut r = req_created(1);
+        r.account = 3;
+        r.from = "0xabc".into();
+        assert_eq!(request_account_index(&r), 3);
+        let legacy = req_created(1);
+        let got =
+            crate::wallet::with_pinned_account(7, async { request_account_index(&legacy) }).await;
+        assert_eq!(got, 7); // 옛 요청 = 활성 계정(여기선 고정값)
     }
 
     // 결제 결과 JSON 왕복 — GUI가 쓰고 MCP가 읽는 형식.

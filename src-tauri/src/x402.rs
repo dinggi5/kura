@@ -23,7 +23,7 @@ use crate::settings::read_settings;
 use crate::store::now_secs;
 use crate::transfer::parse_to_addr;
 use crate::trusted::record_trusted;
-use crate::wallet::unlock_signer;
+use crate::wallet::{active_account_index, unlock_signer, with_pinned_account};
 
 /// x402 결제 페이로드의 authorization 부분 (서명된 EIP-3009 인가). 비밀 없음.
 #[derive(Serialize, Deserialize, Clone)]
@@ -121,6 +121,20 @@ pub(crate) async fn sign_x402_payment(
     valid_secs: Option<u64>,
 ) -> Result<X402Payment, String> {
     let password = Zeroizing::new(password);
+    // 진입 시 계정을 한 번 고정 (개발 54) — 서명 키(from)와 내역이 같은 계정을 본다.
+    with_pinned_account(
+        active_account_index(),
+        sign_x402_pinned(password, to, amount_usdc, valid_secs),
+    )
+    .await
+}
+
+async fn sign_x402_pinned(
+    password: Zeroizing<String>,
+    to: String,
+    amount_usdc: String,
+    valid_secs: Option<u64>,
+) -> Result<X402Payment, String> {
     let signer = match unlock_signer(&password) {
         Ok(s) => s,
         Err(e) => {
@@ -141,10 +155,13 @@ pub(crate) async fn do_sign_x402(
     amount_usdc: String,
     valid_secs: Option<u64>,
 ) -> Result<X402Payment, String> {
-    // 작업 진입 시 체인 고정 — EIP-712 도메인(체인ID·USDC)·한도·장부·내역이 모두 같은 체인.
+    // 작업 진입 시 체인·계정 고정 — EIP-712 도메인(체인ID·USDC)·한도·장부·내역이 모두 같은 체인·계정.
     with_pinned_chain(
         active_chain().chain_id,
-        do_sign_x402_inner(signer, to, amount_usdc, valid_secs),
+        with_pinned_account(
+            active_account_index(),
+            do_sign_x402_inner(signer, to, amount_usdc, valid_secs),
+        ),
     )
     .await
 }

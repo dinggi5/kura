@@ -39,6 +39,12 @@ pub struct PaymentRequest {
     /// 요청 생성 시점의 활성 체인 ID — GUI가 승인 시 현재 체인과 다르면 거부한다(코덱스 개발20 #2).
     #[serde(default)]
     pub chain_id: u64,
+    /// 요청 생성 시점의 **활성 계정** (개발 54) — 파생 인덱스 + 주소. GUI 가 승인 시 지금 계정과
+    /// 대조해 다르면 거부하고, 같으면 승인 작업 전체를 이 계정으로 고정한다(chain_id 와 같은 처방).
+    #[serde(default)]
+    pub account: u32,
+    #[serde(default)]
+    pub from: String,
     /// ERC-8004 대조 결과 (개발 47). AI 가 에이전트 번호를 함께 준 x402 결제에서만 채워진다 —
     /// 없으면 승인 창은 예전 그대로다(**말할 사실이 있을 때만 한 줄이 붙는다**).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -271,6 +277,9 @@ fn write_request_kind(
 ) -> Result<(String, Option<AgentTrust>), String> {
     let id = new_id();
     let chain_id = crate::chain::active_chain().chain_id;
+    // 활성 계정 각인 (개발 54). 여기서 못 읽으면(지갑 파일 없음·깨짐) 요청을 만들지 않는다 —
+    // 어느 계정에서 나갈지 모르는 결제를 사람 앞에 띄우지 않는다.
+    let account = crate::wallet::active_account()?;
     // 조회 시점과 요청 각인 시점 사이(조회 상한 10초)에 사용자가 네트워크를 바꿨을 수 있다.
     // 다른 체인에서 읽은 대조를 이번 체인 결제에 붙이면, GUI 는 request.chain_id 만 검사하므로
     // **옛 체인 사실이 이번 결제의 사실인 양** 표시되고 자율 차단 판단에까지 쓰인다
@@ -285,7 +294,9 @@ fn write_request_kind(
         created: now_secs(),
         kind: kind.to_string(),
         resource: resource.to_string(),
-        chain_id, // 요청 시점 활성 체인 각인(승인 시 GUI가 대조)
+        chain_id,               // 요청 시점 활성 체인 각인(승인 시 GUI가 대조)
+        account: account.index, // 요청 시점 활성 계정 각인(승인 시 GUI가 대조, 개발 54)
+        from: account.address,
         agent: agent.clone(),
     };
     let json = serde_json::to_string_pretty(&req)
@@ -397,11 +408,14 @@ mod tests {
             kind: "transfer".into(),
             resource: String::new(),
             chain_id: 84_532,
+            account: 1,
+            from: "0xOne".into(),
             agent: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: PaymentRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, "123");
+        assert_eq!((back.account, back.from.as_str()), (1, "0xOne"));
         assert_eq!(back.token, "USDC");
         assert_eq!(back.memo, "데이터 API 호출");
         assert_eq!(back.kind, "transfer");
@@ -442,6 +456,8 @@ mod tests {
             kind: "x402".into(),
             resource: "https://api.example.com/x".into(),
             chain_id: 8453,
+            account: 0,
+            from: String::new(),
             agent: None,
         };
         let json = serde_json::to_string(&r).unwrap();

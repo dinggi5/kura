@@ -1,6 +1,10 @@
 // 지갑 키 관리 (Session 2~5) — 니모닉 생성·주소 파생·비번 암호화(Argon2id + AES-256-GCM).
 // 키는 ~/.jigap/wallet.enc 에 암호화 저장. 비번이 있어야만 복호화/서명 가능.
 // 기존 평문 wallet.json 은 최초 1회 마이그레이션으로 암호화 후 삭제.
+//
+// 계정 여러 개 (개발 54) — 시드는 하나, 계정은 HD 파생(m/44'/60'/0'/0/{n})으로 늘린다.
+// 백업은 여전히 12단어 하나다(그 시드에서 모든 계정이 다시 나온다). 계정 목록·활성 계정은
+// wallet.enc 의 평문 필드(주소는 공개정보)라 MCP 도 비번 없이 읽는다.
 
 use crate::i18n::{tf, ts};
 use aes_gcm::aead::rand_core::RngCore;
@@ -18,7 +22,11 @@ use std::fs;
 use std::path::PathBuf;
 use zeroize::Zeroizing;
 
+use crate::chain::chain_file;
 use crate::store::{jigap_dir, write_atomic};
+
+/// 계정 라벨 최대 글자 수(사람이 붙이는 이름 — 화면 한 줄).
+const LABEL_MAX_CHARS: usize = 24;
 
 /// KDF(Argon2id) 파라미터 — wallet.enc v3 (개발 17, 메인넷 전 보안 강화).
 /// RFC 9106의 메모리 제약 환경 권장값(64 MiB, t=3). 비번 1회 입력당 ~0.5초 수준의 비용으로
@@ -49,6 +57,17 @@ pub(crate) struct WalletInfo {
     address: String,
 }
 
+/// 계정 하나 (개발 54) — 같은 시드의 HD 파생 인덱스 + 그 주소. 주소는 공개정보라 평문이고,
+/// 비번 없이 잔액·QR·MCP 상태에 쓴다. 라벨은 사람이 붙이는 이름(빈 값 = 화면이 「계정 N」으로).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub(crate) struct Account {
+    /// 파생 인덱스 n (m/44'/60'/0'/0/n). 0 = 지갑을 만들 때부터 있던 원래 계정.
+    pub(crate) index: u32,
+    pub(crate) address: String,
+    #[serde(default)]
+    pub(crate) label: String,
+}
+
 /// 지갑 파일 상태. 프론트가 어떤 화면을 띄울지 결정한다.
 /// - "encrypted": wallet.enc 존재 (정상)
 /// - "legacy":    평문 wallet.json 만 존재 → 비번으로 보호 필요(마이그레이션)
@@ -56,9 +75,14 @@ pub(crate) struct WalletInfo {
 #[derive(Serialize)]
 pub(crate) struct WalletStatus {
     state: String,
+    /// **활성 계정**의 주소 (개발 54). 잔액·받기·보내기 화면이 이 주소를 쓴다.
     address: Option<String>,
     /// 시드 백업 완료 여부 (encrypted 상태일 때만 의미 있음).
     backed_up: bool,
+    /// 모든 계정(인덱스 순). encrypted 가 아니면 비어 있다.
+    accounts: Vec<Account>,
+    /// 활성 계정의 파생 인덱스.
+    active: u32,
 }
 
 /// 아직 암호화 지갑이 없는가 (= 첫 화면이 설정/가져오기여야 하는가).
@@ -90,6 +114,50 @@ pub(crate) struct EncryptedWallet {
     kdf_t: u32,
     #[serde(default = "default_kdf_p")]
     kdf_p: u32,
+    /// 계정 목록 (개발 54). 옛 파일엔 없다 → `accounts()` 가 계정 0(= `address`) 하나로 정규화.
+    /// 계정 0 은 여기 있든 없든 `address` 가 정본이다(옛 빌드도 그 필드를 읽는다).
+    #[serde(default)]
+    accounts: Vec<Account>,
+    /// 활성 계정의 파생 인덱스. 옛 파일엔 없다 → 0.
+    #[serde(default)]
+    active: u32,
+}
+
+impl EncryptedWallet {
+    /// 모든 계정을 인덱스 순으로 — 계정 0 은 항상 있고 그 주소는 `address` 필드다.
+    /// (파일의 `accounts` 에 0 이 따로 적혀 있어도 `address` 가 이긴다 — 정본은 하나.)
+    pub(crate) fn accounts(&self) -> Vec<Account> {
+        let mut list: Vec<Account> = self
+            .accounts
+            .iter()
+            .filter(|a| a.index != 0)
+            .cloned()
+            .collect();
+        let zero_label = self
+            .accounts
+            .iter()
+            .find(|a| a.index == 0)
+            .map(|a| a.label.clone())
+            .unwrap_or_default();
+        list.push(Account {
+            index: 0,
+            address: self.address.clone(),
+            label: zero_label,
+        });
+        list.sort_by_key(|a| a.index);
+        list.dedup_by_key(|a| a.index);
+        list
+    }
+
+    /// 활성 계정. `active` 가 목록에 없으면(손상·옛 빌드가 쓴 파일) 계정 0 — 돈이 나가는
+    /// 계정이 「없는 계정」이 되면 안 된다.
+    pub(crate) fn active_account(&self) -> Account {
+        let list = self.accounts();
+        list.iter()
+            .find(|a| a.index == self.active)
+            .cloned()
+            .unwrap_or_else(|| list[0].clone())
+    }
 }
 
 /// 옛 평문 형식 (v1). 읽기 전용 — 마이그레이션 때만 사용.
@@ -107,12 +175,14 @@ fn legacy_path() -> Result<PathBuf, String> {
     Ok(jigap_dir()?.join("wallet.json"))
 }
 
-/// 니모닉 문구에서 서명자(개인키)를 파생한다.
-/// 파생 경로는 이더리움 표준 m/44'/60'/0'/0/0 (alloy 기본값).
-pub(crate) fn signer_from_phrase(phrase: &str) -> Result<PrivateKeySigner, String> {
+/// 니모닉 문구에서 계정 `index` 의 서명자(개인키)를 파생한다.
+/// 파생 경로는 이더리움 표준 m/44'/60'/0'/0/{index} — 메타마스크·하드햇과 같은 순서라,
+/// 이 12단어를 다른 지갑에 넣어도 같은 계정들이 같은 순서로 나온다.
+pub(crate) fn signer_for_account(phrase: &str, index: u32) -> Result<PrivateKeySigner, String> {
     MnemonicBuilder::<English>::default()
         .phrase(phrase)
-        .build()
+        .index(index)
+        .and_then(|b| b.build())
         .map_err(|e| {
             tf!(
                 "니모닉에서 키 파생 실패: {e}",
@@ -121,9 +191,74 @@ pub(crate) fn signer_from_phrase(phrase: &str) -> Result<PrivateKeySigner, Strin
         })
 }
 
-/// 니모닉 문구에서 EVM 주소(EIP-55 체크섬)를 파생한다.
+/// 니모닉 문구에서 계정 0 의 서명자를 파생한다 (주소 파생·검증용).
+pub(crate) fn signer_from_phrase(phrase: &str) -> Result<PrivateKeySigner, String> {
+    signer_for_account(phrase, 0)
+}
+
+/// 니모닉 문구에서 계정 0 의 EVM 주소(EIP-55 체크섬)를 파생한다.
 fn derive_address(phrase: &str) -> Result<String, String> {
     Ok(signer_from_phrase(phrase)?.address().to_string())
+}
+
+tokio::task_local! {
+    /// 한 작업(송금/서명/승인) 동안 고정된 계정 인덱스 (개발 54). chain.rs 의 PINNED_CHAIN 과
+    /// 같은 처방 — 승인 도중 사용자가 계정을 바꿔도 **서명하는 키와 내역이 적히는 파일이
+    /// 요청의 계정에 머문다**. 안 묶으면 「화면 계정 ≠ 돈 나가는 계정」이 된다.
+    static PINNED_ACCOUNT: u32;
+}
+
+/// 작업 단위로 계정을 고정해 fut 를 실행한다. 이미 고정된 안쪽에서 다시 감싸면 안쪽 값이 이긴다 —
+/// 호출자는 항상 `active_account_index()`(= 고정값 우선)를 넘기므로 실제로는 같은 값이다.
+pub(crate) async fn with_pinned_account<F: std::future::Future>(index: u32, fut: F) -> F::Output {
+    PINNED_ACCOUNT.scope(index, fut).await
+}
+
+/// 지금 돈이 나가는 계정의 인덱스 — 작업이 고정했으면 그 값, 아니면 wallet.enc 의 활성 계정.
+/// 파일을 못 읽으면 0(원래 계정) — 계정 0 은 어떤 wallet.enc 에도 있다.
+pub(crate) fn active_account_index() -> u32 {
+    if let Ok(i) = PINNED_ACCOUNT.try_with(|i| *i) {
+        return i;
+    }
+    read_encrypted()
+        .map(|w| w.active_account().index)
+        .unwrap_or(0)
+}
+
+/// 활성 계정(고정값 우선)의 주소까지. 고정된 인덱스가 파일 목록에 없으면 오류 —
+/// 요청이 가리키는 계정이 이 지갑에 없다는 뜻이라 조용히 다른 계정으로 갈 수 없다.
+pub(crate) fn active_account() -> Result<Account, String> {
+    let w = read_encrypted()?;
+    let index = PINNED_ACCOUNT
+        .try_with(|i| *i)
+        .unwrap_or_else(|_| w.active_account().index);
+    w.accounts()
+        .into_iter()
+        .find(|a| a.index == index)
+        .ok_or_else(|| {
+            ts!(
+                "이 지갑에 없는 계정이에요",
+                "That account doesn't exist in this wallet"
+            )
+            .to_string()
+        })
+}
+
+/// **계정별로도** 분리하는 데이터 파일 이름 (개발 54) — 지금은 내역(history)만.
+/// 체인 접미(chain_file)에 계정 접미를 덧붙인다: 계정 0 은 **기존 이름 그대로**(무손실),
+/// 그 외는 `-a{n}`("history-a2.json", "history-8453-a2.json"). 한도 장부·신뢰 주소는 일부러
+/// 계정 공용이다 — 계정을 하나 더 만드는 것으로 일일 한도가 두 배가 되면 가드레일이 아니다.
+/// (kura-mcp/src/wallet.rs 의 account_file 과 같은 규칙 — 평행 사본 정책.)
+pub(crate) fn account_file(stem: &str) -> String {
+    account_file_name(&chain_file(stem), active_account_index())
+}
+
+/// `account_file` 의 이름 규칙만 떼어낸 순수 함수 (테스트용 + 정산 반영이 계정을 지정해 쓴다).
+pub(crate) fn account_file_name(chain_base: &str, index: u32) -> String {
+    match index {
+        0 => chain_base.to_string(),
+        n => format!("{}-a{n}.json", chain_base.trim_end_matches(".json")),
+    }
 }
 
 /// 비번 + 솔트 + 명시적 Argon2id 파라미터로 32바이트 대칭키를 유도한다.
@@ -182,6 +317,8 @@ fn encrypt_with(
         kdf_m: m,
         kdf_t: t,
         kdf_p: p,
+        accounts: Vec::new(),
+        active: 0,
     })
 }
 
@@ -252,13 +389,15 @@ pub(crate) fn read_encrypted() -> Result<EncryptedWallet, String> {
 }
 
 /// v2(옛 KDF) 지갑을 강화 파라미터(v3)로 재암호화한 사본을 만든다. 이미 v3면 None.
-/// 순수 함수 — 디스크에 안 쓴다(쓰기는 maybe_upgrade_kdf). backed_up 플래그는 보존.
+/// 순수 함수 — 디스크에 안 쓴다(쓰기는 maybe_upgrade_kdf). backed_up·계정 목록은 보존.
 fn upgraded_wallet(w: &EncryptedWallet, phrase: &str, password: &str) -> Option<EncryptedWallet> {
     if w.version >= 3 {
         return None;
     }
     let mut nw = encrypt_wallet(phrase, &w.address, password).ok()?;
     nw.backed_up = w.backed_up;
+    nw.accounts = w.accounts.clone();
+    nw.active = w.active;
     Some(nw)
 }
 
@@ -271,13 +410,28 @@ pub(crate) fn maybe_upgrade_kdf(w: &EncryptedWallet, phrase: &str, password: &st
     }
 }
 
-/// 비번으로 저장된 키를 복호화해 서명자를 만든다 (송금·서명 공용).
-/// 비번이 틀리면 복호화 단계에서 거부된다. 성공 시 옛 KDF 파일은 v3로 업그레이드.
+/// 비번으로 저장된 키를 복호화해 **활성 계정**(작업이 고정했으면 그 계정)의 서명자를 만든다
+/// (송금·서명 공용). 비번이 틀리면 복호화 단계에서 거부된다. 성공 시 옛 KDF 파일은 v3로 업그레이드.
 pub(crate) fn unlock_signer(password: &str) -> Result<PrivateKeySigner, String> {
     let w = read_encrypted()?;
     let phrase = decrypt_wallet(&w, password)?;
     maybe_upgrade_kdf(&w, &phrase, password);
-    signer_from_phrase(&phrase)
+    let index = PINNED_ACCOUNT
+        .try_with(|i| *i)
+        .unwrap_or_else(|_| w.active_account().index);
+    signer_for_account(&phrase, index)
+}
+
+/// 상태 응답을 만든다 — 주소는 활성 계정의 것.
+fn status_of(w: &EncryptedWallet) -> WalletStatus {
+    let active = w.active_account();
+    WalletStatus {
+        state: "encrypted".into(),
+        address: Some(active.address),
+        backed_up: w.backed_up,
+        accounts: w.accounts(),
+        active: active.index,
+    }
 }
 
 /// 지갑 파일 상태를 알려준다. 비번 없이 호출 가능 (주소는 공개정보).
@@ -285,11 +439,7 @@ pub(crate) fn unlock_signer(password: &str) -> Result<PrivateKeySigner, String> 
 pub(crate) fn get_wallet_status() -> Result<WalletStatus, String> {
     if enc_path()?.exists() {
         let w = read_encrypted()?;
-        return Ok(WalletStatus {
-            state: "encrypted".into(),
-            address: Some(w.address),
-            backed_up: w.backed_up,
-        });
+        return Ok(status_of(&w));
     }
     if legacy_path()?.exists() {
         let data = fs::read_to_string(legacy_path()?).map_err(|e| {
@@ -308,13 +458,106 @@ pub(crate) fn get_wallet_status() -> Result<WalletStatus, String> {
             state: "legacy".into(),
             address: Some(lw.address),
             backed_up: false,
+            accounts: Vec::new(),
+            active: 0,
         });
     }
     Ok(WalletStatus {
         state: "none".into(),
         address: None,
         backed_up: false,
+        accounts: Vec::new(),
+        active: 0,
     })
+}
+
+/// 승인 대기 중인 AI 결제가 있으면 계정을 못 바꾼다 (개발 54). 요청은 그 순간의 계정으로
+/// 각인돼 있어(MCP 가 `from` 을 적는다) 바꾼 뒤 승인하면 어차피 거절된다 — 거절될 전환을
+/// 허용해 「승인 창엔 계정 1, 화면엔 계정 2」를 잠깐이라도 만들 이유가 없다. 먼저 처리(또는
+/// 거부)하고 바꾸면 된다. 만료된 요청은 막지 않는다(live_request).
+fn ensure_no_pending_payment() -> Result<(), String> {
+    if crate::ipc::live_request().is_some() {
+        return Err(ts!(
+            "승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 계정을 바꾸세요.",
+            "A payment is waiting for approval. Handle it first, then switch accounts."
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// 다음 계정을 파생한다 — 비번이 필요하다(주소를 얻으려면 시드를 풀어야 한다).
+/// 인덱스는 「있는 것 중 최대 + 1」: 계정은 지우지 않으므로 빈 자리가 생기지 않고, 같은 시드를
+/// 다른 지갑에 넣었을 때의 순서와도 같다. 새 계정이 곧 활성 계정이 된다(메타마스크와 같다).
+#[tauri::command]
+pub(crate) fn add_account(password: String) -> Result<WalletStatus, String> {
+    let password = Zeroizing::new(password);
+    ensure_no_pending_payment()?;
+    let mut w = read_encrypted()?;
+    let phrase = decrypt_wallet(&w, &password)?;
+    let list = w.accounts();
+    let next = list.iter().map(|a| a.index).max().unwrap_or(0) + 1;
+    let address = signer_for_account(&phrase, next)?.address().to_string();
+    // 파일의 accounts 엔 0 이 없을 수 있다(옛 파일) — 정규화된 목록 위에 얹어 통째로 적는다.
+    let mut accounts = list;
+    accounts.push(Account {
+        index: next,
+        address,
+        label: String::new(),
+    });
+    w.accounts = accounts;
+    w.active = next;
+    write_encrypted(&w)?;
+    Ok(status_of(&w))
+}
+
+/// 활성 계정을 바꾼다. 없는 인덱스는 거부.
+#[tauri::command]
+pub(crate) fn switch_account(index: u32) -> Result<WalletStatus, String> {
+    ensure_no_pending_payment()?;
+    let mut w = read_encrypted()?;
+    if !w.accounts().iter().any(|a| a.index == index) {
+        return Err(ts!(
+            "이 지갑에 없는 계정이에요",
+            "That account doesn't exist in this wallet"
+        )
+        .into());
+    }
+    if w.active != index {
+        w.active = index;
+        write_encrypted(&w)?;
+    }
+    Ok(status_of(&w))
+}
+
+/// 라벨을 다듬는다: 앞뒤 공백 제거, 제어 문자 제거, 최대 글자 수로 자른다 (순수 함수).
+fn clean_label(label: &str) -> String {
+    label
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(LABEL_MAX_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// 계정 이름을 바꾼다 (비번 불필요 — 비밀이 아닌 메타데이터). 빈 값 = 기본 이름(「계정 N」)으로.
+#[tauri::command]
+pub(crate) fn rename_account(index: u32, label: String) -> Result<WalletStatus, String> {
+    let mut w = read_encrypted()?;
+    let mut accounts = w.accounts();
+    let Some(a) = accounts.iter_mut().find(|a| a.index == index) else {
+        return Err(ts!(
+            "이 지갑에 없는 계정이에요",
+            "That account doesn't exist in this wallet"
+        )
+        .into());
+    };
+    a.label = clean_label(&label);
+    w.accounts = accounts;
+    write_encrypted(&w)?;
+    Ok(status_of(&w))
 }
 
 /// 새 12단어 니모닉을 생성하고 비번으로 암호화 저장한다.
@@ -650,6 +893,267 @@ mod tests {
     fn import_rejects_wrong_word_count() {
         assert!(build_imported_wallet("test test test", "pw").is_err());
         assert!(build_imported_wallet("", "pw").is_err());
+    }
+
+    // HD 파생 인덱스 (개발 54): 하드햇 기본 니모닉의 1·2번 계정 = 메타마스크와 같은 순서.
+    // 여기가 어긋나면 «이 12단어를 다른 지갑에 넣어도 같은 계정이 나온다»는 약속이 깨진다.
+    #[test]
+    fn derive_hardhat_accounts_by_index() {
+        let phrase = "test test test test test test test test test test test junk";
+        let a1 = signer_for_account(phrase, 1).unwrap().address().to_string();
+        let a2 = signer_for_account(phrase, 2).unwrap().address().to_string();
+        assert_eq!(a1, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+        assert_eq!(a2, "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC");
+        // 0 번은 예전 함수와 같다.
+        assert_eq!(
+            signer_for_account(phrase, 0).unwrap().address(),
+            signer_from_phrase(phrase).unwrap().address()
+        );
+    }
+
+    // 옛 파일(accounts/active 없음) → 계정 0 하나, 주소는 address 필드, 활성 = 0.
+    #[test]
+    fn legacy_file_normalizes_to_single_account() {
+        let json =
+            r#"{"version":3,"address":"0xAbc","salt":"AA==","nonce":"AA==","ciphertext":"AA=="}"#;
+        let w: EncryptedWallet = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            w.accounts(),
+            vec![Account {
+                index: 0,
+                address: "0xAbc".into(),
+                label: String::new()
+            }]
+        );
+        assert_eq!(w.active_account().index, 0);
+        assert_eq!(w.active_account().address, "0xAbc");
+    }
+
+    // 계정 목록: 인덱스 순 정렬, 계정 0 의 주소는 address 필드가 이긴다(라벨은 목록 것),
+    // 활성이 목록에 없으면 계정 0 으로 접는다.
+    #[test]
+    fn accounts_sorted_zero_from_address_and_active_fallback() {
+        let json = r#"{"version":3,"address":"0xZero","salt":"AA==","nonce":"AA==","ciphertext":"AA==",
+            "accounts":[{"index":2,"address":"0xTwo","label":"AI"},{"index":0,"address":"0xStale","label":"나"},{"index":1,"address":"0xOne"}],
+            "active":2}"#;
+        let w: EncryptedWallet = serde_json::from_str(json).unwrap();
+        let list = w.accounts();
+        assert_eq!(
+            list.iter().map(|a| a.index).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(list[0].address, "0xZero"); // 정본은 address 필드
+        assert_eq!(list[0].label, "나");
+        assert_eq!(list[1].label, ""); // label 없는 항목도 읽힌다
+        assert_eq!(w.active_account().address, "0xTwo");
+
+        let mut w2 = w;
+        w2.active = 9; // 없는 계정 → 0
+        assert_eq!(w2.active_account().index, 0);
+    }
+
+    // 계정별 파일 이름: 0 은 기존 이름 그대로(무손실), 그 외는 체인 접미 뒤에 -a{n}.
+    #[test]
+    fn account_file_name_keeps_zero_and_suffixes_others() {
+        assert_eq!(account_file_name("history.json", 0), "history.json");
+        assert_eq!(
+            account_file_name("history-8453.json", 0),
+            "history-8453.json"
+        );
+        assert_eq!(account_file_name("history.json", 2), "history-a2.json");
+        assert_eq!(
+            account_file_name("history-8453.json", 2),
+            "history-8453-a2.json"
+        );
+    }
+
+    // 작업 안에서 고정한 계정이 파일보다 우선한다 (디스크를 안 본다).
+    #[tokio::test]
+    async fn pinned_account_overrides_file() {
+        let got = with_pinned_account(5, async { active_account_index() }).await;
+        assert_eq!(got, 5);
+        // 안쪽에서 다시 감싸면 안쪽 값.
+        let inner =
+            with_pinned_account(5, with_pinned_account(6, async { active_account_index() })).await;
+        assert_eq!(inner, 6);
+    }
+
+    // 라벨 정리: 공백·제어 문자 제거, 24자 상한.
+    #[test]
+    fn clean_label_trims_and_caps() {
+        assert_eq!(
+            clean_label(
+                "  AI 전용
+ "
+            ),
+            "AI 전용"
+        );
+        assert_eq!(clean_label(""), "");
+        let long = "가".repeat(40);
+        assert_eq!(clean_label(&long).chars().count(), LABEL_MAX_CHARS);
+    }
+
+    // v2→v3 업그레이드가 계정 목록·활성 계정을 잃지 않는다.
+    #[test]
+    fn upgrade_preserves_accounts() {
+        let phrase = "test test test test test test test test test test test junk";
+        let mut v2 = encrypt_with(phrase, "0xAddr", "pw", 2, KDF_M_V2, KDF_T_V2, KDF_P_V2).unwrap();
+        v2.accounts = vec![Account {
+            index: 1,
+            address: "0xOne".into(),
+            label: "둘째".into(),
+        }];
+        v2.active = 1;
+        let v3 = upgraded_wallet(&v2, phrase, "pw").unwrap();
+        assert_eq!(v3.accounts, v2.accounts);
+        assert_eq!(v3.active_account().address, "0xOne");
+    }
+
+    /// 🔴 **실제 파일 경로를 타는 계정 흐름 하네스** (개발 54). `HOME` 을 임시 폴더로 바꿔
+    /// 이 프로세스의 `~/.jigap` 을 격리한 뒤, 가져오기 → 계정 추가 → 전환 → 요청 계정 대조 →
+    /// 계정별 내역 파일 → 정산 교차 반영 → 대기 중 전환 차단을 실물로 돈다.
+    ///
+    /// `#[ignore]` 인 이유: HOME 을 바꾸는 건 프로세스 전역이라 다른 테스트와 같이 돌면 안 된다.
+    /// 반드시 혼자 돌린다:  `cargo test -- --ignored account_flow_in_temp_home --test-threads=1`
+    /// `KURA_HARNESS_HOME` 을 주면 그 폴더를 HOME 으로 써서(지우지 않음) CLI 하네스가 이어 쓴다.
+    #[tokio::test]
+    #[ignore = "HOME 을 바꾼다 — 혼자 돌릴 것 (--test-threads=1)"]
+    async fn account_flow_in_temp_home() {
+        let home = std::env::var("KURA_HARNESS_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::temp_dir().join(format!("kura-accounts-{}", std::process::id()))
+            });
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        assert_eq!(jigap_dir().unwrap(), home.join(".jigap"));
+
+        // ① 하드햇 니모닉 가져오기 → 계정 0 하나, 활성 0.
+        let phrase = "test test test test test test test test test test test junk";
+        import_wallet("pw".into(), phrase.into()).unwrap();
+        let st = get_wallet_status().unwrap();
+        assert_eq!(st.accounts.len(), 1);
+        assert_eq!(st.active, 0);
+        assert_eq!(
+            st.address.as_deref(),
+            Some("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
+        );
+
+        // ② 틀린 비번으로는 계정을 못 만든다.
+        assert!(add_account("wrong".into()).is_err());
+
+        // ③ 계정 추가 → 인덱스 1(하드햇 1번 주소), 곧 활성. 한 번 더 → 2.
+        let st = add_account("pw".into()).unwrap();
+        assert_eq!(st.active, 1);
+        assert_eq!(
+            st.address.as_deref(),
+            Some("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
+        );
+        let st = add_account("pw".into()).unwrap();
+        assert_eq!(st.active, 2);
+        assert_eq!(st.accounts.len(), 3);
+        assert_eq!(active_account_index(), 2);
+
+        // ④ 이름 바꾸기(공백 정리), 없는 계정은 거부.
+        let st = rename_account(1, "  AI 전용 \n".into()).unwrap();
+        assert_eq!(st.accounts[1].label, "AI 전용");
+        assert!(rename_account(9, "x".into()).is_err());
+
+        // ⑤ 전환: 없는 계정 거부, 0 으로 → 활성 주소가 원래 주소.
+        assert!(switch_account(7).is_err());
+        let st = switch_account(0).unwrap();
+        assert_eq!(st.active, 0);
+        assert_eq!(active_account().unwrap().index, 0);
+
+        // ⑥ 비번 잠금 해제는 활성 계정(0)의 키, 고정하면 그 계정의 키.
+        assert_eq!(
+            unlock_signer("pw").unwrap().address().to_string(),
+            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        );
+        let pinned = with_pinned_account(1, async {
+            unlock_signer("pw").unwrap().address().to_string()
+        })
+        .await;
+        assert_eq!(pinned, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+
+        // ⑦ 요청 계정 대조: 계정 1 로 각인된 요청은 활성 0 에서 거부, 1 로 바꾸면 통과.
+        //    옛 요청(from 빈 값)은 어디서나 통과. 주소가 맞아도 인덱스가 다르면 거부.
+        let mut req = crate::ipc::PaymentRequest {
+            id: "1".into(),
+            token: "USDC".into(),
+            to: "0x0".into(),
+            amount: "1".into(),
+            memo: String::new(),
+            created: crate::store::now_secs(),
+            kind: "transfer".into(),
+            resource: String::new(),
+            chain_id: 0,
+            account: 1,
+            from: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8".into(),
+            agent: None,
+        };
+        assert!(crate::ipc::ensure_request_account(&req).is_err());
+        switch_account(1).unwrap();
+        assert!(crate::ipc::ensure_request_account(&req).is_ok());
+        req.account = 2; // 주소는 1 인데 인덱스 2 → 거부
+        assert!(crate::ipc::ensure_request_account(&req).is_err());
+        req.account = 1;
+        req.from = String::new(); // 옛 요청
+        switch_account(0).unwrap();
+        assert!(crate::ipc::ensure_request_account(&req).is_ok());
+        assert_eq!(crate::ipc::request_account_index(&req), 0);
+
+        // ⑧ 내역은 계정별 파일: 고정한 계정 1 의 시도는 history-a1.json 에, 활성 0 의 것은 history.json 에.
+        //    (settings.json 이 없고 지갑이 있으니 체인은 Sepolia = 접미 없음.)
+        with_pinned_account(1, async {
+            crate::history::log_attempt("USDC", "0xto", "1", "signed", "0xnonce1");
+        })
+        .await;
+        crate::history::log_attempt("USDC", "0xto", "2", "sent", "0xhash0");
+        let dir = home.join(".jigap");
+        assert!(dir.join("history-a1.json").exists());
+        assert!(dir.join("history.json").exists());
+        assert_eq!(crate::history::get_history().len(), 1); // 활성 0 의 눈엔 자기 것 하나
+        let seen = with_pinned_account(1, async { crate::history::get_history().len() }).await;
+        assert_eq!(seen, 1);
+
+        // ⑨ 정산 교차 반영: 활성은 0 인데 정산은 계정 1 이 서명한 nonce → 1 의 파일이 갱신된다.
+        fs::write(
+            dir.join("x402_settlements.json"),
+            r#"[{"nonce":"0xnonce1","tx":"0xsettle","success":true}]"#,
+        )
+        .unwrap();
+        assert_eq!(crate::history::apply_x402_settlements(), 1);
+        let a1 = fs::read_to_string(dir.join("history-a1.json")).unwrap();
+        assert!(
+            a1.contains("\"settled\"") && a1.contains("0xsettle"),
+            "{a1}"
+        );
+        assert!(!dir.join("x402_settlements.json").exists());
+
+        // ⑩ 승인 대기 중엔 전환·추가를 막는다. 요청을 치우면 다시 된다.
+        req.from = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".into();
+        req.account = 0;
+        fs::write(
+            dir.join("payment_request.json"),
+            serde_json::to_string(&req).unwrap(),
+        )
+        .unwrap();
+        assert!(switch_account(1).is_err());
+        assert!(add_account("pw".into()).is_err());
+        fs::remove_file(dir.join("payment_request.json")).unwrap();
+        assert!(switch_account(1).is_ok());
+
+        // ⑪ 파일 실물: accounts 3개·active 1·주소 평문, 니모닉은 여전히 암호문뿐.
+        let raw = fs::read_to_string(dir.join("wallet.enc")).unwrap();
+        assert!(raw.contains("\"active\": 1"), "{raw}");
+        assert!(raw.contains("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"));
+        assert!(!raw.contains("junk"));
+
+        if std::env::var("KURA_HARNESS_HOME").is_err() {
+            let _ = fs::remove_dir_all(&home);
+        }
     }
 
     // 같은 입력이라도 매번 솔트/논스가 달라 암호문이 달라야 한다.

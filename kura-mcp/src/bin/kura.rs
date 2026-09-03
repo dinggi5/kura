@@ -220,6 +220,24 @@ async fn cmd_status(cli: &Cli) -> Result<(), String> {
     println!("{}", tf!("지갑      {state}", "Wallet    {state}"));
     if let Some(addr) = &s.address {
         println!("{}", tf!("주소      {addr}", "Address   {addr}"));
+        // 계정이 둘 이상일 때만 어느 계정인지 말한다 (개발 54) — 하나뿐이면 말할 게 없다.
+        if s.accounts.len() > 1 {
+            let label = s
+                .accounts
+                .iter()
+                .find(|a| a.index == s.account)
+                .map(|a| a.label.clone())
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| tf!("계정 {}", "Account {}", s.account + 1));
+            println!(
+                "{}",
+                tf!(
+                    "계정      {label} ({}개 중 활성)",
+                    "Account   {label} (active of {})",
+                    s.accounts.len()
+                )
+            );
+        }
         println!(
             "{}",
             tf!(

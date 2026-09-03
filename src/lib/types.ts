@@ -2,10 +2,19 @@
 
 export type WalletInfo = { address: string };
 
+/** 계정 하나 (개발 54) — 같은 시드의 HD 파생 인덱스(m/44'/60'/0'/0/n) + 주소 + 사람이 붙인 이름.
+ *  label 이 빈 값이면 화면이 「계정 N」(N = index+1)으로 부른다. */
+export type Account = { index: number; address: string; label: string };
+
 export type WalletStatus = {
   state: "encrypted" | "legacy" | "none";
+  /** **활성 계정**의 주소. 잔액·받기·보내기·내역이 이 주소 기준이다. */
   address: string | null;
   backed_up: boolean;
+  /** 모든 계정(인덱스 순). encrypted 가 아니면 빈 배열. */
+  accounts: Account[];
+  /** 활성 계정의 파생 인덱스. */
+  active: number;
 };
 
 /** 잔액. `eth` = 네이티브(가스) 토큰 — **가스가 곧 USDC 인 체인(Arc)에선 백엔드가 아예 안 보낸다**
@@ -117,6 +126,10 @@ export type PaymentRequest = {
   resource?: string;
   /** 요청 생성 시점의 체인 ID. 승인 시 현재 활성 체인과 다르면 백엔드가 거부. */
   chain_id?: number;
+  /** 요청 생성 시점의 활성 계정 (개발 54) — 파생 인덱스 + 주소. 승인 시 지금 계정과 다르면
+   *  백엔드가 거부하고, 같으면 승인 전체를 그 계정으로 고정한다. from 이 비면 옛 요청(검사 없음). */
+  account?: number;
+  from?: string;
   /** ERC-8004 대조 결과 — AI 가 에이전트 번호를 함께 준 x402 결제에만 붙는다.
    *  없으면 승인 창은 예전 그대로다(말할 사실이 있을 때만 한 줄이 붙는다). */
   agent?: AgentTrust;

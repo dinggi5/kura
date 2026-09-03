@@ -25,7 +25,9 @@ use crate::settings::{read_settings, Settings};
 use crate::store::now_secs;
 use crate::transfer::do_send_usdc;
 use crate::trusted::is_trusted;
-use crate::wallet::{decrypt_wallet, read_encrypted, signer_from_phrase};
+use crate::wallet::{
+    active_account_index, decrypt_wallet, read_encrypted, signer_for_account, with_pinned_account,
+};
 use crate::x402::do_sign_x402;
 
 /// 자율 승인 불가(세션 잠김·한도 초과·자율 꺼짐) 신호. 프론트가 이걸 보면 사람 승인 모달을 띄운다.
@@ -58,8 +60,9 @@ fn within_auto_limit(token: &str, amount: U256, auto_limit: U256) -> bool {
     token == "USDC" && !auto_limit.is_zero() && amount <= auto_limit
 }
 
-/// 세션에 보관된 키로 서명자를 만든다. 유휴 타임아웃이 지났으면 자동 잠그고 None.
-/// 성공 시 마지막 활동 시각을 갱신한다(MutexGuard 는 .await 전에 반드시 해제).
+/// 세션에 보관된 키로 **활성 계정**(작업이 고정했으면 그 계정)의 서명자를 만든다 (개발 54).
+/// 세션은 지갑 하나에 하나다 — 비번 한 번이면 어느 계정이든 자율 결제가 된다. 유휴 타임아웃이
+/// 지났으면 자동 잠그고 None. 성공 시 마지막 활동 시각을 갱신한다(MutexGuard 는 .await 전에 반드시 해제).
 fn session_signer(state: &SessionKey, idle_secs: u64) -> Option<PrivateKeySigner> {
     let phrase = {
         let mut g = state.0.lock().ok()?;
@@ -75,7 +78,7 @@ fn session_signer(state: &SessionKey, idle_secs: u64) -> Option<PrivateKeySigner
         inner.last_active = now_secs();
         inner.mnemonic.clone()
     };
-    signer_from_phrase(&phrase).ok()
+    signer_for_account(&phrase, active_account_index()).ok()
 }
 
 /// 비번으로 세션을 잠금 해제한다 — 복호화한 니모닉을 메모리에만 보관(디스크 X).
@@ -172,6 +175,7 @@ pub(crate) async fn auto_approve_payment(
         .into());
     }
     crate::ipc::ensure_request_chain(&req)?; // 요청 시점 체인 ≠ 현재 체인이면 거부(자율 경로도 동일)
+    crate::ipc::ensure_request_account(&req)?; // 요청 시점 계정 ≠ 현재 계정이면 거부 (개발 54)
 
     // 🔴 **여기서부터 체인을 못박는다** (코덱스 개발51 2차 P1). 위 검사는 *그 순간*만 본다 —
     // 그 뒤로 잔액 조회·서명·전송에 `.await` 가 여러 번 있고, 그동안 사용자가 네트워크를 바꾸면
@@ -184,7 +188,14 @@ pub(crate) async fn auto_approve_payment(
     } else {
         active_chain().chain_id
     };
-    crate::chain::with_pinned_chain(pinned, auto_approve_pinned(req, session)).await
+    // 계정도 같은 이유로 못박는다 (개발 54) — 자율 경로는 창이 없어 사용자가 계정을 바꾸는 사이에
+    // 조용히 지나간다. 요청의 계정으로 묶으면 세션 키에서 파생하는 서명자와 내역 파일이 그 계정이다.
+    let account = crate::ipc::request_account_index(&req);
+    crate::chain::with_pinned_chain(
+        pinned,
+        with_pinned_account(account, auto_approve_pinned(req, session)),
+    )
+    .await
 }
 
 /// 체인이 고정된 채로 도는 자율 승인 본체 — 한도·잔액·서명·전송·장부가 모두 같은 체인을 본다.

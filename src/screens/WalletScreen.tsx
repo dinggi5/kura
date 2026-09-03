@@ -14,6 +14,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type {
+  Account,
   AgentStatus,
   Balances,
   HistoryEntry,
@@ -21,12 +22,14 @@ import type {
   SessionStatus,
   Settings,
   SpendView,
+  WalletStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/cn";
 import { chainFromId, ChainProvider } from "@/lib/chain";
 import { useCopy } from "@/lib/useCopy";
 import { clearWelcomePending, isWelcomePending } from "@/lib/welcome";
 import { shell, ActionButton, AgentBadge, HeaderIconButton } from "@/components/ui";
+import { AccountSheet } from "@/components/AccountSheet";
 import { BalanceCard } from "@/components/BalanceCard";
 import { ReceiveCard } from "@/components/ReceiveCard";
 import { SendCard } from "@/components/SendCard";
@@ -47,11 +50,22 @@ type Mode = "balance" | "receive" | "send";
 export function WalletScreen({
   address,
   initialBackedUp,
+  accounts,
+  active,
+  onAccountsChange,
 }: {
+  /** 활성 계정의 주소 — 계정을 바꾸면 이 값이 바뀌고 잔액·내역이 따라온다 (개발 54). */
   address: string;
   initialBackedUp: boolean;
+  accounts: Account[];
+  active: number;
+  onAccountsChange: (status: WalletStatus) => void;
 }) {
   const [mode, setMode] = useState<Mode>("balance");
+  const [showAccounts, setShowAccounts] = useState(false);
+  // 활성 계정 객체 — 목록에 없으면(있을 수 없지만) 주소만으로 만든다.
+  const account: Account =
+    accounts.find((a) => a.index === active) ?? { index: active, address, label: "" };
   const [copied, copy] = useCopy();
   const [balances, setBalances] = useState<Balances | null>(null);
   const [balanceError, setBalanceError] = useState<string | null>(null);
@@ -164,6 +178,15 @@ export function WalletScreen({
     invoke<boolean>("is_locked").then(setLocked).catch(() => {});
   }, [refreshBalances, loadLimits]);
 
+  // 계정을 바꾸면 옛 계정의 잔액을 새 이름 아래 1초라도 보여주지 않는다 (개발 54) —
+  // 새 조회가 올 때까지 「—」. 첫 마운트엔 어차피 null 이라 무해하다. 받기/보내기 카드도
+  // 옛 계정 기준이었으니 잔액 카드로 돌아온다.
+  useEffect(() => {
+    setBalances(null);
+    setBalanceError(null);
+    setMode("balance");
+  }, [address]);
+
   // 시작 시 업데이트 자동 확인 (개발 31). 설정이 로드된 뒤 **실행당 한 번만** 돈다 —
   // loadLimits 가 설정 화면을 닫을 때마다 settings 를 새로 받아오므로 ref 로 못을 박는다.
   // silent: 네트워크가 없는 흔한 경우에 지갑 화면이 에러로 더러워지지 않게.
@@ -178,6 +201,8 @@ export function WalletScreen({
 
   // 체인이 바뀌면(설정에서 테스트넷↔메인넷 전환) 잔액·내역은 체인별로 다르므로 다시 불러온다.
   // (사용액 spend 는 loadLimits 가 설정 저장 후 onClose 에서 갱신한다.)
+  // 계정이 바뀌어도 같다 (개발 54) — 내역은 계정별 파일이다. refreshBalances 가 주소를 물고
+  // 있어 주소가 바뀌면 이 효과도 다시 돈다.
   const chainId = settings?.chain_id;
   useEffect(() => {
     if (chainId === undefined) return;
@@ -351,6 +376,7 @@ export function WalletScreen({
             request={pending}
             locked={locked}
             balances={balances}
+            accounts={accounts}
             onResolved={() => {
               setPending(null);
               void refreshBalances();
@@ -502,6 +528,8 @@ export function WalletScreen({
             <BalanceCard
               key="balance"
               address={address}
+              account={account}
+              onAccounts={() => setShowAccounts(true)}
               copied={copied}
               onCopy={() => copy(address)}
               balances={balances}
@@ -554,6 +582,19 @@ export function WalletScreen({
             autoLimit={session.auto_limit}
             onUnlock={unlockSession}
             onClose={() => setShowUnlock(false)}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* 계정 시트 (개발 54) — 전환·추가·이름. 결제 모달(z-50)과 같은 층이지만 승인 대기 중엔
+          백엔드가 전환·추가를 거절하므로 둘이 겹쳐도 돈이 엉키지 않는다. */}
+      <AnimatePresence>
+        {showAccounts && (
+          <AccountSheet
+            accounts={accounts}
+            active={active}
+            onChange={onAccountsChange}
+            onClose={() => setShowAccounts(false)}
           />
         )}
       </AnimatePresence>

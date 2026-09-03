@@ -5,7 +5,7 @@
 //   chain     체인 상수(Base Sepolia RPC·USDC·chainId) + 온체인 타입(sol!)
 //   connect   AI 연결(개발 35) — 동봉 확장 열기·claude CLI 등록 대행·설치 감지
 //   store     ~/.jigap 경로, 원자적 파일 쓰기, 시간 헬퍼
-//   wallet    니모닉 생성·주소 파생·비번 암호화(Argon2id + AES-256-GCM)
+//   wallet    니모닉 생성·주소 파생·비번 암호화(Argon2id + AES-256-GCM) + 계정 여러 개(개발 54)
 //   settings  사용자 설정(한도·자율·RPC·잠금 동작)
 //   limits    단일/일일 한도 검사 + 오늘 사용액 장부
 //   lock      긴급 잠금 (비상 스위치)
@@ -135,6 +135,9 @@ pub fn run() {
             wallet::import_wallet,
             wallet::reveal_mnemonic,
             wallet::mark_backed_up,
+            wallet::add_account,
+            wallet::switch_account,
+            wallet::rename_account,
             transfer::get_balances,
             transfer::send_eth,
             transfer::send_usdc,

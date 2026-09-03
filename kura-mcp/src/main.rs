@@ -104,7 +104,10 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "Returns the wallet's state and address. state is encrypted (normal), legacy, or none. No password needed — read only."
+        description = "Returns the wallet's state and address. state is encrypted (normal), legacy, or none. \
+        address is the ACTIVE account's address; accounts lists every account in the wallet (index, address, \
+        label) and account is the active index. Balances, history, and payment requests all use the active \
+        account, and only the user can switch accounts, in the wallet app. No password needed — read only."
     )]
     async fn get_wallet_status(&self) -> Result<CallToolResult, McpError> {
         let status = wallet::wallet_status().map_err(|e| McpError::internal_error(e, None))?;
@@ -112,7 +115,7 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "Reads the wallet's USDC (for payments) and gas-token balances on the active network (Base mainnet, Base Sepolia, or Arc testnet, per the user's setting). The `eth` field is the gas balance and is ABSENT on chains where gas is paid in USDC itself (Arc) — there the USDC balance already covers gas, so never add the two together. Errors if there is no wallet."
+        description = "Reads the active account's USDC (for payments) and gas-token balances on the active network (Base mainnet, Base Sepolia, or Arc testnet, per the user's setting). The `eth` field is the gas balance and is ABSENT on chains where gas is paid in USDC itself (Arc) — there the USDC balance already covers gas, so never add the two together. Errors if there is no wallet."
     )]
     async fn get_balances(&self) -> Result<CallToolResult, McpError> {
         let status = wallet::wallet_status().map_err(|e| McpError::internal_error(e, None))?;
@@ -126,7 +129,7 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "Returns recent transaction attempts, newest first. status is one of sent, blocked, failed, \
+        description = "Returns the active account's recent transaction attempts, newest first. status is one of sent, blocked, failed, \
         signed (x402 signed, awaiting settlement), settled (x402 settled, settle_tx is the settlement tx), \
         or settle_failed. Use limit to cap how many come back (default 20)."
     )]
@@ -300,7 +303,9 @@ impl ServerHandler for WalletServer {
             instructions: Some(
                 "Kura — a local Ethereum wallet for AI agents (on Base mainnet, Base Sepolia, or Arc \
                  testnet, per the user's setting; check get_balances/get_wallet_status for the current \
-                 balance. On mainnet these are real funds). Balance, address, and history are read-only. To pay, call \
+                 balance. On mainnet these are real funds). The wallet can hold several accounts from one seed; \
+                 everything here is about the active one, and only the user can switch accounts in the app. \
+                 Balance, address, and history are read-only. To pay, call \
                  request_payment: the wallet app opens an approval window — by default a human must approve \
                  with their password, and only when the user has turned autopay on is it approved \
                  automatically, within that limit. Never ask for or accept a password in chat or over \

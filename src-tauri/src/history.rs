@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::chain::chain_file;
 use crate::settings::redact_urls;
 use crate::store::{jigap_dir, now_secs, write_json};
+use crate::wallet::{account_file, account_file_name};
 
 /// 송금 시도 1건의 기록. 성공/차단/실패를 모두 남긴다 (감사 로그).
 #[derive(Serialize, Deserialize, Clone)]
@@ -36,16 +37,28 @@ pub(crate) struct HistoryEntry {
 /// 거래 내역 최대 보관 개수 (오래된 건 자동으로 밀려난다).
 const HISTORY_CAP: usize = 200;
 
+/// 활성 계정(작업이 고정했으면 그 계정)의 내역 파일 (개발 54: 체인별 + 계정별).
+/// 내역은 주소의 것이다 — 계정 2 의 화면에 계정 1 의 송금이 보이면 안 된다.
 fn history_path() -> Result<PathBuf, String> {
-    Ok(jigap_dir()?.join(chain_file("history")))
+    Ok(jigap_dir()?.join(account_file("history")))
+}
+
+/// 특정 계정의 내역 파일 — x402 정산 반영이 모든 계정을 훑을 때 쓴다.
+fn history_path_for(index: u32) -> Result<PathBuf, String> {
+    Ok(jigap_dir()?.join(account_file_name(&chain_file("history"), index)))
+}
+
+fn read_history_at(path: &PathBuf) -> Vec<HistoryEntry> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 /// 저장된 거래 내역을 읽는다 (최신순으로 저장돼 있다).
 fn read_history() -> Vec<HistoryEntry> {
     history_path()
-        .ok()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .map(|p| read_history_at(&p))
         .unwrap_or_default()
 }
 
@@ -122,6 +135,11 @@ fn apply_settlement(list: &mut [HistoryEntry], s: &Settlement) -> bool {
 
 /// MCP가 남긴 x402 정산 결과를 읽어 내역에 반영한다 (GUI 1초 폴링). 반영 건수를 돌려준다.
 /// 처리 후 정산 파일을 비운다(중복 적용 방지). 매칭 안 되는 건 그냥 버린다.
+///
+/// 정산 파일은 체인별 하나(계정 공용)인데 내역은 계정별이다 (개발 54). 서명한 계정과 정산이
+/// 도착했을 때의 활성 계정이 다를 수 있으므로(서명 → 사용자가 계정 전환 → 페이실리테이터 정산),
+/// 활성 계정부터 보고 안 맞으면 **나머지 계정의 내역까지 훑는다** — 안 그러면 그 「signed」 항목이
+/// 영영 정산 대기로 남는다.
 #[tauri::command]
 pub(crate) fn apply_x402_settlements() -> u32 {
     let path = match settlements_path() {
@@ -132,15 +150,37 @@ pub(crate) fn apply_x402_settlements() -> u32 {
         return 0; // 파일 없음 = 처리할 정산 없음 (대부분의 폴링)
     };
     let settlements: Vec<Settlement> = serde_json::from_str(&raw).unwrap_or_default();
-    let mut list = read_history();
-    let mut applied = 0u32;
-    for s in &settlements {
-        if apply_settlement(&mut list, s) {
-            applied += 1;
-        }
+    // 활성 계정 먼저, 그다음 나머지 — 대부분은 첫 파일에서 끝난다.
+    let active = crate::wallet::active_account_index();
+    let mut indices: Vec<u32> = vec![active];
+    if let Ok(w) = crate::wallet::read_encrypted() {
+        indices.extend(
+            w.accounts()
+                .iter()
+                .map(|a| a.index)
+                .filter(|i| *i != active),
+        );
     }
-    if applied > 0 {
-        let _ = history_path().and_then(|p| write_json(p, &list));
+    let mut pending: Vec<&Settlement> = settlements.iter().collect();
+    let mut applied = 0u32;
+    for index in indices {
+        if pending.is_empty() {
+            break;
+        }
+        let Ok(hp) = history_path_for(index) else {
+            continue;
+        };
+        let mut list = read_history_at(&hp);
+        if list.is_empty() {
+            continue;
+        }
+        let before = pending.len();
+        pending.retain(|s| !apply_settlement(&mut list, s));
+        let hit = (before - pending.len()) as u32;
+        if hit > 0 {
+            applied += hit;
+            let _ = write_json(hp, &list);
+        }
     }
     let _ = fs::remove_file(&path); // 읽었으면 비운다(매칭 실패분 포함)
     applied

@@ -67,14 +67,28 @@ function App() {
       <SetupScreen
         status={status!}
         onDone={(address, backedUp) =>
-          setStatus({ state: "encrypted", address, backed_up: backedUp })
+          // 방금 만든(가져온) 지갑은 계정 0 하나다 (개발 54).
+          setStatus({
+            state: "encrypted",
+            address,
+            backed_up: backedUp,
+            accounts: [{ index: 0, address, label: "" }],
+            active: 0,
+          })
         }
       />
     );
   }
 
   return (
-    <WalletScreen address={status!.address!} initialBackedUp={status!.backed_up} />
+    <WalletScreen
+      address={status!.address!}
+      initialBackedUp={status!.backed_up}
+      accounts={status!.accounts}
+      active={status!.active}
+      // 계정 추가·전환·이름 변경은 백엔드가 새 상태를 통째로 돌려준다 — 그걸 그대로 받는다.
+      onAccountsChange={setStatus}
+    />
   );
 }
 

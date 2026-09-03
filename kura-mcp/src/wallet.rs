@@ -43,8 +43,20 @@ fn legacy_path() -> Result<PathBuf, String> {
     Ok(jigap_dir()?.join("wallet.json"))
 }
 
+/// 활성 계정의 내역 파일 (개발 54: 체인별 + 계정별). src-tauri 의 account_file 과 같은 규칙.
 fn history_path() -> Result<PathBuf, String> {
-    Ok(jigap_dir()?.join(chain_file("history")))
+    let active = active_account()?;
+    Ok(jigap_dir()?.join(account_file_name(&chain_file("history"), active.index)))
+}
+
+/// 계정별 데이터 파일 이름 (개발 54) — 계정 0 은 체인 이름 그대로(무손실), 그 외는 `-a{n}` 접미.
+/// src-tauri/src/wallet.rs 의 account_file_name 과 **같은 규칙**을 유지한다(평행 사본 정책) —
+/// 어긋나면 GUI 가 적은 내역을 AI 가 못 본다.
+pub fn account_file_name(chain_base: &str, index: u32) -> String {
+    match index {
+        0 => chain_base.to_string(),
+        n => format!("{}-a{n}.json", chain_base.trim_end_matches(".json")),
+    }
 }
 
 fn settings_path() -> Result<PathBuf, String> {
@@ -138,6 +150,15 @@ fn scheme_start(s: &str, min: usize, sep: usize) -> Option<usize> {
     }
 }
 
+/// 계정 하나 (개발 54) — 같은 시드의 HD 파생 인덱스 + 주소(공개정보) + 사람이 붙인 라벨.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Account {
+    pub index: u32,
+    pub address: String,
+    #[serde(default)]
+    pub label: String,
+}
+
 /// 지갑 상태 + 주소. 프론트/에이전트가 어떤 상태인지 알 수 있게.
 /// - "encrypted": 정상 (wallet.enc 존재)
 /// - "legacy":    평문 wallet.json 만 존재 (앱에서 비번 설정 필요)
@@ -145,16 +166,83 @@ fn scheme_start(s: &str, min: usize, sep: usize) -> Option<usize> {
 #[derive(Serialize)]
 pub struct WalletStatus {
     pub state: String,
+    /// **활성 계정**의 주소 (개발 54). 잔액·내역·결제 요청이 이 계정 기준이다.
     pub address: Option<String>,
     pub backed_up: bool,
+    /// 활성 계정의 파생 인덱스.
+    pub account: u32,
+    /// 모든 계정(인덱스 순). encrypted 가 아니면 비어 있다. 계정 전환은 앱에서만 한다.
+    pub accounts: Vec<Account>,
 }
 
-/// wallet.enc 에서 공개 정보(주소·백업여부)만 읽는다. 니모닉(ciphertext)은 무시.
+/// wallet.enc 에서 공개 정보(주소·백업여부·계정 목록)만 읽는다. 니모닉(ciphertext)은 무시.
 #[derive(Deserialize)]
 struct EncMeta {
     address: String,
     #[serde(default)]
     backed_up: bool,
+    /// 계정 목록 (개발 54). 옛 파일엔 없다 → 계정 0(= address) 하나.
+    #[serde(default)]
+    accounts: Vec<Account>,
+    #[serde(default)]
+    active: u32,
+}
+
+impl EncMeta {
+    /// 모든 계정을 인덱스 순으로 — 계정 0 은 항상 있고 그 주소는 `address` 필드(정본).
+    /// src-tauri/src/wallet.rs 의 EncryptedWallet::accounts 와 같은 정규화.
+    fn accounts(&self) -> Vec<Account> {
+        let mut list: Vec<Account> = self
+            .accounts
+            .iter()
+            .filter(|a| a.index != 0)
+            .cloned()
+            .collect();
+        let zero_label = self
+            .accounts
+            .iter()
+            .find(|a| a.index == 0)
+            .map(|a| a.label.clone())
+            .unwrap_or_default();
+        list.push(Account {
+            index: 0,
+            address: self.address.clone(),
+            label: zero_label,
+        });
+        list.sort_by_key(|a| a.index);
+        list.dedup_by_key(|a| a.index);
+        list
+    }
+
+    /// 활성 계정. `active` 가 목록에 없으면 계정 0 (GUI 와 같은 폴백).
+    fn active_account(&self) -> Account {
+        let list = self.accounts();
+        list.iter()
+            .find(|a| a.index == self.active)
+            .cloned()
+            .unwrap_or_else(|| list[0].clone())
+    }
+}
+
+fn read_enc_meta() -> Result<EncMeta, String> {
+    let data = fs::read_to_string(enc_path()?).map_err(|e| {
+        tf!(
+            "지갑 파일 읽기 실패: {e}",
+            "Couldn't read the wallet file: {e}"
+        )
+    })?;
+    serde_json::from_str(&data).map_err(|e| {
+        tf!(
+            "지갑 파일 파싱 실패: {e}",
+            "Couldn't parse the wallet file: {e}"
+        )
+    })
+}
+
+/// 지금 활성인 계정 (개발 54) — 결제 요청에 각인하고(GUI 가 승인 시 대조) 내역 파일을 고를 때 쓴다.
+/// 암호화 지갑이 없으면 오류(옛 평문 지갑은 계정이 하나라 결제 요청 자체가 앱에서 막힌다).
+pub fn active_account() -> Result<Account, String> {
+    Ok(read_enc_meta()?.active_account())
 }
 
 #[derive(Deserialize)]
@@ -165,22 +253,14 @@ struct LegacyMeta {
 /// 지갑 파일 상태를 알려준다 (비번 불필요).
 pub fn wallet_status() -> Result<WalletStatus, String> {
     if enc_path()?.exists() {
-        let data = fs::read_to_string(enc_path()?).map_err(|e| {
-            tf!(
-                "지갑 파일 읽기 실패: {e}",
-                "Couldn't read the wallet file: {e}"
-            )
-        })?;
-        let m: EncMeta = serde_json::from_str(&data).map_err(|e| {
-            tf!(
-                "지갑 파일 파싱 실패: {e}",
-                "Couldn't parse the wallet file: {e}"
-            )
-        })?;
+        let m = read_enc_meta()?;
+        let active = m.active_account();
         return Ok(WalletStatus {
             state: "encrypted".into(),
-            address: Some(m.address),
+            address: Some(active.address),
             backed_up: m.backed_up,
+            account: active.index,
+            accounts: m.accounts(),
         });
     }
     if legacy_path()?.exists() {
@@ -200,12 +280,16 @@ pub fn wallet_status() -> Result<WalletStatus, String> {
             state: "legacy".into(),
             address: Some(m.address),
             backed_up: false,
+            account: 0,
+            accounts: Vec::new(),
         });
     }
     Ok(WalletStatus {
         state: "none".into(),
         address: None,
         backed_up: false,
+        account: 0,
+        accounts: Vec::new(),
     })
 }
 
@@ -339,6 +423,43 @@ mod tests {
         assert_eq!(m.address, "0x8b7ba5077d261739f5FeBB31B10167671e590161");
         assert!(m.backed_up);
         // EncMeta 구조체엔 ciphertext/salt/nonce 필드가 없다 → 컴파일 타임에 비밀 차단.
+    }
+
+    /// 계정 목록 (개발 54): 옛 파일은 계정 0 하나, 새 파일은 인덱스 순 + address 필드가 0 의 정본,
+    /// 없는 active 는 0 으로. GUI(src-tauri) 와 같은 정규화여야 두 프로세스가 같은 계정을 본다.
+    #[test]
+    fn enc_meta_accounts_normalize_like_gui() {
+        let legacy: EncMeta = serde_json::from_str(
+            r#"{"version":3,"address":"0xAbc","salt":"x","nonce":"y","ciphertext":"z"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.accounts().len(), 1);
+        assert_eq!(legacy.active_account().address, "0xAbc");
+
+        let m: EncMeta = serde_json::from_str(
+            r#"{"version":3,"address":"0xZero","salt":"x","nonce":"y","ciphertext":"z",
+                "accounts":[{"index":2,"address":"0xTwo","label":"AI"},{"index":0,"address":"0xStale"}],
+                "active":2}"#,
+        )
+        .unwrap();
+        let list = m.accounts();
+        assert_eq!(list.iter().map(|a| a.index).collect::<Vec<_>>(), vec![0, 2]);
+        assert_eq!(list[0].address, "0xZero");
+        assert_eq!(m.active_account(), list[1]);
+        let mut gone = m;
+        gone.active = 9;
+        assert_eq!(gone.active_account().index, 0);
+    }
+
+    /// 계정별 내역 파일 이름 — src-tauri 와 같은 규칙(0 은 접미 없음).
+    #[test]
+    fn account_file_name_matches_gui_rule() {
+        assert_eq!(account_file_name("history.json", 0), "history.json");
+        assert_eq!(
+            account_file_name("history-8453.json", 3),
+            "history-8453-a3.json"
+        );
+        assert_eq!(account_file_name("history.json", 1), "history-a1.json");
     }
 
     /// 옛 파일에 backed_up 필드가 없어도 기본값 false 로 로드된다.

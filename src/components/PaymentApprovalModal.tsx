@@ -14,11 +14,12 @@ import {
   Lock,
   ShieldAlert,
   ShieldCheck,
+  Wallet,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChain } from "@/lib/chain";
-import { fmtAmount, fmtCountdown, secsLeft, shortenAddress } from "@/lib/format";
-import type { AgentTrust, Balances, PaymentRequest } from "@/lib/types";
+import { accountName, fmtAmount, fmtCountdown, secsLeft, shortenAddress } from "@/lib/format";
+import type { Account, AgentTrust, Balances, PaymentRequest } from "@/lib/types";
 import { modalCard, modalOverlay, primaryBtn, secondaryBtn, PwInput } from "@/components/ui";
 import { t } from "@/lib/i18n";
 
@@ -40,15 +41,24 @@ export function PaymentApprovalModal({
   request,
   locked,
   balances,
+  accounts,
   onResolved,
 }: {
   request: PaymentRequest;
   locked: boolean;
   // 메인 화면이 이미 폴링 중인 잔액 — 사전 검사용(없으면 검사 생략, 백엔드가 최종 방어).
   balances: Balances | null;
+  /** 지갑의 계정 목록 (개발 54) — 요청이 각인한 `from` 을 이름으로 바꿔 보여준다. */
+  accounts: Account[];
   onResolved: () => void;
 }) {
   const chain = useChain();
+  // 어느 계정에서 나가는 결제인지 (개발 54). 요청이 각인한 주소가 지갑 계정 중 하나면 그 이름,
+  // 아니면(다른 지갑·손상) 주소만 — 백엔드가 승인 시 거부하니 여기선 사실만 보여준다.
+  const fromAccount = request.from
+    ? accounts.find((a) => a.address.toLowerCase() === request.from!.toLowerCase()) ?? null
+    : null;
+  const multiAccount = accounts.length > 1;
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -167,6 +177,16 @@ export function PaymentApprovalModal({
           {chain.name}
           {!chain.testnet && t(" · 실제 자금", " · real funds")}
         </div>
+        {/* 어느 계정에서 나가는지 (개발 54) — 계정이 둘 이상일 때만 말한다(하나면 말할 게 없다).
+            각인된 주소가 이 지갑 계정이 아니면 주소를 그대로 보인다 — 승인은 어차피 백엔드가 막는다. */}
+        {request.from && (multiAccount || !fromAccount) && (
+          <p className="mt-1 flex items-center gap-1 text-[11px] text-[var(--color-ink-300)]">
+            <Wallet size={11} />
+            {fromAccount
+              ? t(`${accountName(fromAccount)}에서 나가요`, `From ${accountName(fromAccount)}`)
+              : t(`알 수 없는 계정 ${shortenAddress(request.from)}`, `Unknown account ${shortenAddress(request.from)}`)}
+          </p>
+        )}
 
         {/* 무엇에 대한 결제인지 */}
         {request.memo ? (
