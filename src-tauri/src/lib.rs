@@ -31,6 +31,10 @@ mod ipc;
 mod limits;
 mod lock;
 mod notify;
+/// ~/.jigap 파일 해석 규칙의 정본 — MCP(kura-mcp)와 **같은 소스 파일**을 컴파일한다(개발 56).
+/// 크레이트가 아니라 `#[path]` 모듈이라 Cargo·Tauri 빌드에 새 의존성은 없다. 조건은 파일 머리.
+#[path = "../../shared/policy.rs"]
+mod policy;
 mod session;
 mod settings;
 mod store;

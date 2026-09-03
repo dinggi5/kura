@@ -67,15 +67,9 @@ fn history_account_index(
     }
 }
 
-/// 계정별 데이터 파일 이름 (개발 54) — 계정 0 은 체인 이름 그대로(무손실), 그 외는 `-a{n}` 접미.
-/// src-tauri/src/wallet.rs 의 account_file_name 과 **같은 규칙**을 유지한다(평행 사본 정책) —
-/// 어긋나면 GUI 가 적은 내역을 AI 가 못 본다.
-pub fn account_file_name(chain_base: &str, index: u32) -> String {
-    match index {
-        0 => chain_base.to_string(),
-        n => format!("{}-a{n}.json", chain_base.trim_end_matches(".json")),
-    }
-}
+/// 계정별 데이터 파일 이름 (개발 54) — GUI 와 같은 함수(shared/policy.rs). 어긋나면 GUI 가 적은
+/// 내역을 AI 가 못 본다.
+pub use crate::policy::account_file_name;
 
 fn settings_path() -> Result<PathBuf, String> {
     Ok(jigap_dir()?.join("settings.json"))
@@ -169,13 +163,8 @@ fn scheme_start(s: &str, min: usize, sep: usize) -> Option<usize> {
 }
 
 /// 계정 하나 (개발 54) — 같은 시드의 HD 파생 인덱스 + 주소(공개정보) + 사람이 붙인 라벨.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct Account {
-    pub index: u32,
-    pub address: String,
-    #[serde(default)]
-    pub label: String,
-}
+/// GUI 와 같은 타입(shared/policy.rs) — wallet.enc 의 항목이자 MCP 상태의 항목.
+pub use crate::policy::Account;
 
 /// 지갑 상태 + 주소. 프론트/에이전트가 어떤 상태인지 알 수 있게.
 /// - "encrypted": 정상 (wallet.enc 존재)
@@ -208,37 +197,14 @@ struct EncMeta {
 
 impl EncMeta {
     /// 모든 계정을 인덱스 순으로 — 계정 0 은 항상 있고 그 주소는 `address` 필드(정본).
-    /// src-tauri/src/wallet.rs 의 EncryptedWallet::accounts 와 같은 정규화.
+    /// 정규화는 GUI(EncryptedWallet::accounts)와 **같은 함수**(shared/policy.rs).
     fn accounts(&self) -> Vec<Account> {
-        let mut list: Vec<Account> = self
-            .accounts
-            .iter()
-            .filter(|a| a.index != 0)
-            .cloned()
-            .collect();
-        let zero_label = self
-            .accounts
-            .iter()
-            .find(|a| a.index == 0)
-            .map(|a| a.label.clone())
-            .unwrap_or_default();
-        list.push(Account {
-            index: 0,
-            address: self.address.clone(),
-            label: zero_label,
-        });
-        list.sort_by_key(|a| a.index);
-        list.dedup_by_key(|a| a.index);
-        list
+        crate::policy::normalize_accounts(&self.address, &self.accounts)
     }
 
-    /// 활성 계정. `active` 가 목록에 없으면 계정 0 (GUI 와 같은 폴백).
+    /// 활성 계정. `active` 가 목록에 없으면 계정 0 (GUI 와 같은 함수).
     fn active_account(&self) -> Account {
-        let list = self.accounts();
-        list.iter()
-            .find(|a| a.index == self.active)
-            .cloned()
-            .unwrap_or_else(|| list[0].clone())
+        crate::policy::pick_active(&self.accounts(), self.active)
     }
 }
 
@@ -444,7 +410,8 @@ mod tests {
     }
 
     /// 계정 목록 (개발 54): 옛 파일은 계정 0 하나, 새 파일은 인덱스 순 + address 필드가 0 의 정본,
-    /// 없는 active 는 0 으로. GUI(src-tauri) 와 같은 정규화여야 두 프로세스가 같은 계정을 본다.
+    /// 없는 active 는 0 으로. 규칙 자체는 policy::tests 가 보고, 여기는 EncMeta 역직렬화가 그 함수에
+    /// 제대로 물리는지(필드 이름·serde 기본값)만 본다.
     #[test]
     fn enc_meta_accounts_normalize_like_gui() {
         let legacy: EncMeta = serde_json::from_str(
@@ -467,17 +434,6 @@ mod tests {
         let mut gone = m;
         gone.active = 9;
         assert_eq!(gone.active_account().index, 0);
-    }
-
-    /// 계정별 내역 파일 이름 — src-tauri 와 같은 규칙(0 은 접미 없음).
-    #[test]
-    fn account_file_name_matches_gui_rule() {
-        assert_eq!(account_file_name("history.json", 0), "history.json");
-        assert_eq!(
-            account_file_name("history-8453.json", 3),
-            "history-8453-a3.json"
-        );
-        assert_eq!(account_file_name("history.json", 1), "history-a1.json");
     }
 
     /// 내역 파일의 계정: 계정 0 폴백은 wallet.enc 가 없을 때뿐. 파일이 있는데 깨졌으면 에러 —

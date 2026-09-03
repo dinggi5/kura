@@ -2,11 +2,11 @@
 
 use crate::i18n::ts;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::PathBuf;
 
 use crate::chain::{active_chain, chain_by_id, BASE_MAINNET, BASE_SEPOLIA};
 use crate::limits::{parse_eth_nonneg, parse_usdc_nonneg};
+use crate::policy::{self, SettingsFile};
 use crate::store::{jigap_dir, write_json};
 
 /// 한도 기본값 (사용자가 설정 화면에서 조정 가능). 권한 모델의 가드레일.
@@ -36,8 +36,12 @@ const DEFAULT_AUTO_LOCK_MINS: &str = "30";
 /// "필드가 없는 옛 파일"의 해석이 아니다. 옛 파일의 주인은 테스트넷 시절 사용자라,
 /// 여기를 메인넷으로 바꾸면 앱 업데이트 한 번에 조용히 실돈 체인으로 옮겨진다.
 /// 신규 기본(파일 자체가 없음)은 `Settings::default()` 가 맡는다.
+///
+/// 읽기 경로(`read_settings`)는 이 값을 쓰지 않는다 — 체인은 늘 `policy::chain_id_for` 가 정한다
+/// (같은 답: 필드 없음 → 테스트넷). 이 기본값이 실제로 쓰이는 곳은 **다시 저장할 목적**으로 파일을
+/// 그대로 읽는 `read_settings_for_update` 다(옛 파일을 저장해도 테스트넷이 명시적으로 박히게).
 fn default_chain_id() -> u64 {
-    BASE_SEPOLIA.chain_id
+    policy::BASE_SEPOLIA_ID
 }
 
 /// 사용자 조정 가능한 한도 설정 (십진수 문자열). 권한 모델의 가드레일.
@@ -193,7 +197,7 @@ impl Settings {
 /// (개발 42: 언어 기본값도 같은 질문을 쓴다 — i18n::init)
 pub(crate) fn wallet_exists() -> bool {
     jigap_dir()
-        .map(|d| d.join("wallet.enc").exists() || d.join("wallet.json").exists())
+        .map(|d| policy::wallet_exists_in(&d))
         .unwrap_or(false)
 }
 
@@ -201,49 +205,40 @@ fn settings_path() -> Result<PathBuf, String> {
     Ok(jigap_dir()?.join("settings.json"))
 }
 
+/// settings.json 을 세 갈래(없음/못 읽음/본문)로 읽는다. 홈을 못 정하면 「못 읽음」.
+fn settings_file() -> SettingsFile {
+    settings_path()
+        .map(|p| SettingsFile::read(&p))
+        .unwrap_or(SettingsFile::Unreadable)
+}
+
 /// 설정을 읽는다. 파일이 **없으면** 기본값(신규 = 메인넷), 있는데 **못 읽으면** 보수적
 /// 기본값(테스트넷). 이 구분은 개발 39에서 기본 체인이 메인넷이 된 순간 생긴 것 —
 /// 판단만 떼어낸 `settings_for_read` 에 이유와 테스트가 있다.
 pub(crate) fn read_settings() -> Settings {
-    match settings_path().map(fs::read_to_string) {
-        Ok(Ok(text)) => settings_for_read(Some(&text), wallet_exists(), || {
-            active_chain().chain_id
-        }),
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            settings_for_read(None, wallet_exists(), || active_chain().chain_id)
-        }
-        // 경로를 못 정했거나(홈 없음) 있는 파일을 못 읽었다(권한 등) — 깨진 파일과 같이 취급.
-        // chain.rs 도 이 경우 테스트넷이라(selected_chain_id 의 Err 가지) 체인은 저절로 맞는다.
-        _ => Settings::conservative(),
-    }
+    settings_for_read(&settings_file(), wallet_exists())
 }
 
 /// `read_settings` 의 판단만 떼어낸 순수 함수 (IO 없이 테스트하려고).
-/// None + 지갑 없음 = 진짜 신규 → 메인넷 기본. None + 지갑 있음 = 설정 파일이 없던
-/// 시절의 기존 사용자 → 테스트넷 보수. Some(해석 안 됨) → 보수적 기본값이되 **체인만은
-/// `active_chain_id`** 를 따른다.
+/// 없음 + 지갑 없음 = 진짜 신규 → 메인넷 기본. 없음 + 지갑 있음 = 설정 파일이 없던 시절의 기존
+/// 사용자 → 테스트넷 보수. 못 읽음·해석 안 됨 → 보수적 기본값.
 ///
-/// 🔴 왜 체인만 따로인가 (개발 52, 실물 하네스에서 발견): 체인 선택의 정본은 chain.rs 의
-/// `selected_chain_id` 인데 그쪽은 파일에서 **`chain_id` 한 필드만** 관대하게 읽는다(모듈 순환을
-/// 피하려고 Settings 를 통째로 역직렬화하지 않는다). 그래서 다른 필드 하나가 깨진 파일은 여기선
-/// 「못 읽음 → 테스트넷」, 저기선 「chain_id 그대로」가 된다 — 프론트는 이 값으로 라벨·받기·보내기
-/// 화면을 그리고, 돈은 저 값의 체인으로 나간다. `chain_id: 8453` 에 `single_usdc` 만 빠진 파일이면
-/// **화면은 「연습용 Base Sepolia」인데 송금은 메인넷 실돈**이었다. 돈이 움직이는 쪽이 정본이므로
-/// 라벨이 그쪽을 따른다(반대로 백엔드를 보수적으로 바꾸면 두 크레이트의 체인 선택을 같이 고쳐야
-/// 하고, 그건 릴리스 직전에 벌일 일이 아니다 — DEVLOG 개발 52).
-fn settings_for_read(
-    existing: Option<&str>,
-    wallet_exists: bool,
-    active_chain_id: impl FnOnce() -> u64,
-) -> Settings {
-    match existing {
-        None if !wallet_exists => Settings::default(),
-        None => Settings::conservative(),
-        Some(text) => serde_json::from_str(text).unwrap_or_else(|_| Settings {
-            chain_id: active_chain_id(),
-            ..Settings::conservative()
-        }),
-    }
+/// 🔴 **체인만은 어느 갈래든 `policy::chain_id_for` 가 정한다** — chain.rs 의 `selected_chain_id`
+/// (돈이 나가는 쪽)가 같은 파일을 읽는 바로 그 함수다. 정상 파일이면 Settings 가 읽은 값과 같고
+/// (같은 필드를 같은 규칙으로 읽는다), 다른 필드 하나가 깨져 Settings 로는 못 읽는 파일이면 chain_id
+/// 만은 그대로 살린다. 개발 52 실물 하네스에서 두 판정이 갈려 **화면은 「연습용 Base Sepolia」인데
+/// 송금은 메인넷 실돈**이었던 것을 그때는 클로저로 이어 붙였고, 개발 56 에 판정 자체를 하나로 합쳤다
+/// — 갈릴 길이 코드에 없다.
+fn settings_for_read(file: &SettingsFile, wallet_exists: bool) -> Settings {
+    let mut s = match file {
+        SettingsFile::Missing if !wallet_exists => Settings::default(),
+        SettingsFile::Missing | SettingsFile::Unreadable => Settings::conservative(),
+        SettingsFile::Text(text) => {
+            serde_json::from_str(text).unwrap_or_else(|_| Settings::conservative())
+        }
+    };
+    s.chain_id = policy::chain_id_for(file, || wallet_exists);
+    s
 }
 
 /// **덮어쓸 목적으로** 설정을 읽는다. 파일이 있는데 해석이 안 되면 `None`.
@@ -257,27 +252,20 @@ fn settings_for_read(
 /// 하나뿐이라 이 문제가 없었다. autostart::reconcile 이 **시작할 때마다** 읽고 쓰게 되면서
 /// 생긴 위험이라, 저장 경로는 이쪽을 쓴다.
 pub(crate) fn read_settings_for_update() -> Option<Settings> {
-    let path = settings_path().ok()?;
-    match fs::read_to_string(&path) {
-        Ok(text) => settings_for_update(Some(&text), wallet_exists()),
-        // 아직 파일이 없는 건 정상 — 신규/기존(지갑 유무)에 맞는 기본값에서 시작해 만든다.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            settings_for_update(None, wallet_exists())
-        }
-        // 있는데 못 읽었다(권한 등) → 덮어쓰지 않는다.
-        Err(_) => None,
-    }
+    settings_for_update(&settings_file(), wallet_exists())
 }
 
 /// `read_settings_for_update` 의 판단만 떼어낸 순수 함수 (IO 없이 테스트하려고).
 /// 파일이 없을 때 지갑이 이미 있으면(설정 파일이 없던 시절의 기존 사용자) 보수적
 /// 기본(테스트넷)을 돌려준다 — reconcile 이 이걸 저장해 테스트넷을 명시적으로 못박는다.
 /// 진짜 신규(지갑도 없음)만 메인넷 기본을 받는다(코덱스 개발 39 P1).
-fn settings_for_update(existing: Option<&str>, wallet_exists: bool) -> Option<Settings> {
-    match existing {
-        None if !wallet_exists => Some(Settings::default()),
-        None => Some(Settings::conservative()),
-        Some(text) => serde_json::from_str(text).ok(),
+/// 있는데 못 읽음(권한·홈 못 정함)·해석 안 됨 → None: 덮어쓰지 않는다.
+fn settings_for_update(file: &SettingsFile, wallet_exists: bool) -> Option<Settings> {
+    match file {
+        SettingsFile::Missing if !wallet_exists => Some(Settings::default()),
+        SettingsFile::Missing => Some(Settings::conservative()),
+        SettingsFile::Unreadable => None,
+        SettingsFile::Text(text) => serde_json::from_str(text).ok(),
     }
 }
 
@@ -539,66 +527,76 @@ mod tests {
     // 실돈 체인으로 옮기는 문이 된다 — 깨진 파일은 돈 축을 테스트넷으로 접는다.
     #[test]
     fn read_fallbacks_split_new_vs_corrupt() {
+        let text = |s: &str| SettingsFile::Text(s.to_string());
         // 파일 없음 + 지갑 없음 = 진짜 신규 → 메인넷 기본.
         assert_eq!(
-            settings_for_read(None, false, || unreachable!()).chain_id,
+            settings_for_read(&SettingsFile::Missing, false).chain_id,
             BASE_MAINNET.chain_id
         );
         // 🔴 파일 없음 + 지갑 있음 = 개발 31 이전 설치(저장을 눌러야만 settings.json 이
         // 생겼다) → 테스트넷 보수. 여기가 메인넷이면 기존 지갑이 조용히 실돈 체인으로
         // 옮겨진다(코덱스 개발 39 P1).
-        assert_eq!(
-            settings_for_read(None, true, || unreachable!()).chain_id,
-            BASE_SEPOLIA.chain_id
-        );
+        let legacy = settings_for_read(&SettingsFile::Missing, true);
+        assert_eq!(legacy.chain_id, BASE_SEPOLIA.chain_id);
         // 🔴 그 시절 ETH 한도(0.05/0.2)도 그대로 — 낮아진 새 기본을 못박으면 되던 송금이
         // 말없이 막힌다(코덱스 2차 P2). USDC 는 변경 없음(5/20).
-        assert_eq!(settings_for_read(None, true, || unreachable!()).single_eth, "0.05");
-        assert_eq!(settings_for_read(None, true, || unreachable!()).daily_eth, "0.2");
-        // 깨진 JSON → 보수적(테스트넷). 나머지 값은 기본과 동일. 체인은 chain.rs 가 고른 값을
-        // 따르는데, 깨진 JSON 이면 그쪽도 테스트넷이다(chain_id_in) — 아래 consistency 테스트.
-        let c = settings_for_read(Some("{ 이건 JSON 이 아니다"), true, || BASE_SEPOLIA.chain_id);
+        assert_eq!(legacy.single_eth, "0.05");
+        assert_eq!(legacy.daily_eth, "0.2");
+        // 있는데 못 읽음(권한·홈 못 정함) → 보수적. 지갑 유무는 상관없다.
+        assert_eq!(
+            settings_for_read(&SettingsFile::Unreadable, false).chain_id,
+            BASE_SEPOLIA.chain_id
+        );
+        // 깨진 JSON → 보수적(테스트넷). 나머지 값은 기본과 동일.
+        let c = settings_for_read(&text("{ 이건 JSON 이 아니다"), true);
         assert_eq!(c.chain_id, BASE_SEPOLIA.chain_id);
         assert_eq!(c.single_usdc, "5");
         assert!(!c.auto_check_update);
         // 정상 JSON 은 그대로.
         let ok = settings_for_read(
-            Some(
+            &text(
                 r#"{"single_usdc":"7","daily_usdc":"30",
             "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#,
             ),
             true,
-            || unreachable!(),
         );
         assert_eq!(ok.chain_id, 8453);
         assert_eq!(ok.single_usdc, "7");
     }
 
-    // 🔴 프론트가 그리는 체인(read_settings → chain_id)과 돈이 나가는 체인(chain.rs → chain_id_in)이
-    // **같은 파일에 같은 답**을 내야 한다 (개발 52, 실물 하네스에서 발견). 다른 필드 하나만 깨진
-    // 파일에서 둘이 갈리면 화면은 「연습용」인데 송금은 메인넷으로 나간다. 깨진 JSON 은 둘 다 테스트넷,
-    // chain_id 는 읽히는 파일은 둘 다 그 값 — 모든 가지를 실제 chain_id_in 을 물려 대조한다.
+    // 🔴 프론트가 그리는 체인(read_settings → chain_id)과 돈이 나가는 체인(chain.rs → policy::chain_id_for)
+    // 이 **같은 파일에 같은 답**을 내야 한다 (개발 52, 실물 하네스에서 발견). 다른 필드 하나만 깨진
+    // 파일에서 둘이 갈리면 화면은 「연습용」인데 송금은 메인넷으로 나간다. 개발 56 부터 둘이 같은 함수라
+    // 구조적으로 못 갈리지만, 누가 Settings 파싱값을 다시 정본으로 삼으면 여기서 잡힌다.
     #[test]
-    fn broken_file_chain_matches_backend_selection() {
-        use crate::chain::chain_id_in;
+    fn read_chain_matches_backend_selection() {
         let cases = [
             "{ 이건 JSON 이 아니다",
             "",
-            r#"{"chain_id":8453}"#,                         // 한도 필드 전부 없음(필수) → Settings 파싱 실패
-            r#"{"single_usdc":5,"chain_id":8453}"#,        // 타입 틀림
+            r#"{"chain_id":8453}"#, // 한도 필드 전부 없음(필수) → Settings 파싱 실패
+            r#"{"single_usdc":5,"chain_id":8453}"#, // 타입 틀림
             r#"{"daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05","chain_id":5042002}"#, // 개발 51 하네스
-            r#"{"single_usdc":"7","daily_usdc":"30","single_eth":"0.1","daily_eth":"0.5"}"#,   // chain_id 없음(옛 파일)
+            r#"{"single_usdc":"7","daily_usdc":"30","single_eth":"0.1","daily_eth":"0.5"}"#, // chain_id 없음(옛 파일)
+            r#"{"single_usdc":"7","daily_usdc":"30","single_eth":"0.1","daily_eth":"0.5","chain_id":1}"#, // 미지원 id
         ];
         for text in cases {
-            let backend = chain_id_in(text);
-            let front = settings_for_read(Some(text), true, || backend).chain_id;
+            let file = SettingsFile::Text(text.to_string());
+            let backend = policy::chain_id_for(&file, || unreachable!());
+            let front = settings_for_read(&file, true).chain_id;
             assert_eq!(front, backend, "갈렸다: {text}");
         }
-        // 대조군: 위 closure 가 실제로 쓰이는지 — 해석 안 되는 파일에서 임의 값이 그대로 나와야 한다.
-        assert_eq!(
-            settings_for_read(Some(r#"{"chain_id":8453}"#), true, || 424242).chain_id,
-            424242
-        );
+        // 한도 필드가 빠져 Settings 로는 못 읽는 파일 — 체인만은 살아 있어야 한다(개발 52 의 그 파일).
+        let f = settings_for_read(&SettingsFile::Text(r#"{"chain_id":8453}"#.into()), true);
+        assert_eq!(f.chain_id, BASE_MAINNET.chain_id);
+        // 나머지는 보수적 기본.
+        assert_eq!(f.single_usdc, "5");
+        // 파일 없음도 양쪽이 같은 함수를 타므로 같은 답이다.
+        for wallet in [false, true] {
+            assert_eq!(
+                settings_for_read(&SettingsFile::Missing, wallet).chain_id,
+                policy::chain_id_for(&SettingsFile::Missing, || wallet)
+            );
+        }
     }
 
     // 옛 settings.json(자율 결제 필드 없음)도 손실 없이 로드되고 새 필드는 기본값이 된다.
@@ -633,9 +631,10 @@ mod tests {
     // 메인넷(8453)을 쓰던 사람이 아무 말 없이 테스트넷으로 돌아간다.
     #[test]
     fn corrupt_settings_are_never_overwritten() {
+        let text = |s: &str| SettingsFile::Text(s.to_string());
         // 파일 없음 + 지갑 없음 = 진짜 신규 → 메인넷 기본에서 시작해 만들어도 안전.
         assert_eq!(
-            settings_for_update(None, false)
+            settings_for_update(&SettingsFile::Missing, false)
                 .expect("신규인데 None")
                 .chain_id,
             BASE_MAINNET.chain_id
@@ -644,15 +643,17 @@ mod tests {
         // 보수 기본을 저장해 못박는다. 메인넷을 저장하면 기존 지갑이 조용히 실돈
         // 체인으로 옮겨진다(코덱스 개발 39 P1).
         assert_eq!(
-            settings_for_update(None, true)
+            settings_for_update(&SettingsFile::Missing, true)
                 .expect("레거시인데 None")
                 .chain_id,
             BASE_SEPOLIA.chain_id
         );
+        // 있는데 못 읽음(권한·홈 못 정함) → None. 덮어쓰지 않는다.
+        assert!(settings_for_update(&SettingsFile::Unreadable, false).is_none());
 
         // 정상 JSON → 그대로 읽힌다.
         let ok = settings_for_update(
-            Some(
+            &text(
                 r#"{"single_usdc":"7","daily_usdc":"30",
             "single_eth":"0.1","daily_eth":"0.5","chain_id":8453}"#,
             ),
@@ -661,13 +662,13 @@ mod tests {
         assert_eq!(ok.expect("정상 JSON 인데 None").chain_id, 8453);
 
         // 🔴 깨진 JSON·타입이 어긋난 값 → None. 호출부는 여기서 손을 떼야 한다.
-        assert!(settings_for_update(Some("{ 이건 JSON 이 아니다"), true).is_none());
-        assert!(settings_for_update(Some(r#"{"single_usdc": 5}"#), true).is_none()); // 문자열이어야 함
-        assert!(settings_for_update(Some(""), true).is_none());
+        assert!(settings_for_update(&text("{ 이건 JSON 이 아니다"), true).is_none());
+        assert!(settings_for_update(&text(r#"{"single_usdc": 5}"#), true).is_none()); // 문자열이어야 함
+        assert!(settings_for_update(&text(""), true).is_none());
         // 필수 필드(serde default 없음) 하나만 빠져도 통째로 못 읽는다 — 개발 51 하네스에서
         // 손으로 쓴 파일이 이렇게 접혀 커스텀 RPC 가 무시됐다. 이 경우가 화면 알림의 대상이다.
         assert!(settings_for_update(
-            Some(r#"{"daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05","chain_id":8453,"rpc_url":"https://example.invalid"}"#),
+            &text(r#"{"daily_usdc":"20","single_eth":"0.01","daily_eth":"0.05","chain_id":8453,"rpc_url":"https://example.invalid"}"#),
             true
         )
         .is_none());

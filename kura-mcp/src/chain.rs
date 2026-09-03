@@ -3,8 +3,12 @@
 // src-tauri/src/chain.rs 와 평행한 별도 사본이다(두 크레이트는 의도적으로 분리 —
 // 공유 크레이트를 만들지 않는 게 이 프로젝트의 정책: Tauri 빌드 위험 0). 활성 체인은 GUI 와
 // 공유하는 settings.json 의 chain_id 로 **런타임 선택**한다(두 프로세스가 자동으로 같은 체인).
+// 그 선택 판정과 체인 ID·데이터 파일 이름 규칙은 shared/policy.rs 를 GUI 와 **같은 소스로**
+// 컴파일한다(개발 56) — 사본으로 남는 건 ChainConfig 의 나머지 값(RPC·주소·x402 표기)뿐이다.
 
 use alloy::primitives::{address, Address};
+
+use crate::policy;
 
 /// 한 체인(EVM)의 MCP 측 설정 묶음.
 #[derive(Clone, Copy)]
@@ -42,7 +46,7 @@ pub struct ChainConfig {
 
 /// Base Sepolia (테스트넷). 기본 체인 — 데이터 파일이 접미사 없이 저장되는 "원본" 체인.
 pub const BASE_SEPOLIA: ChainConfig = ChainConfig {
-    chain_id: 84_532,
+    chain_id: policy::BASE_SEPOLIA_ID,
     default_rpc: "https://sepolia.base.org",
     usdc_address: address!("0x036CbD53842c5426634e7929541eC2318f3dCF7e"),
     usdc_decimals: 6,
@@ -58,7 +62,7 @@ pub const BASE_SEPOLIA: ChainConfig = ChainConfig {
 
 /// Base 메인넷 (실제 자금). x402 네트워크명은 "base" / CAIP-2 "eip155:8453".
 pub const BASE_MAINNET: ChainConfig = ChainConfig {
-    chain_id: 8453,
+    chain_id: policy::BASE_MAINNET_ID,
     default_rpc: "https://mainnet.base.org",
     usdc_address: address!("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
     usdc_decimals: 6,
@@ -83,7 +87,7 @@ pub const BASE_MAINNET: ChainConfig = ChainConfig {
 /// ERC-8004 레지스트리는 **Base Sepolia 와 같은 주소로 Arc 테스트넷에도 있다**(결정론적 배포).
 /// 개발 50 에서 두 주소 모두 Arc RPC 로 `getVersion()` = "2.0.0" 실응답 확인 — 그래서 Some 이다.
 pub const ARC_TESTNET: ChainConfig = ChainConfig {
-    chain_id: 5_042_002,
+    chain_id: policy::ARC_TESTNET_ID,
     default_rpc: "https://rpc.testnet.arc.network",
     usdc_address: address!("0x3600000000000000000000000000000000000000"),
     usdc_decimals: 6,
@@ -141,35 +145,14 @@ fn settings_chain_id() -> u64 {
     }
     #[cfg(not(test))]
     {
-        /// settings.json 에서 선택된 체인 ID만 읽는 가벼운 뷰(다른 필드 무시).
-        #[derive(serde::Deserialize)]
-        struct ChainSel {
-            chain_id: u64,
-        }
-        // 폴백은 GUI(src-tauri chain.rs selected_chain_id)와 같은 결로 갈라진다(개발 39 —
-        // 신규 기본이 메인넷이 되면서 "없음"과 "못 읽음"이 다른 답이 됐다). 두 프로세스가
-        // 여기서 어긋나면 잔액·결제가 서로 다른 체인을 본다:
-        // 파일 없음 + 지갑도 없음(진짜 신규) = 메인넷 / 파일 없음 + 지갑 있음(설정 파일이
-        // 없던 개발 31 이전 설치) = 테스트넷 / 깨짐·못 읽음·홈 못 정함·옛 파일(필드 없음)
-        // = 테스트넷(보수적 — 기존 사용자를 조용히 실돈 체인으로 옮기지 않는다).
+        // 판정은 GUI(src-tauri chain.rs selected_chain_id)와 **같은 함수** `policy::chain_id_for`
+        // — 두 프로세스가 여기서 어긋나면 잔액·결제가 서로 다른 체인을 본다. 폴백 네 갈래
+        // (신규=메인넷 / 설정 파일 없는 기존 지갑·깨짐·못 읽음·옛 파일=테스트넷)의 이유는 그쪽 주석.
         let Ok(dir) = crate::wallet::jigap_dir() else {
-            return BASE_SEPOLIA.chain_id;
+            return BASE_SEPOLIA.chain_id; // 홈을 못 정함 = 못 읽음(보수적)
         };
-        match std::fs::read_to_string(dir.join("settings.json")) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let wallet_exists =
-                    dir.join("wallet.enc").exists() || dir.join("wallet.json").exists();
-                if wallet_exists {
-                    BASE_SEPOLIA.chain_id
-                } else {
-                    BASE_MAINNET.chain_id
-                }
-            }
-            Err(_) => BASE_SEPOLIA.chain_id,
-            Ok(text) => serde_json::from_str::<ChainSel>(&text)
-                .map(|c| c.chain_id)
-                .unwrap_or(BASE_SEPOLIA.chain_id),
-        }
+        let file = policy::SettingsFile::read(&dir.join("settings.json"));
+        policy::chain_id_for(&file, || policy::wallet_exists_in(&dir))
     }
 }
 
@@ -197,15 +180,12 @@ pub fn active_chain() -> ChainConfig {
     }
 }
 
-/// 체인별로 분리되는 데이터 파일 이름(history/x402_settlements). src-tauri 의 chain_file 과 동일 규칙 —
-/// 기본 체인(Base Sepolia)은 접미사 없이("history.json"), 그 외는 "-{chain_id}". 두 프로세스가
-/// 같은 settings.json 을 읽으므로 GUI 와 MCP 가 항상 같은 파일을 가리킨다.
-/// active_chain() 으로 정규화(미지원 id 는 Sepolia 폴백)해 활성 체인과 파일이 어긋나지 않게 한다.
+/// 체인별로 분리되는 데이터 파일 이름(history/x402_settlements) — 규칙은 `policy::chain_file_name`
+/// (src-tauri 의 chain_file 과 같은 함수). 두 프로세스가 같은 settings.json 을 같은 판정으로 읽으므로
+/// GUI 와 MCP 가 항상 같은 파일을 가리킨다. active_chain() 으로 정규화(미지원 id 는 Sepolia 폴백)한
+/// id 를 넘겨 활성 체인과 파일이 어긋나지 않게 한다.
 pub fn chain_file(stem: &str) -> String {
-    match active_chain().chain_id {
-        id if id == BASE_SEPOLIA.chain_id => format!("{stem}.json"),
-        id => format!("{stem}-{id}.json"),
-    }
+    policy::chain_file_name(active_chain().chain_id, stem)
 }
 
 #[cfg(test)]

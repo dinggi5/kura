@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use zeroize::Zeroizing;
 
 use crate::chain::chain_file;
+use crate::policy;
 use crate::store::{jigap_dir, write_atomic};
 
 /// 계정 라벨 최대 글자 수(사람이 붙이는 이름 — 화면 한 줄).
@@ -59,14 +60,8 @@ pub(crate) struct WalletInfo {
 
 /// 계정 하나 (개발 54) — 같은 시드의 HD 파생 인덱스 + 그 주소. 주소는 공개정보라 평문이고,
 /// 비번 없이 잔액·QR·MCP 상태에 쓴다. 라벨은 사람이 붙이는 이름(빈 값 = 화면이 「계정 N」으로).
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub(crate) struct Account {
-    /// 파생 인덱스 n (m/44'/60'/0'/0/n). 0 = 지갑을 만들 때부터 있던 원래 계정.
-    pub(crate) index: u32,
-    pub(crate) address: String,
-    #[serde(default)]
-    pub(crate) label: String,
-}
+/// MCP 와 같은 타입(shared/policy.rs) — wallet.enc 의 항목을 두 프로세스가 같은 모양으로 읽는다.
+pub(crate) use crate::policy::Account;
 
 /// 지갑 파일 상태. 프론트가 어떤 화면을 띄울지 결정한다.
 /// - "encrypted": wallet.enc 존재 (정상)
@@ -126,37 +121,15 @@ pub(crate) struct EncryptedWallet {
 impl EncryptedWallet {
     /// 모든 계정을 인덱스 순으로 — 계정 0 은 항상 있고 그 주소는 `address` 필드다.
     /// (파일의 `accounts` 에 0 이 따로 적혀 있어도 `address` 가 이긴다 — 정본은 하나.)
+    /// 정규화는 MCP(EncMeta::accounts)와 **같은 함수**(shared/policy.rs) — 두 프로세스가 같은 계정을 본다.
     pub(crate) fn accounts(&self) -> Vec<Account> {
-        let mut list: Vec<Account> = self
-            .accounts
-            .iter()
-            .filter(|a| a.index != 0)
-            .cloned()
-            .collect();
-        let zero_label = self
-            .accounts
-            .iter()
-            .find(|a| a.index == 0)
-            .map(|a| a.label.clone())
-            .unwrap_or_default();
-        list.push(Account {
-            index: 0,
-            address: self.address.clone(),
-            label: zero_label,
-        });
-        list.sort_by_key(|a| a.index);
-        list.dedup_by_key(|a| a.index);
-        list
+        policy::normalize_accounts(&self.address, &self.accounts)
     }
 
     /// 활성 계정. `active` 가 목록에 없으면(손상·옛 빌드가 쓴 파일) 계정 0 — 돈이 나가는
-    /// 계정이 「없는 계정」이 되면 안 된다.
+    /// 계정이 「없는 계정」이 되면 안 된다. (MCP 와 같은 함수.)
     pub(crate) fn active_account(&self) -> Account {
-        let list = self.accounts();
-        list.iter()
-            .find(|a| a.index == self.active)
-            .cloned()
-            .unwrap_or_else(|| list[0].clone())
+        policy::pick_active(&self.accounts(), self.active)
     }
 }
 
@@ -248,18 +221,13 @@ pub(crate) fn active_account() -> Result<Account, String> {
 /// 체인 접미(chain_file)에 계정 접미를 덧붙인다: 계정 0 은 **기존 이름 그대로**(무손실),
 /// 그 외는 `-a{n}`("history-a2.json", "history-8453-a2.json"). 한도 장부·신뢰 주소는 일부러
 /// 계정 공용이다 — 계정을 하나 더 만드는 것으로 일일 한도가 두 배가 되면 가드레일이 아니다.
-/// (kura-mcp/src/wallet.rs 의 account_file 과 같은 규칙 — 평행 사본 정책.)
+/// (이름 규칙은 kura-mcp 와 같은 함수 shared/policy.rs — 어긋나면 GUI 가 적은 내역을 AI 가 못 본다.)
 pub(crate) fn account_file(stem: &str) -> String {
     account_file_name(&chain_file(stem), active_account_index())
 }
 
-/// `account_file` 의 이름 규칙만 떼어낸 순수 함수 (테스트용 + 정산 반영이 계정을 지정해 쓴다).
-pub(crate) fn account_file_name(chain_base: &str, index: u32) -> String {
-    match index {
-        0 => chain_base.to_string(),
-        n => format!("{}-a{n}.json", chain_base.trim_end_matches(".json")),
-    }
-}
+/// `account_file` 의 이름 규칙만 떼어낸 순수 함수 (정산 반영이 계정을 지정해 쓴다). MCP 와 같은 함수.
+pub(crate) use crate::policy::account_file_name;
 
 /// 비번 + 솔트 + 명시적 Argon2id 파라미터로 32바이트 대칭키를 유도한다.
 /// Zeroizing 반환 — 어느 경로로 드랍돼도(틀린 비번 early-return 포함) 메모리에서 0으로 지워진다.
@@ -925,6 +893,7 @@ mod tests {
     }
 
     // 옛 파일(accounts/active 없음) → 계정 0 하나, 주소는 address 필드, 활성 = 0.
+    // (규칙 자체는 policy::tests 가 본다 — 여기는 EncryptedWallet 역직렬화가 그 함수에 제대로 물리는지.)
     #[test]
     fn legacy_file_normalizes_to_single_account() {
         let json =
@@ -965,20 +934,7 @@ mod tests {
         assert_eq!(w2.active_account().index, 0);
     }
 
-    // 계정별 파일 이름: 0 은 기존 이름 그대로(무손실), 그 외는 체인 접미 뒤에 -a{n}.
-    #[test]
-    fn account_file_name_keeps_zero_and_suffixes_others() {
-        assert_eq!(account_file_name("history.json", 0), "history.json");
-        assert_eq!(
-            account_file_name("history-8453.json", 0),
-            "history-8453.json"
-        );
-        assert_eq!(account_file_name("history.json", 2), "history-a2.json");
-        assert_eq!(
-            account_file_name("history-8453.json", 2),
-            "history-8453-a2.json"
-        );
-    }
+    // 계정별 파일 이름 규칙(0 은 그대로, 그 외 -a{n})은 policy::tests 가 본다.
 
     // 작업 안에서 고정한 계정이 파일보다 우선한다 (디스크를 안 본다).
     #[tokio::test]

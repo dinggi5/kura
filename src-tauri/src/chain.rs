@@ -1,11 +1,13 @@
 // 체인 설정 — 한 체인의 모든 식별 정보(RPC·USDC·chainId·익스플로러·x402 네트워크명)를
 // ChainConfig 한 묶음으로 모은다. 체인 추가 = 아래에 const 항목 하나 더. 활성 체인은 더 이상
 // 컴파일 고정이 아니라 settings.json 의 chain_id 로 **런타임 선택**한다(테스트넷↔메인넷 토글).
+// 그 선택 판정은 shared/policy.rs(`policy::chain_id_for`)가 정본이다 — settings.rs 의 Settings 읽기와
+// MCP(kura-mcp/src/chain.rs)가 같은 함수를 쓴다(개발 56: 「같은 파일을 다르게 읽는」 뿌리 제거).
 
 use alloy::primitives::{address, Address};
 use alloy::sol;
-use serde::Deserialize;
 
+use crate::policy::{self, SettingsFile};
 use crate::store::jigap_dir;
 
 /// 한 체인(EVM)의 백엔드 설정 묶음 — 잔액 조회·송금·x402 서명에 쓰는 값만 담는다.
@@ -48,7 +50,7 @@ pub(crate) struct ChainConfig {
 
 /// Base Sepolia (테스트넷). 기본 체인 — 데이터 파일이 접미사 없이 저장되는 "원본" 체인이기도 하다.
 pub(crate) const BASE_SEPOLIA: ChainConfig = ChainConfig {
-    chain_id: 84_532,
+    chain_id: policy::BASE_SEPOLIA_ID,
     default_rpc: "https://sepolia.base.org",
     usdc_address: address!("0x036CbD53842c5426634e7929541eC2318f3dCF7e"),
     usdc_decimals: 6,
@@ -62,7 +64,7 @@ pub(crate) const BASE_SEPOLIA: ChainConfig = ChainConfig {
 /// (온체인 name() 확인: Base 메인넷 USDC=0x8335…2913 의 토큰명은 "USD Coin"). 이 값이 틀리면
 /// 서명 도메인이 컨트랙트와 안 맞아 정산이 거부된다 → x402_domain_matches_usdc_onchain 가 양 체인 검증.
 pub(crate) const BASE_MAINNET: ChainConfig = ChainConfig {
-    chain_id: 8453,
+    chain_id: policy::BASE_MAINNET_ID,
     default_rpc: "https://mainnet.base.org",
     usdc_address: address!("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
     usdc_decimals: 6,
@@ -80,7 +82,7 @@ pub(crate) const BASE_MAINNET: ChainConfig = ChainConfig {
 /// `TRANSFER_WITH_AUTHORIZATION_TYPEHASH`=0x7c7c6cdb…(EIP-3009 표준값) → x402 서명 경로는 그대로 선다.
 /// USDC 주소가 `0x3600…0000` 인 것은 오타가 아니다 — 네이티브 자산의 ERC-20 뷰라 시스템 주소다.
 pub(crate) const ARC_TESTNET: ChainConfig = ChainConfig {
-    chain_id: 5_042_002,
+    chain_id: policy::ARC_TESTNET_ID,
     default_rpc: "https://rpc.testnet.arc.network",
     usdc_address: address!("0x3600000000000000000000000000000000000000"),
     usdc_decimals: 6,
@@ -89,13 +91,6 @@ pub(crate) const ARC_TESTNET: ChainConfig = ChainConfig {
     native_is_usdc: true,
     gas_reserve_usdc: "0.01",
 };
-
-/// settings.json 에서 선택된 체인 ID만 읽는 가벼운 뷰(다른 필드는 무시). settings.rs 의 Settings 를
-/// 통째로 역직렬화하지 않는 이유 = settings → chain 모듈 순환 의존을 피하려고(MCP wallet.rs 와 같은 패턴).
-#[derive(Deserialize)]
-struct ChainSel {
-    chain_id: u64,
-}
 
 tokio::task_local! {
     /// 한 작업(송금/서명/승인) 동안 고정된 체인 ID. with_pinned_chain 으로 설정하면 그 작업의 모든
@@ -110,42 +105,19 @@ pub(crate) async fn with_pinned_chain<F: std::future::Future>(chain_id: u64, fut
     PINNED_CHAIN.scope(chain_id, fut).await
 }
 
-/// 사용자가 선택한 체인 ID. 작업이 체인을 고정했으면 그 값, 아니면 settings.json.
-///
-/// 폴백은 settings::read_settings 와 같은 결로 갈라진다(개발 39 — 신규 기본이 메인넷이
-/// 되면서 "없음"과 "못 읽음"이 다른 답이 됐다):
-/// - 파일 없음 + **지갑도 없음** = 진짜 신규 → 메인넷(신규 기본, `Settings::default()`)
-/// - 파일 없음 + 지갑 있음 = 개발 31 이전 설치(저장을 눌러야만 settings.json 이 생겼다)
-///   → 테스트넷(그 시절 사용자를 조용히 실돈 체인으로 옮기지 않는다 — 코덱스 개발 39 P1)
-/// - 파일이 있는데 깨짐/못 읽음/홈 못 정함 → 테스트넷(보수적)
-/// - 정상 JSON 인데 chain_id 없음(개발 20 이전 옛 파일) → 테스트넷(그 시절 사용자 보존)
+/// 사용자가 선택한 체인 ID. 작업이 체인을 고정했으면 그 값, 아니면 settings.json 을
+/// `policy::chain_id_for` 로 읽는다(폴백 네 갈래의 이유는 그쪽 주석). settings::read_settings 가
+/// 같은 함수로 같은 파일을 읽으므로 화면이 그리는 체인과 돈이 나가는 체인은 갈릴 수 없다.
 fn selected_chain_id() -> u64 {
     if let Ok(id) = PINNED_CHAIN.try_with(|id| *id) {
         return id; // 작업이 고정한 체인 — 도중에 settings 가 바뀌어도 불변
     }
     let Ok(dir) = jigap_dir() else {
-        return BASE_SEPOLIA.chain_id;
+        return BASE_SEPOLIA.chain_id; // 홈을 못 정함 = 못 읽음(보수적)
     };
-    match std::fs::read_to_string(dir.join("settings.json")) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let wallet_exists = dir.join("wallet.enc").exists() || dir.join("wallet.json").exists();
-            if wallet_exists {
-                BASE_SEPOLIA.chain_id
-            } else {
-                BASE_MAINNET.chain_id
-            }
-        }
-        Err(_) => BASE_SEPOLIA.chain_id,
-        Ok(text) => chain_id_in(&text),
-    }
-}
-
-/// settings.json 본문에서 chain_id 를 뽑는다(깨졌거나 필드가 없으면 테스트넷).
-/// selected_chain_id 의 파싱 판단만 떼어낸 순수 함수 (IO 없이 테스트하려고).
-pub(crate) fn chain_id_in(text: &str) -> u64 {
-    serde_json::from_str::<ChainSel>(text)
-        .map(|c| c.chain_id)
-        .unwrap_or(BASE_SEPOLIA.chain_id)
+    policy::chain_id_for(&SettingsFile::read(&dir.join("settings.json")), || {
+        policy::wallet_exists_in(&dir)
+    })
 }
 
 /// 체인 ID로 ChainConfig 를 찾는다. 미지원이면 None. (set_settings 가 들어온 설정의 chain_id 를
@@ -164,17 +136,12 @@ pub(crate) fn active_chain() -> ChainConfig {
     chain_by_id(selected_chain_id()).unwrap_or(BASE_SEPOLIA)
 }
 
-/// 체인별로 분리해야 하는 데이터 파일 이름(spend/history/x402_settlements/trusted).
-/// 기본 체인(Base Sepolia)은 **기존 이름 그대로**(예: "history.json") → 무손실 마이그레이션(접미사 없음).
-/// 그 외 체인은 "-{chain_id}" 접미사("history-8453.json") → 테스트넷/메인넷의 사용액·내역·신뢰목록이
-/// 절대 섞이지 않게(테스트넷 1 USDC 가 메인넷 일일 한도를 깎거나, 내역이 딴 체인인 척 보이는 것 차단).
-/// **active_chain() 과 동일하게 정규화**한다(미지원/손상 chain_id 는 Base Sepolia 로) — 그래야 알 수 없는
-/// id 가 들어와도 활성 체인(Sepolia로 폴백)과 데이터 파일이 어긋나 한도·신뢰목록을 조용히 리셋하지 않는다.
+/// 체인별로 분리해야 하는 데이터 파일 이름(spend/history/x402_settlements/trusted) — 규칙은
+/// `policy::chain_file_name`(MCP 와 같은 함수). **active_chain() 으로 정규화한 id** 를 넘긴다(미지원/손상
+/// chain_id 는 Base Sepolia 로) — 그래야 알 수 없는 id 가 들어와도 활성 체인(Sepolia 폴백)과 데이터
+/// 파일이 어긋나 한도·신뢰목록을 조용히 리셋하지 않는다.
 pub(crate) fn chain_file(stem: &str) -> String {
-    match active_chain().chain_id {
-        id if id == BASE_SEPOLIA.chain_id => format!("{stem}.json"),
-        id => format!("{stem}-{id}.json"),
-    }
+    policy::chain_file_name(active_chain().chain_id, stem)
 }
 
 sol! {
@@ -244,14 +211,5 @@ mod tests {
         // 기본 체인이 아니므로 데이터 파일은 접미사가 붙는다(Base 와 사용액·내역이 절대 안 섞이게).
         assert_ne!(ARC_TESTNET.chain_id, BASE_SEPOLIA.chain_id);
     }
-
-    // settings.json 본문 → chain_id 해석 (개발 39). 깨진 JSON·필드 없는 옛 파일은
-    // 테스트넷으로 접는다 — "파일 없음 = 메인넷"은 selected_chain_id 의 IO 분기가 맡는다.
-    #[test]
-    fn chain_id_in_falls_back_conservatively() {
-        assert_eq!(chain_id_in(r#"{"chain_id":8453}"#), BASE_MAINNET.chain_id);
-        assert_eq!(chain_id_in(r#"{"chain_id":84532}"#), BASE_SEPOLIA.chain_id);
-        assert_eq!(chain_id_in(r#"{"single_usdc":"5"}"#), BASE_SEPOLIA.chain_id); // 옛 파일
-        assert_eq!(chain_id_in("{ 깨진 JSON"), BASE_SEPOLIA.chain_id);
-    }
+    // settings.json 본문 → chain_id 해석은 policy::tests 가 본다(정본이 그쪽으로 갔다, 개발 56).
 }

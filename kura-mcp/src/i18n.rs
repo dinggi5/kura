@@ -61,8 +61,7 @@ fn resolve() -> Lang {
         // 이 패치 전부터 쓰던 사람이라 한국어, 지갑도 없으면 진짜 첫 실행이라 시스템 언어.
         // (GUI 가 한 번이라도 뜨면 그쪽이 값을 못박으므로, 여기 폴백은 그 전 짧은 구간용이다.)
         _ => {
-            let wallet_exists = dir.join("wallet.enc").exists() || dir.join("wallet.json").exists();
-            if wallet_exists {
+            if crate::policy::wallet_exists_in(&dir) {
                 Lang::Ko
             } else {
                 detect_system()
