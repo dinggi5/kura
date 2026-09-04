@@ -6,6 +6,7 @@ import { AnimatePresence } from "framer-motion";
 import {
   ArrowDownLeft,
   ArrowUpRight,
+  ChevronDown,
   HelpCircle,
   History,
   KeyRound,
@@ -25,6 +26,7 @@ import type {
   WalletStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/cn";
+import { accountName } from "@/lib/format";
 import { chainFromId, ChainProvider } from "@/lib/chain";
 import { useCopy } from "@/lib/useCopy";
 import { clearWelcomePending, isWelcomePending } from "@/lib/welcome";
@@ -445,10 +447,28 @@ export function WalletScreen({
     <main className={shell}>
       <div className="w-full max-w-md flex flex-col gap-4">
         <header className="flex items-center justify-between text-[12px]">
-          <span className="flex items-center gap-2 text-[var(--color-ink-500)]">
+          {/* 개발 59 — 여기엔 「● Kura」 로고가 있었다. 앱 안에서 앱 이름은 장식이고, 지금
+              어느 계정을 보고 있는지는 잔액보다 먼저 알아야 하는 정보다(메타마스크가 계정을
+              맨 위에 두는 이유). 개발 54 는 이걸 잔액 카드의 「총 잔액」 라벨 자리에 뒀는데,
+              11px 회색이라 «라벨»로 읽혀 만든 사람도 못 찾았다 — 자리와 무게를 같이 옮겼다. */}
+          <button
+            type="button"
+            onClick={() => setShowAccounts(true)}
+            aria-label={t("계정 바꾸기", "Switch account")}
+            className={cn(
+              "group flex items-center gap-2 -ml-1.5 pl-1.5 pr-2 py-1 rounded-full",
+              "text-[var(--color-ink-900)] dark:text-[#E8E5DD] font-medium tracking-tight",
+              "hover:bg-[var(--color-ivory-300)] dark:hover:bg-white/5",
+              "transition-colors duration-[var(--duration-base)]",
+            )}
+          >
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" aria-hidden />
-            Kura
-          </span>
+            <span className="truncate max-w-[150px]">{accountName(account)}</span>
+            <ChevronDown
+              size={12}
+              className="shrink-0 text-[var(--color-ink-300)] group-hover:text-[var(--color-ink-700)] transition-colors"
+            />
+          </button>
           <div className="flex items-center gap-1.5">
             <span
               className={cn(
@@ -534,8 +554,6 @@ export function WalletScreen({
             <BalanceCard
               key="balance"
               address={address}
-              account={account}
-              onAccounts={() => setShowAccounts(true)}
               copied={copied}
               onCopy={() => copy(address)}
               balances={balances}
