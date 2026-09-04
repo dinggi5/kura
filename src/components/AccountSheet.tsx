@@ -215,18 +215,32 @@ export function AccountSheet({
             </div>
           </div>
         ) : (
-          <button
-            type="button"
-            onClick={() => {
-              setAdding(true);
-              setError(null);
-            }}
-            disabled={busy}
-            className={cn(secondaryBtn, "mt-4 w-full")}
-          >
-            <Plus size={13} />
-            {t("새 계정", "New account")}
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                setAdding(true);
+                setError(null);
+              }}
+              disabled={busy}
+              className={cn(secondaryBtn, "mt-4 w-full")}
+            >
+              <Plus size={13} />
+              {t("새 계정", "New account")}
+            </button>
+            {/* 개발 58 — 시드 복구는 계정 0 하나만 되살린다(build_imported_wallet). 전에 계정을
+                여러 개 쓰던 사람은 복구 직후 이 시트에서 계정 하나만 보고 「내 돈 어디 갔지」가
+                된다. 파생이 결정론적이라 다시 만들면 같은 주소가 돌아오는데, 그걸 아는 사람은
+                없다. 계정이 하나뿐일 때만 띄운다 — 여러 개인 사람에겐 이미 지난 이야기다. */}
+            {accounts.length === 1 && (
+              <p className="mt-3 text-[11px] leading-relaxed text-[var(--color-ink-300)]">
+                {t(
+                  "전에 계정을 여러 개 쓰셨다면 그 수만큼 다시 만들어 주세요 — 같은 주소가 같은 순서로 돌아와요.",
+                  "If you used several accounts before, add that many again — the same addresses come back in the same order.",
+                )}
+              </p>
+            )}
+          </>
         )}
 
         {error && <p className="mt-3 text-[12px] text-red-500 font-mono break-all">{error}</p>}
