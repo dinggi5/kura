@@ -34,7 +34,7 @@ pub fn jigap_dir() -> Result<PathBuf, String> {
         "홈 디렉터리를 찾을 수 없습니다",
         "Couldn't find the home folder"
     ))?;
-    Ok(home.join(".jigap"))
+    Ok(policy::jigap_dir_in(&home))
 }
 
 fn enc_path() -> Result<PathBuf, String> {
@@ -93,54 +93,8 @@ pub fn effective_rpc() -> String {
     )
 }
 
-/// AI(MCP)/CLI 로 나가는 에러·로그 문자열에서 URL 을 통째로 `[RPC]` 로 가린다.
-/// 커스텀 RPC 경로·쿼리엔 API 키가 들어가곤 한다(예: alchemy `…/v2/KEY`) → 그대로 두면 LLM 채팅에 샌다.
-/// **설정을 다시 읽지 않고 문자열에 보이는 URL 자체를 가린다** → 설정 변경·host 대소문자 정규화·
-/// ws/wss 등에 흔들리지 않는다(코덱스 리뷰 반영). URL 외 문자는 그대로 둔다.
-/// (src-tauri settings.rs 와 의도적 중복 — 공유 크레이트 안 만드는 정책.)
-pub fn redact_urls(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut cursor = 0;
-    while let Some(rel) = input[cursor..].find("://") {
-        let sep = cursor + rel;
-        if let Some(start) = scheme_start(input, cursor, sep) {
-            out.push_str(&input[cursor..start]);
-            let token = &input[start..];
-            let end = token
-                .find(|c: char| {
-                    c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>' | '`')
-                })
-                .unwrap_or(token.len());
-            out.push_str("[RPC]");
-            cursor = start + end;
-        } else {
-            out.push_str(&input[cursor..sep + 3]);
-            cursor = sep + 3;
-        }
-    }
-    out.push_str(&input[cursor..]);
-    out
-}
-
-/// `sep`(="://"의 시작 인덱스) 앞에서 scheme 시작을 찾는다. scheme = `[A-Za-z][A-Za-z0-9+.-]*`.
-/// `min` 미만으로 안 내려간다. 유효 scheme 없으면 None.
-fn scheme_start(s: &str, min: usize, sep: usize) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut start = sep;
-    while start > min {
-        let c = bytes[start - 1];
-        if c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.') {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-    if start < sep && bytes[start].is_ascii_alphabetic() {
-        Some(start)
-    } else {
-        None
-    }
-}
+/// AI(MCP)/CLI 로 나가는 문자열의 URL 을 `[RPC]` 로 가린다 — 정본은 `policy::redact_urls`(GUI 와 같은 함수, 개발 57).
+pub use crate::policy::redact_urls;
 
 /// 계정 하나 (개발 54) — 같은 시드의 HD 파생 인덱스 + 주소(공개정보) + 사람이 붙인 라벨.
 /// GUI 와 같은 타입(shared/policy.rs) — wallet.enc 의 항목이자 MCP 상태의 항목.
@@ -323,19 +277,8 @@ pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
     })
 }
 
-/// 거래 내역 1건 (감사 로그). src-tauri 가 기록한 history.json 을 그대로 읽는다.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct HistoryEntry {
-    pub ts: u64,
-    pub token: String,
-    pub to: String,
-    pub amount: String,
-    pub status: String,
-    pub detail: String,
-    /// x402 정산 tx 해시 (status가 settled/settle_failed일 때). 옛 기록엔 없어서 기본 빈 문자열.
-    #[serde(default)]
-    pub settle_tx: String,
-}
+/// 거래 내역 1건 — src-tauri 가 기록한 history 파일을 **같은 타입**으로 읽는다(`policy::HistoryEntry`, 개발 57).
+pub use crate::policy::HistoryEntry;
 
 /// 저장된 거래 내역을 읽는다 (최신순). 없거나 깨졌으면 빈 목록.
 /// detail 은 출력 시점에 redact — 이번 패치 이전(또는 다른 빌드)이 기록한 비redact 에러에
@@ -436,42 +379,8 @@ mod tests {
         assert_eq!(m.address, "0xdef");
     }
 
-    /// 거래 내역 항목이 src-tauri 가 쓴 형식과 호환되게 역직렬화된다.
-    #[test]
-    fn history_entry_roundtrips() {
-        let json = r#"{"ts":1780623842,"token":"USDC","to":"0xabc","amount":"1","status":"sent","detail":"0xhash"}"#;
-        let e: HistoryEntry = serde_json::from_str(json).unwrap();
-        assert_eq!(e.token, "USDC");
-        assert_eq!(e.status, "sent");
-        assert_eq!(e.ts, 1780623842);
-        assert_eq!(e.settle_tx, ""); // settle_tx 없는 옛 기록도 기본값으로 호환
-    }
-
-    /// MCP/CLI 에러는 AI 채팅으로 나가므로 URL 의 API 키가 새면 안 된다.
-    #[test]
-    fn redact_hides_url_api_key() {
-        let raw =
-            "RPC 연결 실패: error sending request for url (https://h/v2/SUPERSECRETKEY): timed out";
-        let red = redact_urls(raw);
-        assert!(!red.contains("SUPERSECRETKEY"), "키가 남음: {red}");
-        assert!(
-            red.contains("[RPC]") && red.contains("timed out"),
-            "형태 깨짐: {red}"
-        );
-    }
-
-    /// 코덱스: host 대소문자·query 콤마·ws/wss 우회 차단.
-    #[test]
-    fn redact_handles_case_subdelims_and_ws() {
-        assert_eq!(
-            redact_urls("x HTTPS://BASE.ALCHEMY.com/v2/KEY y"),
-            "x [RPC] y"
-        );
-        let red = redact_urls("https://rpc.example/rpc?x=a,api_key=SECRET done");
-        assert!(!red.contains("SECRET"), "{red}");
-        assert_eq!(red, "[RPC] done");
-        assert_eq!(redact_urls("wss://node/abc end"), "[RPC] end");
-    }
+    // HistoryEntry 형식·redact_urls 테스트는 policy::tests 가 본다(정본이 그쪽으로 갔다, 개발 57).
+    // 여기 남은 것은 **이 크레이트의 읽기 경로**가 그 타입·함수를 실제로 물고 있는지 보는 검사다.
 
     /// 과거 history 의 비redact detail 도 읽기 시점에 가려진다(코덱스 High).
     #[test]
@@ -489,16 +398,5 @@ mod tests {
         let red = redact_urls(&e.detail);
         assert!(!red.contains("LEAKEDKEY"), "{red}");
         assert_eq!(red, "RPC 연결 실패: [RPC]");
-    }
-
-    /// URL 아닌 텍스트·빈 scheme 은 그대로(멀티바이트 안전).
-    #[test]
-    fn redact_leaves_non_urls() {
-        assert_eq!(redact_urls("주소 파싱 실패: bad"), "주소 파싱 실패: bad");
-        assert_eq!(redact_urls("just :// floating"), "just :// floating");
-        assert_eq!(
-            redact_urls("잔액 조회 실패: https://x/y 입니다"),
-            "잔액 조회 실패: [RPC] 입니다"
-        );
     }
 }

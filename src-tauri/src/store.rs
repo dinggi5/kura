@@ -2,18 +2,19 @@
 // 도메인 파일 경로(wallet.enc, settings.json 등)는 각 도메인 모듈이 정의한다.
 
 use crate::i18n::{tf, ts};
+use crate::policy;
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// ~/.jigap 디렉터리 경로.
+/// ~/.jigap 디렉터리 경로. 이름은 `policy::JIGAP_DIR_NAME`(MCP 와 같은 상수, 개발 57).
 pub(crate) fn jigap_dir() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or(ts!(
         "홈 디렉터리를 찾을 수 없습니다",
         "Couldn't find your home folder"
     ))?;
-    Ok(home.join(".jigap"))
+    Ok(policy::jigap_dir_in(&home))
 }
 
 /// 현재 유닉스 시각(초).

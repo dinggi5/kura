@@ -5,7 +5,7 @@
 // MCP가 PAYMENT-RESPONSE로 받음). MCP가 ~/.jigap/x402_settlements.json 에 {nonce, tx, success}를
 // 기록하면, GUI 폴링이 읽어 매칭되는 "signed" 내역(detail=nonce)을 "settled"+tx 로 갱신한다.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 
@@ -14,25 +14,8 @@ use crate::settings::redact_urls;
 use crate::store::{jigap_dir, now_secs, write_json};
 use crate::wallet::{account_file, account_file_name};
 
-/// 송금 시도 1건의 기록. 성공/차단/실패를 모두 남긴다 (감사 로그).
-#[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct HistoryEntry {
-    /// 유닉스 초.
-    ts: u64,
-    /// "ETH" | "USDC".
-    token: String,
-    /// 받는 주소 (시도 당시 입력값).
-    to: String,
-    /// 금액 (십진수 문자열).
-    amount: String,
-    /// "sent" | "blocked" | "failed" | "signed"(x402 서명·정산 대기) | "settled"(x402 정산됨) | "settle_failed".
-    status: String,
-    /// sent=tx 해시, blocked/failed=사유, signed=인가 nonce(정산 매칭용).
-    detail: String,
-    /// x402 정산 tx 해시(페이실리테이터가 온체인 제출). 정산 전엔 빈 문자열. (Session 14)
-    #[serde(default)]
-    settle_tx: String,
-}
+/// 송금 시도 1건의 기록 — 형식의 정본은 `policy::HistoryEntry`(MCP·CLI 가 같은 타입으로 읽는다, 개발 57).
+pub(crate) use crate::policy::HistoryEntry;
 
 /// 거래 내역 최대 보관 개수 (오래된 건 자동으로 밀려난다).
 const HISTORY_CAP: usize = 200;

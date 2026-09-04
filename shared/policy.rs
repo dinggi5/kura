@@ -7,6 +7,10 @@
 // 두 곳(세 곳)에서 다르게 읽는」 뿌리를 여기서 뽑는다:
 //   - settings.json → 어느 체인인가 (chain.rs 의 단독 읽기 vs settings.rs 의 Settings 파싱, + MCP 사본)
 //   - settings.json → 사용자 지정 RPC (app 은 Settings 전체 파싱, MCP 는 rpc_url 단독 읽기 — 개발 57)
+//   - settings.json → ERC-8004 조회 스위치 (같은 구조, 개발 57)
+//   - history 파일의 항목 형식 HistoryEntry (app 이 쓰고 MCP·CLI 가 읽는다 — 어긋나면 AI 가 내역을 못 본다)
+//   - AI·화면으로 나가는 문자열의 URL 가리기 redact_urls (키 유출 방지 — 두 벌이면 한쪽만 구멍 난다)
+//   - ~/.jigap 디렉터리 이름
 //   - wallet.enc   → 계정 목록·활성 계정 정규화 (app EncryptedWallet vs MCP EncMeta)
 //   - 체인별·계정별 데이터 파일 이름 (chain_file · account_file_name, 양쪽 사본)
 //   - 「지갑이 이미 있는가」 (설정·체인·언어 기본값이 전부 이 질문으로 신규/기존을 가른다)
@@ -16,7 +20,7 @@
 // 않아야 양쪽에서 그대로 컴파일된다(의존은 std + serde + serde_json 만).
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── 체인 ID 정본 ────────────────────────────────────────────────────────────────────────────
 // 두 크레이트의 ChainConfig 상수가 이 값을 쓴다. 폴백 판정(아래 chain_id_for)이 테스트넷/메인넷을
@@ -31,6 +35,17 @@ pub const ARC_TESTNET_ID: u64 = 5_042_002;
 /// 두 크레이트가 아는 체인 전부 — settings.json 의 chain_id 가 이 밖이면 크레이트가 Base Sepolia 로 접는다.
 /// 체인을 추가하면 여기와 양쪽 ChainConfig 탐색에 같이 넣는다(각 크레이트 테스트가 짝을 검사한다).
 pub const SUPPORTED_CHAIN_IDS: [u64; 3] = [BASE_SEPOLIA_ID, BASE_MAINNET_ID, ARC_TESTNET_ID];
+
+// ── ~/.jigap ────────────────────────────────────────────────────────────────────────────────
+
+/// 홈 아래 데이터 디렉터리 이름. 두 크레이트의 `jigap_dir()` 이 홈을 각자 구해(dirs 크레이트 + i18n 에러
+/// 문구) 여기에 붙인다 — 이름이 갈리면 GUI 가 만든 지갑을 MCP 가 못 찾는다.
+pub const JIGAP_DIR_NAME: &str = ".jigap";
+
+/// 홈 → 데이터 디렉터리 경로.
+pub fn jigap_dir_in(home: &Path) -> PathBuf {
+    home.join(JIGAP_DIR_NAME)
+}
 
 // ── 지갑 유무 ───────────────────────────────────────────────────────────────────────────────
 
@@ -178,6 +193,38 @@ pub fn pick_rpc(custom: &str, forced_other_chain: bool, default_rpc: &str) -> St
     }
 }
 
+// ── settings.json → ERC-8004 조회 스위치 ────────────────────────────────────────────────────────
+
+/// `agent_lookup` 한 필드만 읽는 뷰 — RPC 와 같은 구조(개발 57). **기본 켜짐**: 새 바깥 연결을 여는 게
+/// 아니라 이미 잔액을 읽는 그 RPC 로 읽기 한 번을 더 하는 것이라, 끄는 쪽이 명시적 선택이다.
+#[derive(Deserialize)]
+struct LookupSel {
+    #[serde(default = "yes")]
+    agent_lookup: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// settings.json 본문 → ERC-8004 조회를 켜 뒀는가. 필드 없음·깨짐(중복 키 포함) → 켜짐.
+/// 명시적으로 끈 파일만 꺼짐 — 사용자 선택이 기본값에 먹히지 않게.
+pub fn agent_lookup_in(text: &str) -> bool {
+    serde_json::from_str::<LookupSel>(text)
+        .map(|s| s.agent_lookup)
+        .unwrap_or(true)
+}
+
+/// 파일 → 조회 스위치. 없거나 못 읽으면 켜짐(기능이 조용히 사라지는 것보다 낫다). 앱 `read_settings` 와
+/// MCP `erc8004::lookup_enabled` 가 같은 함수를 쓴다 — 깨진 파일에서 설정 화면은 「켜짐」인데 MCP 는
+/// 조회를 건너뛰던 갈림(돈은 안 움직이지만 판단 재료가 다르다)을 없앤다.
+pub fn agent_lookup_for(file: &SettingsFile) -> bool {
+    match file {
+        SettingsFile::Missing | SettingsFile::Unreadable => true,
+        SettingsFile::Text(text) => agent_lookup_in(text),
+    }
+}
+
 // ── 체인별·계정별 데이터 파일 이름 ─────────────────────────────────────────────────────────────
 
 /// 체인별로 분리하는 데이터 파일 이름(spend/history/x402_settlements/trusted).
@@ -247,9 +294,168 @@ pub fn pick_active(list: &[Account], active: u32) -> Account {
         .expect("normalize_accounts 는 계정 0 을 항상 넣는다")
 }
 
+// ── history 파일 항목 ───────────────────────────────────────────────────────────────────────────
+
+/// 송금 시도 1건의 기록(감사 로그) — GUI 가 history 파일에 쓰고 MCP·CLI 가 그대로 읽는다.
+/// 성공/차단/실패를 모두 남긴다. 필드를 더할 땐 `#[serde(default)]` 를 붙여 옛 기록이 계속 읽히게 한다.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct HistoryEntry {
+    /// 유닉스 초.
+    pub ts: u64,
+    /// "ETH" | "USDC".
+    pub token: String,
+    /// 받는 주소 (시도 당시 입력값).
+    pub to: String,
+    /// 금액 (십진수 문자열).
+    pub amount: String,
+    /// "sent" | "blocked" | "failed" | "signed"(x402 서명·정산 대기) | "settled"(x402 정산됨) | "settle_failed".
+    pub status: String,
+    /// sent=tx 해시, blocked/failed=사유, signed=인가 nonce(정산 매칭용).
+    pub detail: String,
+    /// x402 정산 tx 해시(페이실리테이터가 온체인 제출). 정산 전엔 빈 문자열. (Session 14)
+    #[serde(default)]
+    pub settle_tx: String,
+}
+
+// ── URL 가리기 ──────────────────────────────────────────────────────────────────────────────
+
+/// 사용자/AI 에 노출되는 에러·로그 문자열에서 URL 을 통째로 `[RPC]` 로 가린다.
+/// 커스텀 RPC 경로·쿼리엔 API 키가 들어가곤 한다(예: alchemy `…/v2/KEY`). alloy/reqwest 에러는
+/// URL 을 그대로 실어 나르므로 — 특히 MCP/CLI 결과·거래내역은 AI 채팅으로 나가 키가 LLM 에 샐 수 있다.
+/// **설정을 다시 읽지 않고 문자열에 보이는 URL 자체를 가린다** → 설정 변경·host 대소문자 정규화·
+/// ws/wss 등에 흔들리지 않는다(코덱스 리뷰 반영). URL 외 문자는 그대로 둔다.
+/// 개발 57 까지 두 크레이트에 같은 코드가 두 벌 있었다 — 한쪽만 고치면 다른 쪽으로 키가 샌다.
+pub fn redact_urls(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while let Some(rel) = input[cursor..].find("://") {
+        let sep = cursor + rel;
+        if let Some(start) = scheme_start(input, cursor, sep) {
+            out.push_str(&input[cursor..start]);
+            // 토큰 끝: 공백·제어문자 또는 URL 에 못 들어가는 문자("· <· >· `)에서 멈춘다.
+            // `)`·`,`·`'` 는 URL sub-delim 이라 종료자로 안 씀 — 그 뒤 키가 새지 않게 보수적으로(코덱스).
+            let token = &input[start..];
+            let end = token
+                .find(|c: char| {
+                    c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>' | '`')
+                })
+                .unwrap_or(token.len());
+            out.push_str("[RPC]");
+            cursor = start + end;
+        } else {
+            // "://" 앞에 유효 scheme 이 없다 → 그대로 두고 그 뒤부터 계속 스캔.
+            out.push_str(&input[cursor..sep + 3]);
+            cursor = sep + 3;
+        }
+    }
+    out.push_str(&input[cursor..]);
+    out
+}
+
+/// `sep`(="://"의 시작 인덱스) 앞에서 scheme 시작 인덱스를 찾는다. scheme = `[A-Za-z][A-Za-z0-9+.-]*`.
+/// `min` 미만으로는 내려가지 않는다(이미 처리한 영역 침범 방지). 유효 scheme 없으면 None.
+fn scheme_start(s: &str, min: usize, sep: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut start = sep;
+    while start > min {
+        let c = bytes[start - 1];
+        if c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.') {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    // 최소 1글자 + 맨 앞은 영문자(RFC 3986 scheme).
+    if start < sep && bytes[start].is_ascii_alphabetic() {
+        Some(start)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ~/.jigap 이름과 조회 스위치.
+    #[test]
+    fn jigap_dir_and_agent_lookup() {
+        assert_eq!(
+            jigap_dir_in(Path::new("/Users/x")),
+            PathBuf::from("/Users/x/.jigap")
+        );
+        assert!(agent_lookup_in(r#"{"chain_id":8453}"#)); // 필드 없음 → 켜짐
+        assert!(agent_lookup_in("{ 깨진 JSON"));
+        assert!(agent_lookup_in(r#"{"agent_lookup":true}"#));
+        // 명시적으로 끈 파일만 꺼짐. 한도 필드가 깨진 파일에서도 스위치는 읽힌다(갈리던 자리).
+        assert!(!agent_lookup_in(r#"{"agent_lookup":false}"#));
+        assert!(!agent_lookup_in(
+            r#"{"single_usdc":5,"agent_lookup":false}"#
+        ));
+        assert!(agent_lookup_in(r#"{"agent_lookup":"false"}"#)); // 타입 틀림 → 못 읽음 → 켜짐
+        assert!(agent_lookup_for(&SettingsFile::Missing));
+        assert!(agent_lookup_for(&SettingsFile::Unreadable));
+        assert!(!agent_lookup_for(&SettingsFile::Text(
+            r#"{"agent_lookup":false}"#.to_string()
+        )));
+    }
+
+    // history 파일 형식 — settle_tx 없는 옛 기록도 기본값으로 호환.
+    #[test]
+    fn history_entry_roundtrips() {
+        let json = r#"{"ts":1780623842,"token":"USDC","to":"0xabc","amount":"1","status":"sent","detail":"0xhash"}"#;
+        let e: HistoryEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(e.token, "USDC");
+        assert_eq!(e.status, "sent");
+        assert_eq!(e.ts, 1780623842);
+        assert_eq!(e.settle_tx, "");
+        let back: HistoryEntry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back.to, "0xabc");
+    }
+
+    // URL(경로의 API 키)이 에러 메시지에서 통째로 가려져야 한다.
+    #[test]
+    fn redact_hides_url_api_key() {
+        assert_eq!(
+            redact_urls("RPC 연결 실패: https://base-sepolia.g.alchemy.com/v2/SUPERSECRETKEY"),
+            "RPC 연결 실패: [RPC]",
+        );
+        // reqwest 처럼 괄호 안에 URL 이 박힌 경우 — 키는 사라지고 뒤 메시지는 남는다.
+        let red =
+            redact_urls("error sending request for url (https://h/v2/KEY): connection closed");
+        assert!(!red.contains("KEY"), "키가 남음: {red}");
+        assert!(
+            red.contains("[RPC]") && red.contains("connection closed"),
+            "형태 깨짐: {red}"
+        );
+    }
+
+    // 코덱스 리뷰: host 대소문자 정규화·query 콤마 뒤 키·ws/wss 우회를 막아야 한다.
+    #[test]
+    fn redact_handles_case_subdelims_and_ws() {
+        assert_eq!(
+            redact_urls("x HTTPS://BASE.g.ALCHEMY.com/v2/KEY y"),
+            "x [RPC] y"
+        ); // 대소문자
+        let red = redact_urls("https://rpc.example/rpc?x=a,api_key=SECRET done");
+        assert!(!red.contains("SECRET"), "콤마 뒤 키가 남음: {red}");
+        assert_eq!(red, "[RPC] done");
+        assert_eq!(redact_urls("wss://node/abc end"), "[RPC] end"); // websocket RPC
+    }
+
+    // URL 아닌 텍스트·빈 scheme 은 그대로 둔다(멀티바이트 안전).
+    #[test]
+    fn redact_leaves_non_urls() {
+        assert_eq!(
+            redact_urls("주소 파싱 실패: bad input"),
+            "주소 파싱 실패: bad input"
+        );
+        assert_eq!(redact_urls("just :// floating"), "just :// floating");
+        assert_eq!(
+            redact_urls("잔액 조회 실패: https://x/y 입니다"),
+            "잔액 조회 실패: [RPC] 입니다"
+        );
+    }
 
     // settings.json 본문 → chain_id (개발 39). 깨진 JSON·필드 없는 옛 파일은 테스트넷으로 접는다.
     // 🔴 다른 필드가 깨져도 chain_id 는 그대로 — 화면(Settings 파싱)도 이 답을 따라야 한다(개발 52).

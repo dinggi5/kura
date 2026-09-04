@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::chain::active_chain;
+use crate::policy;
 use crate::wallet::{effective_rpc, jigap_dir, redact_urls};
 use crate::{tf, ts};
 
@@ -111,31 +112,14 @@ pub struct AgentTrust {
     pub feedback_clients: Option<u32>,
 }
 
-/// settings.json 에서 ERC-8004 조회 스위치만 읽는 가벼운 뷰(다른 필드 무시).
-/// GUI 와 같은 파일을 공유한다 — policy 의 ChainSel/RpcSel 과 같은 「한 필드 뷰」 패턴(단, 이건 아직
-/// 여기 사본이다 — GUI 는 Settings 파싱값을 쓴다. 돈이 안 움직이는 스위치라 policy 로 안 옮겼다).
-#[derive(Deserialize)]
-struct LookupSel {
-    #[serde(default = "yes")]
-    agent_lookup: bool,
-}
-
-fn yes() -> bool {
-    true
-}
-
-/// 사용자가 ERC-8004 조회를 켜 뒀는가. **기본 켜짐** — 새 바깥 연결을 여는 게 아니라
-/// 이미 잔액을 읽고 있는 그 RPC 로 읽기 한 번을 더 하는 것이라, 끄는 쪽이 명시적 선택이다.
-/// 파일이 없거나 못 읽으면 켜짐으로 본다(기능이 조용히 사라지는 것보다 낫다).
+/// 사용자가 ERC-8004 조회를 켜 뒀는가 — 판정은 `policy::agent_lookup_for`(GUI `read_settings` 와 같은
+/// 함수, 개발 57). **기본 켜짐**: 새 바깥 연결이 아니라 이미 잔액을 읽는 그 RPC 로 읽기 한 번을 더 하는
+/// 것이라 끄는 쪽이 명시적 선택이다. 파일이 없거나 못 읽으면 켜짐(기능이 조용히 사라지는 것보다 낫다).
 pub fn lookup_enabled() -> bool {
     let Ok(dir) = jigap_dir() else {
         return true;
     };
-    std::fs::read_to_string(dir.join("settings.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<LookupSel>(&s).ok())
-        .map(|s| s.agent_lookup)
-        .unwrap_or(true)
+    policy::agent_lookup_for(&policy::SettingsFile::read(&dir.join("settings.json")))
 }
 
 /// 컨트랙트 호출이 **revert** 로 끝났는가(= 그런 토큰이 없다) — 네트워크 실패와 갈라야 한다.

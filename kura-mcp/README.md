@@ -103,7 +103,7 @@ cargo clippy --all-targets  # 경고 0
 
 - `RPC_URL` / `USDC_ADDRESS` 등 체인 상수는 `src-tauri` 와 **의도적 중복**(공유 크레이트를 안
   만드는 정책 — Tauri 빌드 위험 0). `chain.rs` 가 두 크레이트 평행 사본. 다만 `~/.jigap` 파일을
-  **읽는 규칙**(settings.json → 체인·지정 RPC, wallet.enc → 계정, 데이터 파일 이름)은 리포 루트의
+  **읽는 규칙**(settings.json → 체인·지정 RPC·조회 스위치, wallet.enc → 계정, 데이터 파일·디렉터리 이름, history 항목 형식)과 AI 로 나가는 문자열의 URL 가리기(`redact_urls`)는 리포 루트의
   `shared/policy.rs` 한 파일을 두 크레이트가 `#[path]` 모듈로 함께 컴파일한다 — 두 프로세스가
   같은 파일을 다르게 읽으면 돈이 딴 체인·딴 계정으로 가기 때문(크레이트가 아니라 의존성 변화 없음).
 - HTTP·결제 오케스트레이션(리다이렉트 가드·정산 게이팅·single-flight)은 `flow.rs` 한 곳에

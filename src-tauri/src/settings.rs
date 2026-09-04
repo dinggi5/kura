@@ -94,6 +94,7 @@ pub(crate) struct Settings {
     /// **기본 켜짐** — auto_check_update(기본 꺼짐)와 갈리는 이유: 저건 깃허브라는 **새 상대**에게
     /// 말을 거는 일이고, 이건 이미 잔액·결제로 계속 말하고 있는 **그 RPC** 에 읽기를 한 번 더
     /// 얹는 일이다. 새로 생기는 상대가 없으므로, 판단 재료를 주는 쪽을 기본으로 둔다.
+    /// 읽기는 `policy::agent_lookup_for` 가 정본(개발 57) — MCP `erc8004::lookup_enabled` 와 같은 함수.
     #[serde(default = "default_true")]
     pub(crate) agent_lookup: bool,
 
@@ -244,6 +245,9 @@ fn settings_for_read(file: &SettingsFile, wallet_exists: bool) -> Settings {
     // 로 같은 파일을 읽는다. 한도 필드 하나가 깨진 파일에서 화면은 「공식」이라 그리는데 잔액은
     // 커스텀 RPC 에 붙거나(또는 그 반대) MCP 만 커스텀을 쓰는 상태를 없앤다(개발 51 하네스 실측).
     s.rpc_url = policy::rpc_url_for(file);
+    // ERC-8004 조회 스위치도(개발 57) — MCP `lookup_enabled` 와 같은 함수. 돈은 안 움직이지만 설정 화면이
+    // 「켜짐」을 그리는데 MCP 는 건너뛰는 갈림을 없앤다.
+    s.agent_lookup = policy::agent_lookup_for(file);
     s
 }
 
@@ -295,59 +299,8 @@ pub(crate) fn effective_rpc() -> String {
     )
 }
 
-/// 사용자/AI 에 노출되는 에러·로그 문자열에서 URL 을 통째로 `[RPC]` 로 가린다.
-/// 커스텀 RPC 경로·쿼리엔 API 키가 들어가곤 한다(예: alchemy `…/v2/KEY`). alloy/reqwest 에러는
-/// URL 을 그대로 실어 나르므로 — 특히 MCP/CLI 결과·거래내역은 AI 채팅으로 나가 키가 LLM 에 샐 수 있다.
-/// **설정을 다시 읽지 않고 문자열에 보이는 URL 자체를 가린다** → 설정 변경·host 대소문자 정규화·
-/// ws/wss 등에 흔들리지 않는다(코덱스 리뷰 반영). URL 외 문자는 그대로 둔다.
-/// 양 크레이트(src-tauri·kura-mcp)에 의도적 중복 — 공유 크레이트를 안 만드는 정책.
-pub(crate) fn redact_urls(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut cursor = 0;
-    while let Some(rel) = input[cursor..].find("://") {
-        let sep = cursor + rel;
-        if let Some(start) = scheme_start(input, cursor, sep) {
-            out.push_str(&input[cursor..start]);
-            // 토큰 끝: 공백·제어문자 또는 URL 에 못 들어가는 문자("· <· >· `)에서 멈춘다.
-            // `)`·`,`·`'` 는 URL sub-delim 이라 종료자로 안 씀 — 그 뒤 키가 새지 않게 보수적으로(코덱스).
-            let token = &input[start..];
-            let end = token
-                .find(|c: char| {
-                    c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>' | '`')
-                })
-                .unwrap_or(token.len());
-            out.push_str("[RPC]");
-            cursor = start + end;
-        } else {
-            // "://" 앞에 유효 scheme 이 없다 → 그대로 두고 그 뒤부터 계속 스캔.
-            out.push_str(&input[cursor..sep + 3]);
-            cursor = sep + 3;
-        }
-    }
-    out.push_str(&input[cursor..]);
-    out
-}
-
-/// `sep`(="://"의 시작 인덱스) 앞에서 scheme 시작 인덱스를 찾는다. scheme = `[A-Za-z][A-Za-z0-9+.-]*`.
-/// `min` 미만으로는 내려가지 않는다(이미 처리한 영역 침범 방지). 유효 scheme 없으면 None.
-fn scheme_start(s: &str, min: usize, sep: usize) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut start = sep;
-    while start > min {
-        let c = bytes[start - 1];
-        if c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.') {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-    // 최소 1글자 + 맨 앞은 영문자(RFC 3986 scheme).
-    if start < sep && bytes[start].is_ascii_alphabetic() {
-        Some(start)
-    } else {
-        None
-    }
-}
+/// 에러·로그 문자열의 URL 을 `[RPC]` 로 가린다 — 정본은 `policy::redact_urls`(MCP·CLI 와 같은 함수, 개발 57).
+pub(crate) use crate::policy::redact_urls;
 
 /// 현재 한도 설정을 돌려준다 (없으면 기본값).
 #[tauri::command]
@@ -787,47 +740,5 @@ mod tests {
         );
     }
 
-    // URL(경로의 API 키)이 에러 메시지에서 통째로 가려져야 한다.
-    #[test]
-    fn redact_hides_url_api_key() {
-        assert_eq!(
-            redact_urls("RPC 연결 실패: https://base-sepolia.g.alchemy.com/v2/SUPERSECRETKEY"),
-            "RPC 연결 실패: [RPC]",
-        );
-        // reqwest 처럼 괄호 안에 URL 이 박힌 경우 — 키는 사라지고 뒤 메시지는 남는다.
-        let red =
-            redact_urls("error sending request for url (https://h/v2/KEY): connection closed");
-        assert!(!red.contains("KEY"), "키가 남음: {red}");
-        assert!(
-            red.contains("[RPC]") && red.contains("connection closed"),
-            "형태 깨짐: {red}"
-        );
-    }
-
-    // 코덱스 리뷰: host 대소문자 정규화·query 콤마 뒤 키·ws/wss 우회를 막아야 한다.
-    #[test]
-    fn redact_handles_case_subdelims_and_ws() {
-        assert_eq!(
-            redact_urls("x HTTPS://BASE.g.ALCHEMY.com/v2/KEY y"),
-            "x [RPC] y"
-        ); // 대소문자
-        let red = redact_urls("https://rpc.example/rpc?x=a,api_key=SECRET done");
-        assert!(!red.contains("SECRET"), "콤마 뒤 키가 남음: {red}");
-        assert_eq!(red, "[RPC] done");
-        assert_eq!(redact_urls("wss://node/abc end"), "[RPC] end"); // websocket RPC
-    }
-
-    // URL 아닌 텍스트·빈 scheme 은 그대로 둔다(멀티바이트 안전).
-    #[test]
-    fn redact_leaves_non_urls() {
-        assert_eq!(
-            redact_urls("주소 파싱 실패: bad input"),
-            "주소 파싱 실패: bad input"
-        );
-        assert_eq!(redact_urls("just :// floating"), "just :// floating");
-        assert_eq!(
-            redact_urls("잔액 조회 실패: https://x/y 입니다"),
-            "잔액 조회 실패: [RPC] 입니다"
-        );
-    }
+    // redact_urls 테스트는 policy::tests 가 본다(정본이 그쪽으로 갔다, 개발 57).
 }
