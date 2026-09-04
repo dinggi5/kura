@@ -47,8 +47,10 @@ fn resolve() -> Lang {
     // 🔴 여기서는 **i18n 을 쓰는 함수를 부르면 안 된다.** `wallet::jigap_dir()` 은 에러 문구에
     // ts! 를 쓰는데, 그게 다시 lang() 을 부른다 → OnceLock 초기화 중 재진입 = 영구 정지.
     // (실제로 그렇게 짰다가 테스트가 멈춰서 알았다. KURA_LANG 없이 돌리면 CLI 가 통째로 멈춘다.)
-    // 그래서 경로만 여기서 직접 만든다 — jigap_dir 과 같은 정의(`$HOME/.jigap`).
-    let Some(dir) = dirs::home_dir().map(|h| h.join(".jigap")) else {
+    // 그래서 경로만 여기서 직접 만든다 — 이름은 `policy::jigap_dir_in`(정본, 개발 57)에서 온다.
+    // 그건 순수 경로 결합이라 i18n 을 안 부른다(재진입 없음) — 리터럴을 두면 디렉터리 이름을
+    // 바꿀 때 여기만 옛 경로에 남아 **언어·지갑 유무만 딴 폴더에서** 판정한다(코덱스 개발 57 P3).
+    let Some(dir) = dirs::home_dir().map(|h| crate::policy::jigap_dir_in(&h)) else {
         return Lang::Ko;
     };
     let chosen = std::fs::read_to_string(dir.join("settings.json"))
