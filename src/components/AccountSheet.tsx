@@ -231,12 +231,16 @@ export function AccountSheet({
             {/* 개발 58 — 시드 복구는 계정 0 하나만 되살린다(build_imported_wallet). 전에 계정을
                 여러 개 쓰던 사람은 복구 직후 이 시트에서 계정 하나만 보고 「내 돈 어디 갔지」가
                 된다. 파생이 결정론적이라 다시 만들면 같은 주소가 돌아오는데, 그걸 아는 사람은
-                없다. 계정이 하나뿐일 때만 띄운다 — 여러 개인 사람에겐 이미 지난 이야기다. */}
+                없다. 계정이 하나뿐일 때만 띄운다 — 여러 개인 사람에겐 이미 지난 이야기다.
+                🔴 「그 수만큼 만들라」고 쓰면 안 된다(코덱스 P2): 복구가 계정 1을 이미 만들어
+                놨으니 3개였으면 2번이다. 하나 더 만들면 **계정은 지울 수가 없어서**(개발 54)
+                영영 남는다. 그래서 세지 말고 「다 나올 때까지」로 — 사용자가 아는 주소를 보면
+                멈춘다. */}
             {accounts.length === 1 && (
               <p className="mt-3 text-[11px] leading-relaxed text-[var(--color-ink-300)]">
                 {t(
-                  "전에 계정을 여러 개 쓰셨다면 그 수만큼 다시 만들어 주세요 — 같은 주소가 같은 순서로 돌아와요.",
-                  "If you used several accounts before, add that many again — the same addresses come back in the same order.",
+                  "전에 쓰던 계정이 더 있다면 다 나올 때까지 「새 계정」을 눌러 주세요 — 같은 주소가 같은 순서로 돌아와요.",
+                  "If you had more accounts before, tap 「New account」 until they are all back — the same addresses come back in the same order.",
                 )}
               </p>
             )}
