@@ -72,6 +72,22 @@ fn raise_main_window(app: tauri::AppHandle) {
     tray::show(&app);
 }
 
+/// 사용자가 ⌘W 로 창을 닫는다 (개발 58).
+///
+/// 🔴 이 커맨드가 없으면 ⌘W 는 **아무 일도 하지 않는다**. macOS 에서 ⌘W 는 앱 메뉴의
+/// 「닫기」(`performClose:`)로 가는데, 이 창은 `decorations: false` 라 닫기 버튼이 없어
+/// AppKit 이 그 항목을 비활성화한다 → `CloseRequested` 가 아예 안 날아온다. 개발 53 은
+/// 그 이벤트에 `hide_by_user` 를 달아 놓고 「⌘W 로도 닫힌다」고 적었지만, 실물에서 키를
+/// 눌러 본 적이 없어(보조 접근 권한이 없어 자동화가 막혔다) 개발 58 사장 실물 확인에서야
+/// 드러났다. 릴리스 노트 v0.4.0 에도 된다고 적혀 있었다 — 발행 전에 잡았다.
+///
+/// 창 닫기(`CloseRequested`)와 **같은 `hide_by_user` 를 탄다** — 「닫아 둠」 표식·만료
+/// 직전 되살리기 규칙이 두 경로에서 갈리지 않게.
+#[tauri::command]
+fn hide_main_window(app: tauri::AppHandle) {
+    tray::hide_by_user(&app);
+}
+
 /// 승인 처리(승인/거부/타임아웃)가 끝나면 항상-위 고정을 즉시 재조정.
 /// 다음 요청이 이미 대기 중이면 켜진 채로 남는다(A→B 전환에서 A 의 늦은 해제가 B 의 전면
 /// 고정을 꺼버리지 않게). 어차피 1초 폴링도 같은 값으로 수렴시킨다 — 이건 그 대기를 없애는 용.
@@ -167,6 +183,7 @@ pub fn run() {
             trusted::remove_trusted_addr,
             raise_main_window,
             release_main_window,
+            hide_main_window,
             autostart::get_autostart,
             autostart::set_autostart,
             settings::set_auto_check_update,

@@ -33,6 +33,21 @@ function App() {
     void initLang();
   }, []);
 
+  // ⌘W = 창 닫기(= 숨기기). 개발 58 — 실물에서 이 키가 아무 일도 안 하는 걸 발견했다.
+  // macOS 는 ⌘W 를 앱 메뉴의 「닫기」로 보내는데 이 창은 테두리가 없어(decorations: false)
+  // AppKit 이 그 항목을 비활성화한다 → 러스트의 CloseRequested 핸들러까지 오지 않는다.
+  // 그래서 웹뷰에서 직접 받아 같은 종착지(tray::hide_by_user)로 보낸다.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key.toLowerCase() !== "w") return;
+      e.preventDefault();
+      void invoke("hide_main_window");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   useEffect(loadStatus, [loadStatus]);
 
   // 로딩
