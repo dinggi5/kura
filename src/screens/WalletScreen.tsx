@@ -456,20 +456,23 @@ export function WalletScreen({
             onClick={() => setShowAccounts(true)}
             aria-label={t("계정 바꾸기", "Switch account")}
             className={cn(
-              "group flex items-center gap-2 -ml-1.5 pl-1.5 pr-2 py-1 rounded-full",
+              // min-w-0 이 없으면 flex 아이템이 내용 너비 밑으로 안 줄어든다 → 긴 계정
+              // 이름(최대 24자)이 420px 헤더를 밀어 오른쪽 아이콘을 잘라낸다(코덱스 P2).
+              "group flex min-w-0 items-center gap-2 -ml-1.5 pl-1.5 pr-2 py-1 rounded-full",
               "text-[var(--color-ink-900)] dark:text-[#E8E5DD] font-medium tracking-tight",
               "hover:bg-[var(--color-ivory-300)] dark:hover:bg-white/5",
               "transition-colors duration-[var(--duration-base)]",
             )}
           >
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" aria-hidden />
-            <span className="truncate max-w-[150px]">{accountName(account)}</span>
+            <span className="truncate">{accountName(account)}</span>
             <ChevronDown
               size={12}
               className="shrink-0 text-[var(--color-ink-300)] group-hover:text-[var(--color-ink-700)] transition-colors"
             />
           </button>
-          <div className="flex items-center gap-1.5">
+          {/* 오른쪽(체인 이름·아이콘)은 안 줄어든다 — 줄어들 쪽은 왼쪽 이름이다. */}
+          <div className="flex shrink-0 items-center gap-1.5">
             <span
               className={cn(
                 "mr-1 tracking-tight",
