@@ -159,7 +159,13 @@ Other MCP apps take a config like this:
 
 ### Working from source
 
-The repo root already has an [`.mcp.json`](.mcp.json). Run `claude` in this folder and it picks it up (it asks whether to use the server the first time — **approve**). That path rebuilds with `cargo run` every time, which is what you want while developing; if you're just using the app, register the app path above.
+The repo root already has an [`.mcp.json`](.mcp.json). Run `claude` in this folder and it picks it up (it asks whether to use the server the first time — **approve**). It points at [`mcpb/server/kura-mcp`](mcpb/server/kura-mcp), the **launcher that verifies the installed Kura.app's signature and execs the MCP server inside it** — the same file the released extension uses, so with the app installed it connects with no build at all.
+
+If you're **editing `kura-mcp` itself**, the installed app won't have your changes; swap `.mcp.json` for this while you work. Note that with an empty `target/` the first build takes over 30 seconds and the AI app may give up on the connection — run `cargo build` once first, then restart the AI app.
+
+```json
+{ "mcpServers": { "kura": { "command": "cargo", "args": ["run", "--quiet", "--manifest-path", "./kura-mcp/Cargo.toml"] } } }
+```
 
 Tools the AI gets: `get_wallet_status` · `get_balances` · `get_history` (read only) · `request_payment` (asks to pay → approval window in the app) · `x402_fetch` (calls a URL behind an x402 paywall) · `lookup_agent` (reads an ERC-8004 agent record on-chain, read only).
 

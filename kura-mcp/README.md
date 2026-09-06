@@ -16,7 +16,7 @@ RPC로 잔액을 조회하며, 결제는 GUI 앱에 "요청"만 한다. **비밀
 | `kura-mcp` | AI 에이전트 (stdio MCP 서버) | `src/main.rs` |
 | `kura` | 사람·스크립트 (터미널 CLI) | `src/bin/kura.rs` |
 
-`default-run = "kura-mcp"` 이므로 `.mcp.json` 의 `cargo run`(--bin 없음)은 MCP 서버를 띄운다.
+`default-run = "kura-mcp"` 이므로 `cargo run`(--bin 없음)은 MCP 서버를 띄운다.
 
 ## 기능 (MCP 도구 ↔ CLI 명령)
 
@@ -83,14 +83,20 @@ GUI 와 다른 체인을 가리켜도, 결제 요청에 각인된 chain_id 를 G
 ## Claude Code에 연결 (MCP)
 
 레포 루트의 [`.mcp.json`](../.mcp.json)에 이미 등록돼 있다. 프로젝트 디렉터리에서 Claude
-Code를 실행하면 `kura` 서버가 자동으로 뜬다(첫 실행 시 `cargo` 빌드). 도구를 바꾸면 **Claude
-Code 재시작**해야 새 바이너리가 로드된다.
+Code를 실행하면 `kura` 서버가 자동으로 뜬다. 도구를 바꾸면 **Claude Code 재시작**해야 새 서버가
+로드된다.
 
-수동 등록:
+가리키는 곳은 **설치된 `Kura.app` 안의 사이드카**다([`mcpb/server/kura-mcp`](../mcpb/server/kura-mcp)
+런처가 앱 서명을 확인하고 exec 한다 — 배포본과 같은 파일). 빌드가 없어 0.2초면 붙는다.
+
+**이 크레이트를 고치는 중**이라면 그 변경은 설치된 앱에 없다. 그땐 소스로 갈아탄다:
 
 ```bash
-claude mcp add kura -- cargo run --quiet --manifest-path ./kura-mcp/Cargo.toml
+claude mcp add kura -s local -- cargo run --quiet --manifest-path ./kura-mcp/Cargo.toml
 ```
+
+🔴 `target/` 이 비어 있으면 첫 빌드가 30초를 넘겨 **MCP 연결이 타임아웃**된다(개발 59 실측:
+콜드 빌드 31초·1.0GB). `cargo build` 를 먼저 한 번 돌리고 AI 앱을 재시작할 것.
 
 ## 검증
 
