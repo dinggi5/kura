@@ -47,12 +47,15 @@ struct WalletServer {
 // 「빠져도 된다」는 사실은 규격에선 **`required` 목록에 없는 것**으로만 표현하면 된다. 그래서
 // 값 스키마 쪽의 null 표현(널 합집합·`default: null`)은 전부 군더더기다 — 걷어낸다.
 //
-// 🔴 **`#[serde(default)]` 는 그대로 둔다.** schemars 는 그 속성을 보고 필드를 `required` 에서
-// 빼므로, 지우면 선택 인자가 **필수로 올라간다**(개발 61 에서 `with = "T"` 로 해봤다가 잡혔다).
-// 받는 쪽 동작은 어느 쪽이든 같다(serde 는 `Option<T>` 가 없으면 `None`) — 이건 스키마 문제다.
-// 🔴 선택 인자를 새로 넣을 땐 `#[serde(default)]` 와 `#[schemars(transform = plain_optional)]` 를
-// **같이** 붙인다. 하나만 붙이면 조용히 옛 모양으로 돌아간다 —
-// `optional_args_are_plain_in_generated_schema` 가 잡는다.
+// 🔴 **`Option<T>` 를 스키마에서 감추지 말 것** — 「빠져도 된다」의 근거가 그 타입이다. schemars 는
+// `Option` 필드를 알아서 `required` 에서 빼고, serde 는 키가 없으면 `None` 으로 읽는다. 둘 다
+// `#[serde(default)]` 없이도 그렇다(개발 61 에서 속성을 떼고 실측). 여기 붙어 있는 그 속성은
+// 예전부터 있던 것이고 동작을 바꾸지 않는다 — 없다고 필수가 되지 않는다.
+// 처음엔 `#[schemars(with = "T")]` 로 갔다가 **선택 인자가 전부 필수로 올라갔다**(코덱스 개발 61 P2 가
+// 주석의 원인 설명을 바로잡아 준 자리). `with` 는 schemars 에게 「이건 `Option` 이 아니다」라고
+// 말하는 것이라, required 판정까지 같이 뒤집는다. **모양만 고치고 싶을 땐 `transform` 을 쓴다.**
+// 🔴 선택 인자를 새로 넣을 땐 `#[schemars(transform = plain_optional)]` 을 빠뜨리지 말 것 —
+// 없으면 조용히 옛(모순된) 모양으로 돌아간다. `optional_args_are_plain_in_generated_schema` 가 잡는다.
 
 /// 선택 인자 한 칸의 스키마에서 null 표현을 지운다 — 위 주석의 그 처방.
 ///
@@ -449,11 +452,14 @@ mod tests {
                 !required.contains(field),
                 "{tool}.{field}: 선택 인자가 required 에 들어갔다 — 빼먹은 #[serde(default)]?"
             );
+            // 금지 대상은 **null 기본값**이지 기본값 자체가 아니다 — `plain_optional` 도 null 이
+            // 아닌 진짜 기본값(`#[serde(default = "...")]`)은 일부러 남긴다. 여기서 전부 막으면
+            // 나중에 올바른 기본값을 넣은 사람이 **맞는 스키마를 두고 검사에 쫓겨** 지우게 된다
+            // (코덱스 개발 61 P2).
             assert!(
-                p.get("default").is_none(),
-                "{tool}.{field}: default 가 남아 있다({:?}) — 타입엔 null 이 없는데 기본값이 null 이면 \
-                 엄격한 클라이언트가 이 필드를 필수로 다룬다(개발 61)",
-                p.get("default")
+                !p.get("default").is_some_and(serde_json::Value::is_null),
+                "{tool}.{field}: default 가 null 이다 — 타입엔 null 이 없는데 기본값이 null 이면 \
+                 엄격한 클라이언트가 이 필드를 필수로 다룬다(개발 61)"
             );
             assert!(
                 p.get("nullable").is_none(),
