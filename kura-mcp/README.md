@@ -68,9 +68,10 @@ kura pay 0xRecipient... 1.5 --agent 1          # 송금도 마찬가지 — 받�
 ```bash
 KURA_CHAIN_ID=84532 kura balance       # 강제로 Base Sepolia 에서 조회
 KURA_CHAIN_ID=5042002 kura balance    # Arc 테스트넷 (가스도 USDC — 잔액에 ETH 줄이 없다)
+KURA_CHAIN_ID=5042 kura balance       # Arc 메인넷 (실제 자금)
 ```
 
-지원 값은 `8453`(Base 메인넷) · `84532`(Base Sepolia) · `5042002`(Arc 테스트넷) 셋뿐이고,
+지원 값은 `8453`(Base 메인넷) · `5042`(Arc 메인넷) · `84532`(Base Sepolia) · `5042002`(Arc 테스트넷) 넷뿐이고,
 그 밖의 값은 **조용히 폴백하지 않고 즉시 종료**한다(오타가 실돈 체인으로 도는 것 방지).
 
 GUI 와 다른 체인을 가리켜도, 결제 요청에 각인된 chain_id 를 GUI 가 승인 시 대조해 거부하므로

@@ -7,7 +7,7 @@ Mac에서 Claude 같은 AI가 인터넷 결제(x402)를 할 때, 사람이 비�
 - 클라우드 SaaS 아님 — **로컬에서만** 돌아가요. 키는 이 컴퓨터를 떠나지 않아요.
 - AI가 결제를 **요청** → 사람이 **비밀번호로 승인** → 실행
 - 체인은 **Base**(이더리움 L2, 수수료 거의 0). 기본은 메인넷 — 연습용 테스트넷(Base Sepolia)으로 설정에서 전환할 수 있어요
-- **Arc 테스트넷**(Circle L1)도 고를 수 있어요. 가스도 USDC로 내는 체인이라 «가스용 ETH가 따로 필요한» 문제가 없어요. 다만 아직 x402 결제를 받아 줄 곳이 없어서, 지금은 잔액·송금까지예요
+- **Arc**(Circle L1)도 고를 수 있어요 — 메인넷과 테스트넷 둘 다. 가스도 USDC로 내는 체인이라 «가스용 ETH가 따로 필요한» 문제가 없어요. 다만 아직 x402 결제를 받아 줄 곳이 없어서, 지금은 잔액·송금까지예요
 
 In English: **[README.en.md](README.en.md)**
 
@@ -52,7 +52,7 @@ brew install --cask dinggi5/tap/kura
 ```bash
 git clone https://github.com/dinggi5/kura.git
 cd kura
-git checkout v0.4.0   # 배포본과 같은 소스. 빼면 개발 중인 최신 코드가 받아져요
+git checkout v0.4.1   # 배포본과 같은 소스. 빼면 개발 중인 최신 코드가 받아져요
 npm ci                # package-lock.json 그대로 설치 (install 은 버전이 올라갈 수 있어요)
 
 # 개발 모드로 바로 실행

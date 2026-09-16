@@ -682,6 +682,7 @@ fn network_label() -> String {
         84_532 => ts!("Base Sepolia (테스트넷)", "Base Sepolia (testnet)").into(),
         8453 => ts!("Base 메인넷 · 실제 자금 ⚠️", "Base mainnet · real funds ⚠️").into(),
         5_042_002 => ts!("Arc 테스트넷", "Arc testnet").into(),
+        5042 => ts!("Arc 메인넷 · 실제 자금 ⚠️", "Arc mainnet · real funds ⚠️").into(),
         id => tf!("체인 {id}", "chain {id}"),
     }
 }

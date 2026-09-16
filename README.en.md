@@ -7,7 +7,7 @@ On a Mac, when an AI like Claude pays for something online (x402), Kura is the w
 - Not a cloud SaaS — it runs **locally only**. The key never leaves this computer.
 - The AI **asks** to pay → a human **approves with a password** → it goes out
 - The chain is **Base** (an Ethereum L2, fees near zero). Mainnet by default; you can switch to the practice testnet (Base Sepolia) in settings
-- **Arc testnet** (Circle's L1) is selectable too. Gas there is paid in USDC, so there is no separate "you also need ETH for gas" problem. No facilitator settles x402 on Arc yet, so for now it is balances and transfers only
+- **Arc** (Circle's L1) is selectable too — mainnet and testnet. Gas there is paid in USDC, so there is no separate "you also need ETH for gas" problem. No facilitator settles x402 on Arc yet, so for now it is balances and transfers only
 
 한국어 문서: **[README.md](README.md)**
 
@@ -52,7 +52,7 @@ You'll need [Rust](https://rustup.rs), [Node.js](https://nodejs.org) (20.19+ or 
 ```bash
 git clone https://github.com/dinggi5/kura.git
 cd kura
-git checkout v0.4.0   # the same source as the release. Omit it to get the latest development code
+git checkout v0.4.1   # the same source as the release. Omit it to get the latest development code
 npm ci                # installs exactly what package-lock.json says (install may bump versions)
 
 # run it in development mode

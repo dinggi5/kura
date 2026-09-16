@@ -85,8 +85,9 @@ export const BASE_MAINNET: ChainConfig = {
 export const ARC_TESTNET: ChainConfig = {
   id: 5042002,
   name: t("Arc 테스트넷", "Arc testnet"),
-  explorerName: "Arcscan",
-  explorerTx: "https://testnet.arcscan.app/tx/",
+  explorerName: "Arc Explorer",
+  // testnet.arcscan.app 은 이제 이 주소로 301 리다이렉트한다(개발 62 실측) — 정본으로 바꿨다.
+  explorerTx: "https://explorer.testnet.arc.io/tx/",
   defaultRpc: "https://rpc.testnet.arc.network",
   // publicNode 없음 — Arc 를 서비스하는 PublicNode 엔드포인트가 아직 없다(개발 50 실측).
   testnet: true,
@@ -97,8 +98,30 @@ export const ARC_TESTNET: ChainConfig = {
   erc8004: true,
 };
 
-/** 선택 가능한 체인 목록 (설정 토글 순서 — 메인넷이 왼쪽/기본, 개발 39). */
-export const CHAINS: ChainConfig[] = [BASE_MAINNET, BASE_SEPOLIA, ARC_TESTNET];
+/** Arc 메인넷 (Circle L1, 실제 자금, 개발 62 — 2026-09-16 공개). 테스트넷과 같이 가스도 USDC.
+ *  값의 출처(전부 공식 RPC 실응답)와 가스 여유분 0.05 의 근거는 src-tauri/src/chain.rs 의 ARC_MAINNET 주석 —
+ *  메인넷 기본 수수료가 테스트넷의 7~10배(바닥 20 gwei → 공개 당일 80~200 gwei)라 첫 수령 송금 최악값이
+ *  ≈0.017 USDC 다. 0.01 을 복사하면 «잔액 전부» 송금이 체인에서 실패한다.
+ *  ERC-8004 는 Base 메인넷 쌍 주소로 배포돼 있다(MCP 가 그 주소로 조회) → true.
+ *  익스플로러는 공식 Blockscout(explorer.arc.io) — arcscan.app 엔 메인넷이 없다. */
+export const ARC_MAINNET: ChainConfig = {
+  id: 5042,
+  name: t("Arc 메인넷", "Arc mainnet"),
+  explorerName: "Arc Explorer",
+  explorerTx: "https://explorer.arc.io/tx/",
+  defaultRpc: "https://rpc.mainnet.arc.io",
+  // publicNode 없음 — Arc 를 서비스하는 PublicNode 엔드포인트는 메인넷에도 없다(개발 62 확인).
+  testnet: false,
+  // 거래소 드롭다운 이름. 아직 상장 거래소가 없어 체인 이름 그대로 — 실제 거래소 표기가 확인되면 갱신.
+  depositNetwork: "Arc",
+  nativeIsUsdc: true,
+  gasReserveUsdc: 0.05,
+  erc8004: true,
+};
+
+/** 선택 가능한 체인 목록 (설정 토글 순서 — 메인넷이 왼쪽/기본, 개발 39). 넷이 되면서 2×2 격자:
+ *  윗줄 = 실제 자금(Base·Arc), 아랫줄 = 연습용(Base Sepolia·Arc 테스트넷) — 같은 열이 같은 체인(개발 62). */
+export const CHAINS: ChainConfig[] = [BASE_MAINNET, ARC_MAINNET, BASE_SEPOLIA, ARC_TESTNET];
 
 /** chain_id → ChainConfig. 두 폴백이 다르다(코덱스 개발 39 P2):
  *  - undefined(설정 로드 전) → 메인넷 — 신규 기본과 일치시켜 로드 전후 화면이 안 흔들리게.

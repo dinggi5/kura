@@ -409,14 +409,14 @@ mod tests {
     // **양 체인 모두** 검증한다(설정과 무관, 명시 const). 특히 메인넷 USDC 의 도메인 name 은 Sepolia
     // ("USDC")와 달리 "USD Coin" 이라, 이 테스트가 메인넷 진입 전 그 값이 맞는지 확정하는 게이트다.
     #[tokio::test]
-    #[ignore = "네트워크 필요 (Base Sepolia + Base 메인넷 공개 RPC)"]
+    #[ignore = "네트워크 필요 (Base Sepolia + Base 메인넷 + Arc 테스트넷·메인넷 공개 RPC)"]
     async fn x402_domain_matches_usdc_onchain() {
-        use crate::chain::{ARC_TESTNET, BASE_MAINNET, BASE_SEPOLIA};
+        use crate::chain::{ARC_MAINNET, ARC_TESTNET, BASE_MAINNET, BASE_SEPOLIA};
         use alloy::sol_types::{eip712_domain, Eip712Domain};
 
-        // Arc 도 같이 본다 (개발 50). 이 테스트가 Arc 에서 통과한다 = **우리가 만드는 서명 도메인이
-        // Arc USDC 컨트랙트가 기대하는 것과 바이트 단위로 같다** = 정산해 줄 서버만 나타나면 그대로 선다.
-        for chain in [BASE_SEPOLIA, BASE_MAINNET, ARC_TESTNET] {
+        // Arc 도 같이 본다 (개발 50, 메인넷은 개발 62). 이 테스트가 Arc 에서 통과한다 = **우리가 만드는 서명
+        // 도메인이 Arc USDC 컨트랙트가 기대하는 것과 바이트 단위로 같다** = 정산해 줄 서버만 나타나면 그대로 선다.
+        for chain in [BASE_SEPOLIA, BASE_MAINNET, ARC_TESTNET, ARC_MAINNET] {
             let domain: Eip712Domain = eip712_domain! {
                 name: chain.usdc_eip712_name,
                 version: chain.usdc_eip712_version,

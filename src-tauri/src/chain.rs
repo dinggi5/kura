@@ -43,7 +43,7 @@ pub(crate) struct ChainConfig {
     /// 가스가 같은 잔액에서 나가는 체인(Arc)에선 «잔액 전부» 송금이 가스를 못 내 실패한다.
     /// 근거(개발 50 실측, Arc 테스트넷): ERC-20 transfer `eth_estimateGas` = 49,314 ·
     /// `eth_gasPrice` = 21 gwei 상당 → 1회 약 0.00104 USDC. 여기 값은 그 10배(혼잡·가격 변동 여유).
-    /// 🔴 **Arc 메인넷을 붙일 땐 다시 재야 한다** — 메인넷 가스가 테스트넷과 같을 이유가 없다.
+    /// Arc 메인넷은 개발 62 에서 따로 쟀다(ARC_MAINNET 주석) — 기본 수수료가 테스트넷의 7~10배라 값이 다르다.
     /// 프론트 `src/lib/chain.ts` 의 `gasReserveUsdc` 와 같은 값을 유지한다(평행 사본 정책).
     pub(crate) gas_reserve_usdc: &'static str,
 }
@@ -92,6 +92,35 @@ pub(crate) const ARC_TESTNET: ChainConfig = ChainConfig {
     gas_reserve_usdc: "0.01",
 };
 
+/// Arc 메인넷 (Circle L1, 실제 자금, 개발 62). 2026-09-16 공개. 테스트넷과 같이 USDC 가 네이티브 가스다.
+///
+/// 값 출처는 전부 개발 62 에서 공식 RPC(`rpc.mainnet.arc.io`, Arc 문서의 Primary)에 직접 물은 실응답이다:
+/// `eth_chainId`=0x13b2(5042) · USDC 는 테스트넷과 같은 시스템 주소 `0x3600…0000`(코드 있음) ·
+/// `name()`="USDC" · `symbol()`="USDC" · `decimals()`=6 · `version()`="2" ·
+/// `DOMAIN_SEPARATOR()`=0x940506929bba468048a19b567f4f0d534714bc06604b5c3017e5d16785ccdf84
+/// (x402_domain_matches_usdc_onchain 가 우리 도메인과 대조한다). Base 메인넷("USD Coin")과 달리 name 은
+/// 테스트넷과 같은 "USDC" 다 — 실응답이 그렇다.
+///
+/// **가스 여유분 0.05** 근거(개발 62 실측, 2026-09-17 KST 새벽 = 공개 다음 날):
+/// - 가스 단위는 테스트넷과 같다 — `eth_estimateGas` ERC-20 transfer: 처음 받는 주소 74,814 · 잔액 있는 주소 49,326.
+/// - 기본 수수료(baseFee)는 다르다 — 비공개 기간(5/15~) 내내 **바닥 20 gwei**(테스트넷과 같음)였다가
+///   공개 당일 80~200 gwei 로 뛰었고, 우선 수수료(tip) p50 은 20~30 gwei, 블록에 따라 700~1,100 gwei 까지.
+/// - 최악값(첫 수령 74,814 gas × 200 gwei + tip 30) ≈ **0.017 USDC**. 바닥값(20+25) ≈ 0.0034.
+/// - 0.05 = 최악값의 3배·바닥값의 15배. 개발 50 처방(「전형값의 10배」)을 메인넷 전형값(공개 첫날 ~0.012)에
+///   적용하면 0.12 인데, 이 값은 **못 보내는 하한**이지 실제 가스가 아니라 3배면 충분하다고 봤다 —
+///   모자라면 체인이 거절할 뿐 돈은 안 나간다(insufficient funds). 수수료가 몇 주 뒤 어디에 자리 잡는지
+///   보고 다시 잰다(DEVLOG 개발 62 「다음」).
+pub(crate) const ARC_MAINNET: ChainConfig = ChainConfig {
+    chain_id: policy::ARC_MAINNET_ID,
+    default_rpc: "https://rpc.mainnet.arc.io",
+    usdc_address: address!("0x3600000000000000000000000000000000000000"),
+    usdc_decimals: 6,
+    usdc_eip712_name: "USDC",
+    usdc_eip712_version: "2",
+    native_is_usdc: true,
+    gas_reserve_usdc: "0.05",
+};
+
 tokio::task_local! {
     /// 한 작업(송금/서명/승인) 동안 고정된 체인 ID. with_pinned_chain 으로 설정하면 그 작업의 모든
     /// active_chain()/chain_file()/effective_rpc 호출이 이 값을 본다 — 작업 도중 settings.json 이
@@ -127,6 +156,7 @@ pub(crate) fn chain_by_id(id: u64) -> Option<ChainConfig> {
         id if id == BASE_SEPOLIA.chain_id => Some(BASE_SEPOLIA),
         id if id == BASE_MAINNET.chain_id => Some(BASE_MAINNET),
         id if id == ARC_TESTNET.chain_id => Some(ARC_TESTNET),
+        id if id == ARC_MAINNET.chain_id => Some(ARC_MAINNET),
         _ => None,
     }
 }
@@ -211,6 +241,30 @@ mod tests {
         // 기본 체인이 아니므로 데이터 파일은 접미사가 붙는다(Base 와 사용액·내역이 절대 안 섞이게).
         assert_ne!(ARC_TESTNET.chain_id, BASE_SEPOLIA.chain_id);
     }
+    // Arc 메인넷 상수 회귀 가드 (개발 62). 값은 전부 공식 RPC 실응답에서 옮겨 적은 것(ARC_MAINNET 주석).
+    // 테스트넷과 「거의 같아서」 복사하다 한 글자 남기는 사고가 제일 무섭다 — 체인 ID 와 가스 여유분이 다르다.
+    #[test]
+    fn arc_mainnet_constants_are_pinned() {
+        assert_eq!(ARC_MAINNET.chain_id, 5042);
+        assert_eq!(
+            ARC_MAINNET.usdc_address,
+            address!("0x3600000000000000000000000000000000000000")
+        );
+        assert_eq!(ARC_MAINNET.usdc_decimals, 6);
+        // 🔴 Base 메인넷은 "USD Coin" 이지만 Arc 메인넷은 테스트넷처럼 "USDC" 다(온체인 name() 실응답).
+        assert_eq!(ARC_MAINNET.usdc_eip712_name, "USDC");
+        assert_eq!(ARC_MAINNET.usdc_eip712_version, "2");
+        const { assert!(ARC_MAINNET.native_is_usdc) };
+        assert_eq!(ARC_MAINNET.default_rpc, "https://rpc.mainnet.arc.io");
+        // 가스 여유분은 테스트넷(0.01)보다 크다 — 메인넷 기본 수수료가 7~10배라 0.01 로는 첫 수령 송금이
+        // 실패한다(74,814 gas × 157 gwei ≈ 0.0117). 테스트넷 값을 그대로 복사하면 여기서 잡힌다.
+        assert_eq!(ARC_MAINNET.gas_reserve_usdc, "0.05");
+        assert_ne!(ARC_MAINNET.gas_reserve_usdc, ARC_TESTNET.gas_reserve_usdc);
+        assert_eq!(chain_by_id(5042).unwrap().chain_id, 5042);
+        // 메인넷과 테스트넷은 다른 체인 ID — 데이터 파일(접미사 -5042 / -5042002)이 안 섞인다.
+        assert_ne!(ARC_MAINNET.chain_id, ARC_TESTNET.chain_id);
+    }
+
     // settings.json 본문 → chain_id 해석은 policy::tests 가 본다(정본이 그쪽으로 갔다, 개발 56).
 
     // policy::SUPPORTED_CHAIN_IDS 와 chain_by_id 가 같은 집합이어야 한다(개발 57) — policy 는 이 목록으로
@@ -224,7 +278,7 @@ mod tests {
                 "policy 엔 있는데 chain_by_id 엔 없다: {id}"
             );
         }
-        for c in [BASE_SEPOLIA, BASE_MAINNET, ARC_TESTNET] {
+        for c in [BASE_SEPOLIA, BASE_MAINNET, ARC_TESTNET, ARC_MAINNET] {
             assert!(policy::SUPPORTED_CHAIN_IDS.contains(&c.chain_id));
         }
     }

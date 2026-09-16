@@ -397,7 +397,9 @@ export function SettingsScreen({
             </Section>
 
             {/* 네트워크 (개발 20) — 메인넷 ↔ 테스트넷 런타임 전환. 개발 39부터 메인넷이
-                왼쪽·기본(CHAINS 순서). 메인넷 선택 시엔 실돈 경고를 콜아웃으로 올려 위계를 준다. */}
+                왼쪽·기본(CHAINS 순서). 메인넷 선택 시엔 실돈 경고를 콜아웃으로 올려 위계를 준다.
+                개발 62 부터 넷 — 420px 창에 네 칸을 한 줄로 두면 «Base Sepolia» 가 접혀서 2×2
+                (윗줄 실제 자금 · 아랫줄 연습용, 열은 같은 체인 계열). */}
             <Section
               icon={<Network size={13} className="text-[var(--color-accent)]" />}
               title={t("네트워크", "Network")}
@@ -409,7 +411,7 @@ export function SettingsScreen({
                   "The blockchain your balance and payments live on. Mainnet moves real funds; the testnet is practice with fake coins. Limits, spending, history, and the allowlist are kept per chain.",
                 )}
               </p>
-              <div className="mt-4 grid grid-cols-3 gap-2">
+              <div className="mt-4 grid grid-cols-2 gap-2">
                 {CHAINS.map((c) => {
                   const active = c.id === s.chain_id;
                   return (
@@ -440,10 +442,16 @@ export function SettingsScreen({
                 // 실돈 경고는 문장 한 줄이 아니라 콜아웃 — 일상 설정과 위험 설정의 시각 위계 분리(개발 39).
                 <div className="mt-2.5 rounded-[var(--radius-card)] border border-amber-500/30 bg-amber-500/5 px-3.5 py-2.5">
                   <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-500">
-                    {t(
-                      "메인넷은 실제 USDC·ETH가 오가요. 운영 예산만 소액 충전하고, 위의 한도를 확인해 두세요. 바꾼 뒤 저장을 누르면 적용돼요.",
-                      "Mainnet moves real USDC and ETH. Top up only what the agent needs, and check your limits above. Press save to apply the change.",
-                    )}
+                    {chain.nativeIsUsdc
+                      ? // 가스가 곧 USDC 인 체인(Arc)엔 ETH 가 없다 — «USDC·ETH» 라고 쓰면 없는 걸 있다고 하는 셈.
+                        t(
+                          "메인넷은 실제 USDC가 오가요. 운영 예산만 소액 충전하고, 위의 한도를 확인해 두세요. 바꾼 뒤 저장을 누르면 적용돼요.",
+                          "Mainnet moves real USDC. Top up only what the agent needs, and check your limits above. Press save to apply the change.",
+                        )
+                      : t(
+                          "메인넷은 실제 USDC·ETH가 오가요. 운영 예산만 소액 충전하고, 위의 한도를 확인해 두세요. 바꾼 뒤 저장을 누르면 적용돼요.",
+                          "Mainnet moves real USDC and ETH. Top up only what the agent needs, and check your limits above. Press save to apply the change.",
+                        )}
                   </p>
                 </div>
               )}

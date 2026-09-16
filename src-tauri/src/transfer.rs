@@ -546,14 +546,22 @@ mod tests {
     /// 두 조회를 **같은 블록에 고정**해서 그 사이 입금이 들어와도 흔들리지 않게 한다.
     /// 잔액이 0인 주소는 이 식이 그냥 성립하므로, 최근 블록에서 **실제로 움직인 주소**를 골라 쓴다.
     #[tokio::test]
-    #[ignore = "네트워크 필요 (Arc 테스트넷 공개 RPC)"]
+    #[ignore = "네트워크 필요 (Arc 테스트넷·메인넷 공개 RPC)"]
     async fn arc_native_and_erc20_are_the_same_money() {
-        use crate::chain::ARC_TESTNET;
+        use crate::chain::{ARC_MAINNET, ARC_TESTNET};
+        // 메인넷도 같은 질문이다(개발 62) — UI 결정이 체인 하나가 아니라 «Arc 라는 설계» 위에 서 있으니
+        // 두 체인 모두에서 성립해야 한다.
+        for chain in [ARC_TESTNET, ARC_MAINNET] {
+            arc_same_money_on(chain).await;
+        }
+    }
+
+    async fn arc_same_money_on(chain: crate::chain::ChainConfig) {
         use alloy::eips::BlockId;
         use alloy::providers::Provider;
 
         let provider = ProviderBuilder::new()
-            .connect(ARC_TESTNET.default_rpc)
+            .connect(chain.default_rpc)
             .await
             .expect("Arc RPC 연결");
         let n = provider.get_block_number().await.expect("블록 번호");
@@ -576,7 +584,7 @@ mod tests {
             .block_id(at)
             .await
             .expect("네이티브 잔액");
-        let erc20 = IERC20::new(ARC_TESTNET.usdc_address, &provider)
+        let erc20 = IERC20::new(chain.usdc_address, &provider)
             .balanceOf(addr)
             .block(at)
             .call()
@@ -586,7 +594,8 @@ mod tests {
         // 18dp → 6dp 는 10^12 로 나눈 몫(내림).
         let scale = U256::from(10u64).pow(U256::from(12u64));
         println!(
-            "Arc {addr} @ block {n}: native={native}  erc20={erc20}  native/1e12={}",
+            "Arc {} {addr} @ block {n}: native={native}  erc20={erc20}  native/1e12={}",
+            chain.chain_id,
             native / scale
         );
         assert!(

@@ -95,9 +95,36 @@ pub const ARC_TESTNET: ChainConfig = ChainConfig {
     usdc_eip712_version: "2",
     x402_network_v1: None,
     x402_network_caip2: "eip155:5042002",
-    explorer_tx_prefix: "https://testnet.arcscan.app/tx/",
+    explorer_tx_prefix: "https://explorer.testnet.arc.io/tx/",
     erc8004_identity: Some(address!("0x8004A818BFB912233c491871b3d84c89A494BD9e")),
     erc8004_reputation: Some(address!("0x8004B663056A597Dffe9eCcC1965A193B7388713")),
+    native_is_usdc: true,
+};
+
+/// Arc 메인넷 (Circle L1, 실제 자금, 개발 62). 2026-09-16 공개. USDC 가 네이티브 가스인 건 테스트넷과 같다.
+/// 체인 값의 출처(전부 공식 RPC 실응답)는 src-tauri/src/chain.rs 의 ARC_MAINNET 주석.
+///
+/// x402: 테스트넷과 같이 **V1 단축명이 없다** — CAIP-2 `eip155:5042` 로만 매칭한다.
+/// ⚠️ 개발 62 시점에도 이 체인을 우리 형식(USDC EIP-3009 도메인)으로 정산해 주는 페이실리테이터는 없다.
+/// Circle Gateway 메인넷(`gateway-api.circle.com/v1/x402/supported`)이 `eip155:5042` 를 올렸지만 여전히
+/// `extra:{name:"GatewayWalletBatched", version:"1", verifyingContract:"0x7777…00ee"}` 다 — x402.rs 의 extra
+/// 가드가 걸러 낸다. x402.org 페이실리테이터는 테스트넷 전용(Arc 없음). 「서명 경로는 서 있고 받아 줄 상대가
+/// 없다」는 상태가 메인넷에서도 그대로다.
+///
+/// ERC-8004: **Base 메인넷과 같은 주소**(테스트넷 쌍이 아니라 메인넷 쌍)로 있다 — 개발 62 에서 두 주소 모두
+/// 메인넷 RPC 로 `getVersion()` = "2.0.0" 실응답, 테스트넷 쌍 주소엔 코드가 없음(`eth_getCode` = 0x).
+pub const ARC_MAINNET: ChainConfig = ChainConfig {
+    chain_id: policy::ARC_MAINNET_ID,
+    default_rpc: "https://rpc.mainnet.arc.io",
+    usdc_address: address!("0x3600000000000000000000000000000000000000"),
+    usdc_decimals: 6,
+    usdc_eip712_name: "USDC",
+    usdc_eip712_version: "2",
+    x402_network_v1: None,
+    x402_network_caip2: "eip155:5042",
+    explorer_tx_prefix: "https://explorer.arc.io/tx/",
+    erc8004_identity: Some(address!("0x8004A169FB4a3325136EB29fA0ceB6D2e539a432")),
+    erc8004_reputation: Some(address!("0x8004BAa17C55a88189AE136b182e5fdA19dE9b63")),
     native_is_usdc: true,
 };
 
@@ -122,11 +149,13 @@ fn env_chain_id() -> Option<u64> {
             eprintln!("KURA_CHAIN_ID is not an integer: {v:?}");
             std::process::exit(1);
         });
-        if id != BASE_SEPOLIA.chain_id && id != BASE_MAINNET.chain_id && id != ARC_TESTNET.chain_id
-        {
+        if !policy::SUPPORTED_CHAIN_IDS.contains(&id) {
             eprintln!(
-                "KURA_CHAIN_ID={id} is not a supported chain (supported: {} / {} / {}).",
-                BASE_SEPOLIA.chain_id, BASE_MAINNET.chain_id, ARC_TESTNET.chain_id
+                "KURA_CHAIN_ID={id} is not a supported chain (supported: {} / {} / {} / {}).",
+                BASE_SEPOLIA.chain_id,
+                BASE_MAINNET.chain_id,
+                ARC_TESTNET.chain_id,
+                ARC_MAINNET.chain_id
             );
             std::process::exit(1);
         }
@@ -176,6 +205,7 @@ pub fn active_chain() -> ChainConfig {
     match selected_chain_id() {
         id if id == BASE_MAINNET.chain_id => BASE_MAINNET,
         id if id == ARC_TESTNET.chain_id => ARC_TESTNET,
+        id if id == ARC_MAINNET.chain_id => ARC_MAINNET,
         _ => BASE_SEPOLIA,
     }
 }
@@ -223,6 +253,41 @@ mod tests {
             ARC_TESTNET.erc8004_reputation,
             BASE_SEPOLIA.erc8004_reputation
         );
+        // Arc 메인넷은 **Base 메인넷 쌍**과 같다(개발 62 메인넷 RPC getVersion()="2.0.0" 실응답; 테스트넷 쌍
+        // 주소엔 코드 없음). 테스트넷 상수를 복사하다 테스트넷 쌍을 남기면 조회가 늘 「없음」이 된다.
+        assert_eq!(ARC_MAINNET.erc8004_identity, BASE_MAINNET.erc8004_identity);
+        assert_eq!(
+            ARC_MAINNET.erc8004_reputation,
+            BASE_MAINNET.erc8004_reputation
+        );
+        assert_ne!(ARC_MAINNET.erc8004_identity, ARC_TESTNET.erc8004_identity);
+    }
+
+    /// Arc 메인넷 상수 회귀 가드 (개발 62). 전부 공식 RPC 실응답을 옮겨 적은 값(src-tauri ARC_MAINNET 주석).
+    #[test]
+    fn arc_mainnet_constants_are_pinned() {
+        assert_eq!(ARC_MAINNET.chain_id, 5042);
+        assert_eq!(
+            ARC_MAINNET.usdc_address.to_string().to_lowercase(),
+            "0x3600000000000000000000000000000000000000"
+        );
+        assert_eq!(ARC_MAINNET.usdc_decimals, 6);
+        // Base 메인넷("USD Coin")과 달리 "USDC" — 온체인 name() 실응답.
+        assert_eq!(ARC_MAINNET.usdc_eip712_name, "USDC");
+        assert_eq!(ARC_MAINNET.usdc_eip712_version, "2");
+        const { assert!(ARC_MAINNET.native_is_usdc) };
+        assert_eq!(ARC_MAINNET.x402_network_v1, None);
+        // 🔴 CAIP-2 가 테스트넷(eip155:5042002)과 앞자리가 같다 — 뒤가 잘리거나 남으면 딴 체인 요구를 받는다.
+        assert_eq!(ARC_MAINNET.x402_network_caip2, "eip155:5042");
+        assert_ne!(
+            ARC_MAINNET.x402_network_caip2,
+            ARC_TESTNET.x402_network_caip2
+        );
+        assert_eq!(ARC_MAINNET.default_rpc, "https://rpc.mainnet.arc.io");
+        assert_eq!(
+            ARC_MAINNET.explorer_tx_prefix,
+            "https://explorer.arc.io/tx/"
+        );
     }
 
     /// Arc 테스트넷 상수 회귀 가드 (개발 50). 전부 라이브 RPC 실응답을 옮겨 적은 값.
@@ -251,7 +316,7 @@ mod tests {
     // 버릴지」 정한다. src-tauri 의 같은 테스트와 짝.
     #[test]
     fn supported_chain_ids_match_this_crate() {
-        let mine = [BASE_SEPOLIA, BASE_MAINNET, ARC_TESTNET].map(|c| c.chain_id);
+        let mine = [BASE_SEPOLIA, BASE_MAINNET, ARC_TESTNET, ARC_MAINNET].map(|c| c.chain_id);
         assert_eq!(mine.len(), policy::SUPPORTED_CHAIN_IDS.len());
         for id in policy::SUPPORTED_CHAIN_IDS {
             assert!(

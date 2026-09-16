@@ -32,9 +32,16 @@ pub const BASE_SEPOLIA_ID: u64 = 84_532;
 pub const BASE_MAINNET_ID: u64 = 8453;
 /// Arc 테스트넷 (Circle L1, 개발 50).
 pub const ARC_TESTNET_ID: u64 = 5_042_002;
+/// Arc 메인넷 (실제 자금, 개발 62). 2026-09-16 공개 — `eth_chainId` = 0x13b2 실응답.
+pub const ARC_MAINNET_ID: u64 = 5042;
 /// 두 크레이트가 아는 체인 전부 — settings.json 의 chain_id 가 이 밖이면 크레이트가 Base Sepolia 로 접는다.
 /// 체인을 추가하면 여기와 양쪽 ChainConfig 탐색에 같이 넣는다(각 크레이트 테스트가 짝을 검사한다).
-pub const SUPPORTED_CHAIN_IDS: [u64; 3] = [BASE_SEPOLIA_ID, BASE_MAINNET_ID, ARC_TESTNET_ID];
+pub const SUPPORTED_CHAIN_IDS: [u64; 4] = [
+    BASE_SEPOLIA_ID,
+    BASE_MAINNET_ID,
+    ARC_TESTNET_ID,
+    ARC_MAINNET_ID,
+];
 
 // ── ~/.jigap ────────────────────────────────────────────────────────────────────────────────
 
@@ -477,6 +484,7 @@ mod tests {
             chain_id_in(r#"{"daily_usdc":"20","chain_id":5042002}"#),
             ARC_TESTNET_ID
         );
+        assert_eq!(chain_id_in(r#"{"chain_id":5042}"#), ARC_MAINNET_ID);
         // 정규화하지 않는다 — 미지원 id 는 그대로(지원 판단은 ChainConfig 탐색 몫).
         assert_eq!(chain_id_in(r#"{"chain_id":1}"#), 1);
     }
@@ -598,6 +606,7 @@ mod tests {
             format!(r#"{{"chain_id":8453,{rpc}}}"#),
             format!(r#"{{"chain_id":84532,{rpc}}}"#),
             format!(r#"{{"chain_id":5042002,{rpc}}}"#),
+            format!(r#"{{"chain_id":5042,{rpc}}}"#),
             format!(r#"{{"chain_id":1,{rpc}}}"#),
             format!(r#"{{"chain_id":"8453",{rpc}}}"#),
             format!(r#"{{"chain_id":null,{rpc}}}"#),
@@ -673,6 +682,12 @@ mod tests {
         assert_eq!(
             chain_file_name(ARC_TESTNET_ID, "spend"),
             "spend-5042002.json"
+        );
+        // Arc 메인넷(5042)은 테스트넷(5042002)과 접두가 같다 — 접미사가 통째로 달라야 파일이 안 섞인다.
+        assert_eq!(chain_file_name(ARC_MAINNET_ID, "spend"), "spend-5042.json");
+        assert_ne!(
+            chain_file_name(ARC_MAINNET_ID, "history"),
+            chain_file_name(ARC_TESTNET_ID, "history")
         );
         assert_eq!(account_file_name("history.json", 0), "history.json");
         assert_eq!(

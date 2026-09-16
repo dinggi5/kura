@@ -40,7 +40,7 @@ export type Settings = {
   notify_hide_amount: boolean;
   /** 자율 결제는 신뢰 주소(비번으로 승인한 적 있는 주소)만. */
   auto_trusted_only: boolean;
-  /** 활성 체인 ID — 8453=Base 메인넷 / 84532=Base Sepolia / 5042002=Arc 테스트넷.
+  /** 활성 체인 ID — 8453=Base 메인넷 / 84532=Base Sepolia / 5042002=Arc 테스트넷 / 5042=Arc 메인넷.
    *  체인별로 한도·사용액·내역·신뢰목록 파일이 분리된다. 목록은 lib/chain.ts 의 CHAINS 가 정본. */
   chain_id: number;
   /** ERC-8004 에이전트 신원 조회 (개발 47). AI 가 에이전트 번호를 주면 온체인 기록과 대조해
