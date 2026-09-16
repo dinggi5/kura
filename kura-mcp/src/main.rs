@@ -32,10 +32,67 @@ struct WalletServer {
     tool_router: ToolRouter<WalletServer>,
 }
 
+// 선택 인자의 스키마에서 **null 흔적을 걷어낸다** (`plain_optional`, 개발 61).
+//
+// 이유: `rmcp 0.16` 은 도구 스키마를 만들 때 `schemars::transform::AddNullable` 을 건다
+// (`handler/server/common.rs`). 그 변환은 `Option<u64>` 가 만든 `"type": ["integer","null"]`
+// 에서 **`"null"` 을 지우고** `"nullable": true`(OpenAPI 3.0 방언)를 넣는다. 남는 모양이
+//     { "type": "integer", "nullable": true, "default": null }
+// 인데 `nullable` 은 JSON Schema 2020-12 에 없는 키라 모르는 클라이언트는 그냥 무시한다.
+// 그러면 「정수인데 기본값이 null」 이라는 **스스로 모순된 스키마**만 남고, 엄격한 클라이언트는
+// 그 필드를 필수처럼 다룬다 — 개발 61 실측(Claude Code): `agent_id` 를 빼고 `request_payment` 를
+// 부르면 `expected "nonoptional", received undefined` 로 **호출 자체가 튕겼다**. 에이전트 번호를
+// 모르는 평범한 결제(대다수)가 첫 시도에 실패한다는 뜻이다.
+//
+// 「빠져도 된다」는 사실은 규격에선 **`required` 목록에 없는 것**으로만 표현하면 된다. 그래서
+// 값 스키마 쪽의 null 표현(널 합집합·`default: null`)은 전부 군더더기다 — 걷어낸다.
+//
+// 🔴 **`#[serde(default)]` 는 그대로 둔다.** schemars 는 그 속성을 보고 필드를 `required` 에서
+// 빼므로, 지우면 선택 인자가 **필수로 올라간다**(개발 61 에서 `with = "T"` 로 해봤다가 잡혔다).
+// 받는 쪽 동작은 어느 쪽이든 같다(serde 는 `Option<T>` 가 없으면 `None`) — 이건 스키마 문제다.
+// 🔴 선택 인자를 새로 넣을 땐 `#[serde(default)]` 와 `#[schemars(transform = plain_optional)]` 를
+// **같이** 붙인다. 하나만 붙이면 조용히 옛 모양으로 돌아간다 —
+// `optional_args_are_plain_in_generated_schema` 가 잡는다.
+
+/// 선택 인자 한 칸의 스키마에서 null 표현을 지운다 — 위 주석의 그 처방.
+///
+/// `#[schemars(transform = ...)]` 는 **다른 변형이 다 끝난 뒤**(post-mutator) 돌기 때문에,
+/// `#[serde(default)]` 가 넣은 `default: null` 도 여기서 확실히 잡힌다. 타입에서 `"null"` 을
+/// 먼저 빼 두면 나중에 도는 rmcp 의 `AddNullable` 은 **아무것도 할 게 없어** `nullable` 도 안 붙는다.
+fn plain_optional(schema: &mut schemars::Schema) {
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    // 1) `"default": null` — 타입엔 null 이 없는데 기본값만 null 인 모순을 만드는 주범.
+    //    null 이 아닌 진짜 기본값(누가 나중에 `#[serde(default = "...")]` 로 넣을 수 있다)은 둔다.
+    if obj.get("default").is_some_and(serde_json::Value::is_null) {
+        obj.remove("default");
+    }
+
+    // 2) `"type": ["integer","null"]` → `"integer"`. 값이 하나만 남으면 배열이 아니라 문자열로
+    //    적는다 — 규격상 둘 다 맞지만, 한 칸짜리 배열은 읽는 쪽에서 실수를 부른다.
+    if let Some(ty) = obj.get_mut("type") {
+        if let Some(arr) = ty.as_array() {
+            let mut kept: Vec<serde_json::Value> =
+                arr.iter().filter(|v| *v != "null").cloned().collect();
+            // 널만 허용하던 칸(선택 인자엔 없을 모양)은 건드리지 않는다 — 지우면 「아무 타입이나」가 된다.
+            if !kept.is_empty() && kept.len() < arr.len() {
+                *ty = if kept.len() == 1 {
+                    kept.remove(0)
+                } else {
+                    serde_json::Value::Array(kept)
+                };
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct HistoryArgs {
     /// How many recent entries to return (default 20, max 200).
     #[serde(default)]
+    #[schemars(transform = plain_optional)]
     limit: Option<usize>,
 }
 
@@ -47,9 +104,11 @@ struct PayArgs {
     amount: String,
     /// Token: "USDC" (default) or "ETH".
     #[serde(default)]
+    #[schemars(transform = plain_optional)]
     token: Option<String>,
     /// What the payment is for — the user reads this in the approval window, so fill it in.
     #[serde(default)]
+    #[schemars(transform = plain_optional)]
     memo: Option<String>,
     /// Optional: the recipient's ERC-8004 agent number, if you know it from the service's own
     /// documentation or agent card. The wallet reads that agent's on-chain record and tells the
@@ -57,6 +116,7 @@ struct PayArgs {
     /// is the useful part — a match is not proof of anything, since anyone can register.
     /// Leave it out if you don't know it; a wrong number just produces a "no such agent" note.
     #[serde(default)]
+    #[schemars(transform = plain_optional)]
     agent_id: Option<u64>,
 }
 
@@ -66,12 +126,14 @@ struct X402Args {
     url: String,
     /// What the payment is for — the user reads this in the approval window, so fill it in.
     #[serde(default)]
+    #[schemars(transform = plain_optional)]
     memo: Option<String>,
     /// Optional: the seller's ERC-8004 agent number, if you know it from the service's own
     /// documentation or agent card. The wallet then reads that agent's on-chain record and shows
     /// the user whether the payment address and the resource domain match what is registered.
     /// Leave it out if you don't know it — a wrong number just produces a "no such agent" note.
     #[serde(default)]
+    #[schemars(transform = plain_optional)]
     agent_id: Option<u64>,
 }
 
@@ -81,9 +143,11 @@ struct AgentArgs {
     agent_id: u64,
     /// Optional: an address to compare against the agent's registered wallet.
     #[serde(default)]
+    #[schemars(transform = plain_optional)]
     pay_to: Option<String>,
     /// Optional: a resource URL whose domain is compared with the domain listed on-chain.
     #[serde(default)]
+    #[schemars(transform = plain_optional)]
     resource: Option<String>,
 }
 
@@ -347,4 +411,132 @@ async fn main() -> anyhow::Result<()> {
     beat.abort();
     payment::clear_mcp_heartbeat();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentArgs, HistoryArgs, PayArgs, X402Args};
+    use rmcp::handler::server::common::schema_for_type;
+
+    /// 선택 인자가 「스스로 모순된 스키마」로 나가지 않는지 — 개발 61 의 회귀 검사.
+    ///
+    /// 🔴 **rmcp 의 생성기를 그대로 부른다**(`schema_for_type`). 우리가 schemars 를 직접 돌려
+    /// 흉내 내면 rmcp 가 변환(`AddNullable`)을 바꿔도 이 검사는 초록으로 남는다 — 정작 클라이언트가
+    /// 받는 건 rmcp 가 만든 쪽이다. 실제로 이 버그가 그 경로에서 나왔다.
+    ///
+    /// 요구하는 모양: 선택 인자는 `required` 에 없고, 값 스키마엔 `default`(=null)·`nullable`
+    /// (OpenAPI 방언)이 없으며, `type` 은 널 합집합이 아닌 **단일 문자열**이다.
+    fn assert_optional_is_plain<T: schemars::JsonSchema + std::any::Any>(
+        tool: &str,
+        optional: &[&str],
+    ) {
+        let schema = schema_for_type::<T>();
+        let props = schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .unwrap_or_else(|| panic!("{tool}: properties 가 없다"));
+        let required: Vec<&str> = schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+
+        for field in optional {
+            let p = props
+                .get(*field)
+                .unwrap_or_else(|| panic!("{tool}: 선택 인자 {field} 가 스키마에 없다"));
+            assert!(
+                !required.contains(field),
+                "{tool}.{field}: 선택 인자가 required 에 들어갔다 — 빼먹은 #[serde(default)]?"
+            );
+            assert!(
+                p.get("default").is_none(),
+                "{tool}.{field}: default 가 남아 있다({:?}) — 타입엔 null 이 없는데 기본값이 null 이면 \
+                 엄격한 클라이언트가 이 필드를 필수로 다룬다(개발 61)",
+                p.get("default")
+            );
+            assert!(
+                p.get("nullable").is_none(),
+                "{tool}.{field}: OpenAPI 방언 nullable 이 남아 있다 — #[schemars(with)] 를 빼먹었나"
+            );
+            assert!(
+                p.get("type").map(serde_json::Value::is_string) == Some(true),
+                "{tool}.{field}: type 이 단일 문자열이 아니다({:?})",
+                p.get("type")
+            );
+        }
+    }
+
+    // 도구별 선택 인자 전부. 여기 목록이 곧 「빠뜨려도 되는 인자」의 정본이다 —
+    // 구조체에 선택 인자를 새로 넣으면 이 줄에도 넣는다.
+    #[test]
+    fn optional_args_are_plain_in_generated_schema() {
+        assert_optional_is_plain::<HistoryArgs>("get_history", &["limit"]);
+        assert_optional_is_plain::<PayArgs>("request_payment", &["token", "memo", "agent_id"]);
+        assert_optional_is_plain::<X402Args>("x402_fetch", &["memo", "agent_id"]);
+        assert_optional_is_plain::<AgentArgs>("lookup_agent", &["pay_to", "resource"]);
+    }
+
+    /// 받는 쪽 계약 — 선택 인자는 **키가 없어도 null 이 와도** 받는다 (개발 61).
+    ///
+    /// 🔴 스키마에서 `#[serde(default)]` 를 떼는 근거가 이 검사다. serde 는 `Option<T>` 필드를
+    /// 특별 취급해 **키가 없으면 `None`** 으로 읽으므로 그 속성 없이도 동작이 같다 — 여기서
+    /// 실제로 파싱해 확인한다. 이게 깨지면 스키마만 고친 게 아니라 **받는 동작을 바꾼 것**이다.
+    #[test]
+    fn optional_args_accept_missing_and_null() {
+        // 키 자체가 없는 경우 — 에이전트 번호를 모르는 평범한 결제(대다수).
+        let bare: PayArgs = serde_json::from_str(r#"{"to":"0xabc","amount":"1.5"}"#).unwrap();
+        assert!(bare.token.is_none() && bare.memo.is_none() && bare.agent_id.is_none());
+
+        // 명시적 null — 스키마엔 더 이상 null 이 없지만 받는 쪽은 계속 관대하다.
+        let nulls: PayArgs = serde_json::from_str(
+            r#"{"to":"0xabc","amount":"1.5","token":null,"memo":null,"agent_id":null}"#,
+        )
+        .unwrap();
+        assert!(nulls.token.is_none() && nulls.memo.is_none() && nulls.agent_id.is_none());
+
+        // 값이 온 경우도 그대로.
+        let full: PayArgs =
+            serde_json::from_str(r#"{"to":"0xabc","amount":"1.5","agent_id":7}"#).unwrap();
+        assert_eq!(full.agent_id, Some(7));
+
+        // 나머지 세 도구도 같은 계약.
+        let h: HistoryArgs = serde_json::from_str("{}").unwrap();
+        assert!(h.limit.is_none());
+        let x: X402Args = serde_json::from_str(r#"{"url":"https://e.com"}"#).unwrap();
+        assert!(x.memo.is_none() && x.agent_id.is_none());
+        let a: AgentArgs = serde_json::from_str(r#"{"agent_id":1}"#).unwrap();
+        assert!(a.pay_to.is_none() && a.resource.is_none());
+    }
+
+    /// 필수 인자는 반대로 **계속 필수여야** 한다 — 위 검사가 「전부 선택」으로 만들어 통과하는
+    /// 헛검사가 되지 않게 대조군을 둔다(잔디잔디 개발 34 의 「아무것도 안 보는 검사」 교훈).
+    #[test]
+    fn required_args_stay_required() {
+        for (tool, schema, want) in [
+            (
+                "request_payment",
+                schema_for_type::<PayArgs>(),
+                vec!["to", "amount"],
+            ),
+            ("x402_fetch", schema_for_type::<X402Args>(), vec!["url"]),
+            (
+                "lookup_agent",
+                schema_for_type::<AgentArgs>(),
+                vec!["agent_id"],
+            ),
+        ] {
+            let required: Vec<&str> = schema
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            for field in want {
+                assert!(
+                    required.contains(&field),
+                    "{tool}: 필수 인자 {field} 가 required 에서 빠졌다"
+                );
+            }
+        }
+    }
 }
