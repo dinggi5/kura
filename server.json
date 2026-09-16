@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.dinggi5/kura",
   "title": "Kura",
-  "description": "Local Ethereum wallet for AI agents - balances, history, x402 payments on Base. Keys stay local.",
+  "description": "Local Ethereum wallet for AI agents on Base and Arc (Circle's USDC-native L1) - balances, history, x402 payments. Keys stay local.",
   "version": "0.4.1",
   "websiteUrl": "https://dinggi5.github.io/kura/",
   "repository": {
