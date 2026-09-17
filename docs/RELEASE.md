@@ -156,7 +156,8 @@ TAURI_SIGNING_PRIVATE_KEY_PASSWORD="위에서 정한 암호"
 1. **사전 점검** — 인증서·자격증명·버전 일치(`tauri.conf.json`/`package.json`/두 `Cargo.toml`/`mcpb/manifest.json`)·커밋 안 된 변경 확인
 2. **시험 서명** — 작은 파일을 실제로 한 번 서명해서 **보안 타임스탬프**가 붙는지 확인.
    이게 없으면 애플이 공증을 거부하는데, 빌드가 다 끝난 뒤에 알면 시간이 아깝다
-3. **테스트** — `src-tauri` + `kura-mcp` 의 러스트 테스트와 타입 검사
+3. **테스트** — `src-tauri` + `kura-mcp` 의 러스트 테스트와 타입 검사. `cargo test --quiet` 라
+   **몇 분간 아무 출력이 없다** — 멈춘 게 아니다(개발 60 실측). 다음 줄이 찍힐 때까지 기다린다
 4. **빌드·서명** — 사이드카(kura-mcp·kura-cli)를 자격증명 없이 먼저 만들고, Tauri 가 하드닝 런타임으로 앱(사이드카 포함)을 서명하고, 애플에 올려 공증받고, 티켓을 앱에 박는다(staple). 앱 안의 사이드카는 서명·아키텍처·버전에 더해 **실제 MCP 핸드셰이크**까지 확인한다(개발 34)
 5. **업데이트 산출물 검증**(개발 31) — `Kura.app.tar.gz` 의 서명 키 ID 가 앱에 박은 공개키와
    같은지 대조하고, **tar 를 풀어서 안에 든 앱**의 서명·팀 ID·번들 ID·버전·공증 티켓까지 본다.
@@ -270,6 +271,11 @@ git checkout main && git merge --ff-only <그 커밋> && git push origin main
 | 릴리스 | `gh release create` 로 자산 5종(DMG · tar · sig · latest.json · .mcpb) 업로드 | 빠진 자산만 올린다 |
 | 재검증 | 올라간 자산 **다섯 개를 다 다시 받아** 로컬 산출물과 바이트 대조. 업데이트 엔드포인트가 이 버전을 광고할 때까지 최대 5번 확인(끝내 다르면 멈춘다) | — |
 | 캐스크 | tap 의 `Casks/kura.rb` 에 version·sha256 반영, `brew audit` 통과 후 커밋·푸시 | 커밋할 것 없음 (안 밀린 커밋이 남아 있으면 민다) |
+| tap CI | 캐스크를 민 커밋의 GitHub Actions 런에 붙어서 결과를 요약에 적는다(빨강이어도 배포는 이미 끝났으므로 멈추지 않는다) | — |
+
+⚠️ **로컬 `brew audit` 통과가 tap CI 통과를 뜻하지 않는다.** Homebrew 가 폐기한 문법(0.4.0 때는
+캐스크의 `verified:`)은 로컬 audit 이 경고도 안 내는데 CI 는 오류로 올린다(개발 60). 요약의 tap CI
+가 빨강이면 tap 리포의 Actions 로그를 열어 캐스크를 고쳐 다시 민다 — 릴리스 자산은 건드릴 게 없다.
 
 배포 전에 먼저 막는 것들: `--no-notarize`/`--skip-tests`/`--allow-dirty`/`--universal` 과의 조합,
 릴리스 노트 파일 없음, gh 미로그인, origin·tap 의 fetch/push URL 이 우리 리포가 아닌 경우,

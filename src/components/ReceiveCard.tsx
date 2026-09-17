@@ -1,8 +1,8 @@
-// 받기 카드 — 주소 QR + 복사 + (테스트넷) 테스트 코인 Faucet / (메인넷) 거래소 입금 안내.
+// 받기 카드 — 주소 QR + 복사 + (테스트넷) 테스트 코인 Faucet / (메인넷) 거래소 입금 안내 + (브릿지가 있는 체인) 공식 브릿지 한 줄.
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "framer-motion";
-import { Check, Copy, Droplets, Fuel } from "lucide-react";
+import { ArrowLeftRight, Check, Copy, Droplets, Fuel } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { cn } from "@/lib/cn";
 import { useChain } from "@/lib/chain";
@@ -93,6 +93,26 @@ export function ReceiveCard({ address, onClose }: { address: string; onClose: ()
               </>,
             )}
           </p>
+          {/* 상장 거래소가 없는 체인(Arc 메인넷)은 위 안내만으론 채울 길이 없다 → 공식 브릿지 한 줄 (개발 63).
+              Faucet 과 같은 동작: 주소를 복사해 두고 페이지를 연다. */}
+          {chain.bridge && (
+            <>
+              <p className="mt-3 text-[11px] leading-relaxed text-[var(--color-ink-300)]">
+                {t(
+                  "Base 등 다른 체인에 있는 USDC 를 옮겨 오려면 Circle 공식 브릿지에서 목적지를 이 네트워크로 고르세요. 주소가 복사돼요.",
+                  "To move USDC over from Base or another chain, pick this network as the destination on Circle's official bridge. Your address is copied.",
+                )}
+              </p>
+              <div className="mt-3 grid grid-cols-1 gap-2">
+                <FaucetButton
+                  icon={<ArrowLeftRight size={13} />}
+                  label={t("USDC 브릿지", "USDC bridge")}
+                  sub="Circle"
+                  onClick={() => openFaucet(chain.bridge!)}
+                />
+              </div>
+            </>
+          )}
         </div>
       )}
     </motion.section>

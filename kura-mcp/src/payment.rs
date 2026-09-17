@@ -373,18 +373,62 @@ pub fn cancel_request(id: &str) {
     }
 }
 
+/// 대기 중에 이 프로세스가 사라지면 내 요청을 거둔다 (개발 59 에 넣었다 되돌리고, 개발 63 에 복원).
+///
+/// AI 클라이언트(Claude 등)가 승인 대기 중에 죽으면 stdin 이 닫혀 MCP 서버도 따라 죽는다
+/// (개발 59 실측: 1초 안에). 그때 요청 파일을 그냥 두면 **기다리는 사람이 아무도 없는 승인 창**이
+/// 최대 6분(GUI `is_stale` 의 5분 + 유예 60초) 화면에 남는다. 사용자가 그걸 승인하면 돈은 나가는데
+/// 결과를 받을 상대가 없고, 다시 켠 AI 는 「아까 결제가 실패했다」고 알고 있어 한 번 더 요청한다
+/// → 이중 결제(개발 51 과 같은 모양). 요청을 거두면 승인 창이 곧바로 닫히고(GUI 의 `live_request()`
+/// 가 파일에서 파생된다) 아무 일도 안 난다.
+///
+/// 시간 초과 때 호출자가 하던 것과 **같은 함수**를 부른다 — `cancel_request` 는 파일 안의 id 가
+/// 내 것일 때만 지우므로 남의 요청은 건드리지 않는다.
+///
+/// **거두기가 못 하는 일과, 그래도 안전한 이유** (개발 59 코덱스 2차 P1 → 개발 63 에서 닫음):
+/// GUI 가 이미 `begin_approval` 을 지나 서명·전송 중이면 이 삭제는 그 결제를 멈추지 못한다 —
+/// 돈은 나가고 GUI 의 `resolve_request` 는 요청이 사라진 걸 보고 결과를 조용히 버린다(죽은
+/// 클라이언트는 어느 쪽이든 결과를 못 받는다). 문제는 그 사이 슬롯이 비어 **새 요청 B 가
+/// 생길 수 있다**는 것이었다(전송은 RPC 가 느리면 30초까지). 개발 59 엔 GUI 가 B 의 승인을
+/// A 와 겹쳐 시작할 수 있어 자율 승인이면 사람 없이 두 건이 나갔다 → 되돌렸다. 개발 63 부터
+/// GUI 의 `begin_approval` 이 **진행 중인 승인이 있으면 두 번째 승인을 거절**하므로(ipc.rs),
+/// B 는 A 가 끝날 때까지 자율로도 수동으로도 시작되지 않는다 — 그 뒤 B 를 낼지는 사람이 정한다.
+///
+/// SIGKILL 로 이 프로세스가 죽으면 Drop 은 안 돈다 — 그건 원래도 그랬고 막을 방법이 없다
+/// (그 경우는 GUI 의 `is_stale` 이 6분 안에 치운다).
+struct CancelOnDrop<'a> {
+    id: &'a str,
+    /// 정상 종료(결과 수신·시간 초과)면 내려서 Drop 이 아무것도 안 하게 한다.
+    armed: bool,
+}
+
+impl Drop for CancelOnDrop<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            cancel_request(self.id);
+        }
+    }
+}
+
 /// 결과를 timeout까지 폴링한다. 오면 Some(소비 후 파일 정리), 타임아웃이면 None.
+///
+/// 이 함수의 future 가 **완료되기 전에 버려지면**(= 클라이언트가 죽어 런타임이 내려가면)
+/// 대기 중이던 요청을 거둔다 — 위 `CancelOnDrop` 참고.
 pub async fn await_result(id: &str, timeout: Duration) -> Option<PaymentResult> {
+    let mut guard = CancelOnDrop { id, armed: true };
     let start = SystemTime::now();
     loop {
         if let Some(r) = read_result(id) {
             if let Ok(p) = result_path() {
                 let _ = fs::remove_file(p);
             }
+            guard.armed = false;
             return Some(r);
         }
         let elapsed = SystemTime::now().duration_since(start).unwrap_or(timeout);
         if elapsed >= timeout {
+            // 시간 초과의 뒷정리는 호출자가 한다(안내 문구와 한 자리에 있다).
+            guard.armed = false;
             return None;
         }
         tokio::time::sleep(Duration::from_millis(700)).await;

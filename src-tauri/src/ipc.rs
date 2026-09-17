@@ -280,6 +280,8 @@ fn owns_pending(pending_id: Option<&str>, result_id: &str) -> bool {
 }
 
 /// 지금 **승인 처리가 진행 중인** 결제 수. 0 이 아니면 서명·전송이 체인으로 나가는 중일 수 있다.
+/// 개발 63 부터 `begin_approval` 이 겹침을 거절하므로 실제 값은 0 아니면 1 이다 — 카운터로 둔 건
+/// 가드가 `?` 로 빠져나가도 Drop 이 정확히 하나만 되돌리게 하는 모양이 그대로 맞기 때문이다.
 static APPROVALS_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 
 /// 🔴 **승인 시작과 감시 스레드의 실패 처리를 한 줄로 세우는 잠금** (코덱스 개발51 4차 P1).
@@ -308,8 +310,20 @@ impl Drop for ApprovalGuard {
     }
 }
 
-/// 이 요청의 승인 처리를 시작한다. **감시 스레드가 이미 실패로 끝냈으면 시작하지 않는다** —
-/// 그 경우 상대는 이미 실패를 받아 재시도했을 수 있으므로, 여기서 또 보내면 이중 결제다.
+/// 이 요청의 승인 처리를 시작한다. 두 가지를 거절한다.
+///
+/// 1. **감시 스레드가 이미 실패로 끝냈거나 상대가 거둬간 요청** — 그 경우 상대는 이미 실패를
+///    받아 재시도했을 수 있으므로, 여기서 또 보내면 이중 결제다.
+/// 2. 🔴 **다른 승인이 아직 진행 중** (개발 63, 코덱스 개발59 2차가 지나가며 짚은 구멍).
+///    승인 처리는 한 번에 하나다. 예전엔 같은 요청에 `approve_payment` 가 겹쳐 들어오면(자율 시도와
+///    수동 승인, 혹은 버튼 연타) 둘 다 여기를 통과해 **둘 다 체인으로 나갈 수 있었다** — 프론트가
+///    버튼을 잠그고 자율 처리 중엔 모달을 안 띄우지만, 돈의 경계는 프론트가 아니라 여기다.
+///    그리고 이 거절이 있어야 MCP 쪽 「대기 중 AI 가 죽으면 요청을 거둔다」(payment.rs
+///    `CancelOnDrop`)가 안전하다: A 의 전송 중에 요청 파일이 사라져 새 요청 B 가 생겨도, A 가
+///    끝날 때까지 B 의 승인은 여기서 거절된다 → 사람 없이 두 건이 나가는 창이 없다.
+///
+/// 거절된 쪽이 자율 경로면 프론트가 사람 승인 모달로 넘기고, 사람이면 오류를 보고 잠시 뒤
+/// 다시 누른다 — 어느 쪽도 돈이 나가지 않는다.
 pub(crate) fn begin_approval(id: &str) -> Result<ApprovalGuard, String> {
     let _lock = APPROVAL_ARBITER.lock().map_err(|_| {
         ts!(
@@ -317,14 +331,33 @@ pub(crate) fn begin_approval(id: &str) -> Result<ApprovalGuard, String> {
             "Couldn't start the approval. Please restart the app."
         )
     })?;
-    if read_request().map(|r| r.id).as_deref() != Some(id) {
+    admit_approval(
+        read_request().map(|r| r.id).as_deref(),
+        id,
+        approval_in_flight(),
+    )?;
+    Ok(ApprovalGuard::acquire())
+}
+
+/// `begin_approval` 의 판정만 떼어 낸 순수 함수 (테스트용). **잠금 안에서, 카운터를 올리기 전에**
+/// 부른다 — 여기서 Ok 가 나온 뒤 카운터를 올리는 사이에 다른 승인이 끼어들 수 없는 건
+/// `APPROVAL_ARBITER` 덕분이다.
+fn admit_approval(pending_id: Option<&str>, id: &str, in_flight: bool) -> Result<(), String> {
+    if pending_id != Some(id) {
         return Err(ts!(
             "결제 요청이 이미 취소됐거나 시간이 지났어요.",
             "That payment request was already cancelled or timed out."
         )
         .into());
     }
-    Ok(ApprovalGuard::acquire())
+    if in_flight {
+        return Err(ts!(
+            "결제를 아직 처리하는 중이에요. 끝난 뒤 다시 시도하세요.",
+            "A payment is still being processed. Try again once it finishes."
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn approval_in_flight() -> bool {
@@ -714,12 +747,45 @@ mod tests {
             let _g = ApprovalGuard::acquire();
             assert!(approval_in_flight());
             {
-                let _g2 = ApprovalGuard::acquire(); // 겹쳐도(자율+수동) 카운트로 버틴다
+                // 카운터 자체는 겹침을 견딘다 — 겹침을 **거절**하는 건 begin_approval(admit_approval)
+                // 몫이고(개발 63), 여기선 Drop 이 하나씩 정확히 되돌리는지만 본다.
+                let _g2 = ApprovalGuard::acquire();
                 assert!(approval_in_flight());
             }
             assert!(approval_in_flight(), "안쪽 하나가 끝나도 바깥은 진행 중");
         }
         assert!(!approval_in_flight());
+    }
+
+    /// 🔴 승인 처리는 한 번에 하나다 (개발 63). 진행 중인 승인이 있으면 **같은 요청이든 다른
+    /// 요청이든** 두 번째 승인을 시작하지 않는다 — 같은 요청이면 같은 돈이 두 번 나가고, 다른
+    /// 요청(A 전송 중 요청 파일이 거둬져 B 가 생긴 경우)이면 사람 없이 두 건이 나간다.
+    /// 요청이 사라졌거나 다른 것으로 바뀐 경우는 그 전에 걸린다(감시 스레드·상대의 거두기).
+    #[test]
+    fn admit_approval_refuses_overlap() {
+        assert!(
+            admit_approval(Some("A"), "A", false).is_ok(),
+            "대기 중이고 아무도 처리 안 함"
+        );
+        let same = admit_approval(Some("A"), "A", true).unwrap_err();
+        assert!(
+            same.contains("처리하는 중") || same.contains("still being processed"),
+            "{same}"
+        );
+        let other = admit_approval(Some("B"), "B", true).unwrap_err();
+        assert_eq!(other, same, "다른 요청이어도 진행 중이면 같은 이유로 거절");
+        let gone = admit_approval(None, "A", false).unwrap_err();
+        assert!(
+            gone.contains("취소됐거나") || gone.contains("cancelled"),
+            "{gone}"
+        );
+        let swapped = admit_approval(Some("B"), "A", false).unwrap_err();
+        assert_eq!(
+            swapped, gone,
+            "남의 요청이 대기 중이면 내 요청은 이미 없는 것"
+        );
+        // 순서: 「요청이 없다」가 「처리 중」보다 먼저 — 진행 중인 것이 남의 것이라도 내 요청은 이미 없다.
+        assert_eq!(admit_approval(None, "A", true).unwrap_err(), gone);
     }
 
     // 방금 만들어진 요청은 살아 있다 = 팝오버를 붙잡아야 한다.
