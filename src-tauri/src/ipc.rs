@@ -416,14 +416,31 @@ const DEAD_WAKES: u32 = 3;
 /// 프론트(WebView)가 마지막으로 폴링한 시각. 0 = 아직 한 번도.
 static LAST_POLL: AtomicU64 = AtomicU64::new(0);
 
+/// **아무도 안 기다리는 요청인가** — `is_stale` 의 두 갈래 중 「늙었다」만 본다.
+///
+/// `is_stale` 은 미래 시각(시계가 크게 뒤로 밀린 경우)도 만료로 치는데, 그건 「보여주지
+/// 말라」는 뜻이지 「기다리는 쪽이 없다」는 뜻이 아니다 — 그 요청은 **방금 만들어져 MCP 가
+/// 여전히 5분을 기다리는 중**일 수 있다. 지우면 single-flight 슬롯이 열려 다음 요청 B 가
+/// 들어오고, A 쪽은 시간 초과를 받아 재시도하게 된다(2차 리뷰 P3). 그래서 지우기 판정은
+/// 「늙어서 버려진 것」만 본다. 시계가 영구히 뒤로 밀린 채면 이 파일은 안 지워지지만,
+/// 그건 개발 63 이전과 같은 상태이고 화면엔 어차피 안 보인다.
+fn is_abandoned(req: &PaymentRequest) -> bool {
+    let now = now_secs();
+    if req.created > now.saturating_add(STALE_GRACE_SECS) {
+        return false; // 미래 시각 — 늙은 게 아니다.
+    }
+    now.saturating_sub(req.created) > APPROVAL_WINDOW_SECS + STALE_GRACE_SECS
+}
+
 /// 이 요청 파일을 치워야 하는가 (순수 — 테스트용).
 ///
 /// 조건 둘을 **모두** 만족할 때만: ① 승인 창 시간(5분)에 유예 60초까지 지났다 = 기다리는
-/// 쪽이 이미 없다 ② 지금 진행 중인 승인이 없다 — 진행 중이면 그쪽이 `resolve_request` 로
-/// 결과를 쓸 때 자기 요청이 아직 있는지 보므로, 먼저 지우면 **성공한 결제의 결과가 버려진다**.
+/// 쪽이 이미 없다(`is_abandoned`) ② 지금 진행 중인 승인이 없다 — 진행 중이면 그쪽이
+/// `resolve_request` 로 결과를 쓸 때 자기 요청이 아직 있는지 보므로, 먼저 지우면
+/// **성공한 결제의 결과가 버려진다**.
 fn should_clear_request(req: Option<&PaymentRequest>, in_flight: bool) -> bool {
     match req {
-        Some(r) => !in_flight && is_stale(r),
+        Some(r) => !in_flight && is_abandoned(r),
         None => false,
     }
 }
@@ -459,6 +476,22 @@ fn watchdog(app: tauri::AppHandle) {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let now = now_secs();
+        // 🔴 **죽은 요청 파일을 치운다 — 루프의 맨 앞에서** (개발 63).
+        //
+        // 여기 말고는 요청 파일을 지우는 곳이 `resolve_request` 하나뿐이다 — `is_stale` 은
+        // 보여줄지 말지를 **거르기만** 하고 파일은 남긴다. 그래서 MCP 가 승인 대기 중
+        // SIGKILL 로 죽거나(`CancelOnDrop` 이 못 도는 경우) `kura pay` 를 Ctrl-C 로 끊으면
+        // 고아 파일이 남고, MCP 의 `has_pending()` 은 **존재만** 보므로 그 뒤 모든 결제가
+        // 「이미 승인 대기 중인 결제가 있어요」로 막힌다 — 영구히, 복구는 터미널에서 JSON
+        // 파일 지우기. 사용자는 그 파일이 있는 줄도 모른다.
+        //
+        // 🔴 **아래 「프론트가 살아 있으면 continue」보다 먼저 있어야 한다** (개발 63 2차
+        // 리뷰). 뒤에 두면 청소가 **창이 잠들었을 때만** 도는데, 결제가 안 된다고 느낀
+        // 사용자가 제일 먼저 하는 일이 창을 여는 것이다 → 여는 순간 폴링이 되살아나 청소가
+        // 멎고, 화면엔 (stale 이라) 아무것도 안 보인다. 고치려고 한 행동이 고침을 막는 자리였다.
+        // 프론트와 부딪히지 않는다: 프론트가 보는 건 `live_request()`(=stale 아닌 것)뿐이라
+        // 여기서 지우는 파일은 어차피 그쪽에 없는 것이다.
+        clear_dead_request();
         let front_alive = now.saturating_sub(LAST_POLL.load(Ordering::Relaxed)) <= FRONT_STALE_SECS;
         if front_alive {
             wakes_without_poll = 0;
@@ -562,16 +595,6 @@ fn watchdog(app: tauri::AppHandle) {
         // 「이미 승인 대기 중인 결제가 있어요」로 막힌다 — 영구히, 복구는 터미널에서 JSON
         // 파일 지우기. 사용자는 그 파일이 있는 줄도 모른다.
         //
-        // 지우는 것이 안전한 이유: 여기 걸리는 요청은 승인 창(5분)에 유예 60초까지 지난
-        // 것이라 **기다리는 쪽이 이미 없다**(MCP 는 5분에 거둬가고, 죽었으면 애초에 없다).
-        // GUI 도 그 요청은 이미 안 보여준다(`live_request`). 즉 이 파일이 막고 있던 유일한
-        // 것은 「다음 결제」다(개발 59 교훈: 지우기 전에 그게 막던 걸 세라).
-        // **승인이 진행 중이면 손대지 않는다** — 그쪽이 `resolve_request` 로 결과를 쓸 때
-        // 자기 요청이 아직 있는지 보기 때문에, 먼저 지우면 성공한 결제의 결과가 버려진다.
-        // 위 사망 판정과 같은 잠금 안에서 보고 지운다(그쪽과 순서를 다투지 않게).
-        if !told_dead {
-            clear_dead_request();
-        }
         // 사람에게도 알린다: 화면이 죽은 걸 알 방법이 알림뿐이다(창이 안 뜬다).
         if told_dead {
             crate::notify::show_notification(
@@ -714,20 +737,23 @@ pub(crate) fn reject_payment(id: String, reason: Option<String>) -> Result<(), S
         )
         .into());
     }
-    {
-        let _lock = APPROVAL_ARBITER.lock().map_err(|_| {
-            ts!(
-                "거부를 처리할 수 없어요. 앱을 다시 시작해 주세요.",
-                "Couldn't process the rejection. Please restart the app."
-            )
-        })?;
-        if approval_in_flight() {
-            return Err(ts!(
-                "결제를 처리하는 중이라 지금은 거부할 수 없어요.",
-                "That payment is being processed right now, so it can't be rejected."
-            )
-            .into());
-        }
+    // 🔴 판정과 행동을 **한 잠금 안에서** 한다 (개발 63 2차 리뷰). 보고 나서 놓으면 그 틈에
+    // `begin_approval` 이 승인을 시작해, 아래 `resolve_request` 가 「거부됨」을 쓰고 요청을
+    // 치운 뒤 **진짜 결제가 체인으로 나간다** — 상대는 거부로 읽고 재시도한다. 감시 스레드가
+    // 실패를 적을 때 쓰는 것과 같은 모양이다. `resolve_request` 는 이 잠금을 안 잡으므로
+    // 겹쳐 잠길 일이 없다.
+    let _lock = APPROVAL_ARBITER.lock().map_err(|_| {
+        ts!(
+            "거부를 처리할 수 없어요. 앱을 다시 시작해 주세요.",
+            "Couldn't process the rejection. Please restart the app."
+        )
+    })?;
+    if approval_in_flight() {
+        return Err(ts!(
+            "결제를 처리하는 중이라 지금은 거부할 수 없어요. 한참 이대로면 앱을 다시 시작해 주세요.",
+            "That payment is being processed right now, so it can't be rejected — and if it stays this way, restart the app."
+        )
+        .into());
     }
     resolve_request(&PaymentResult {
         id: req.id,
@@ -884,6 +910,14 @@ mod tests {
             "살아 있는 요청은 사람이 승인할 것이다"
         );
         assert!(!should_clear_request(None, false), "없으면 치울 것도 없다");
+        // 🔴 미래 시각(시계가 뒤로 밀림)은 `is_stale` 이 만료로 치지만 **지우지는 않는다** —
+        // 방금 만들어져 MCP 가 아직 기다리는 중일 수 있다(2차 리뷰 P3).
+        let future = req_created(now_secs() + STALE_GRACE_SECS + 10);
+        assert!(is_stale(&future), "미래 시각은 화면에서 감춘다");
+        assert!(
+            !should_clear_request(Some(&future), false),
+            "미래 시각 요청은 늙은 게 아니라 안 지운다"
+        );
     }
 
     // 방금 만들어진 요청은 살아 있다 = 팝오버를 붙잡아야 한다.
