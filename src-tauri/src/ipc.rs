@@ -320,7 +320,13 @@ impl Drop for ApprovalGuard {
 ///    버튼을 잠그고 자율 처리 중엔 모달을 안 띄우지만, 돈의 경계는 프론트가 아니라 여기다.
 ///    그리고 이 거절이 있어야 MCP 쪽 「대기 중 AI 가 죽으면 요청을 거둔다」(payment.rs
 ///    `CancelOnDrop`)가 안전하다: A 의 전송 중에 요청 파일이 사라져 새 요청 B 가 생겨도, A 가
-///    끝날 때까지 B 의 승인은 여기서 거절된다 → 사람 없이 두 건이 나가는 창이 없다.
+///    끝날 때까지 B 의 승인은 여기서 거절된다.
+///
+/// ⚠️ **이 거절이 닫는 것은 「겹치는 창」뿐이다.** A 가 끝나 카운터가 내려온 뒤에 오는 B
+/// (다시 켜진 AI 가 「아까 실패했다」고 알고 재요청한 것)는 여기서 못 막는다 — 그건 순차
+/// 재시도이고, 막는 것은 한도·신뢰 주소·사람이 보는 승인 창이다. 자율 승인이 켜져 있고
+/// 한도 안이면 B 도 조용히 나간다. 그 갈래는 이 함수가 아니라 「같은 결제를 짧은 시간에
+/// 두 번」을 보는 규칙이 필요하다(DEVLOG 개발 63 「다음」).
 ///
 /// 거절된 쪽이 자율 경로면 프론트가 사람 승인 모달로 넘기고, 사람이면 오류를 보고 잠시 뒤
 /// 다시 누른다 — 어느 쪽도 돈이 나가지 않는다.
@@ -351,9 +357,14 @@ fn admit_approval(pending_id: Option<&str>, id: &str, in_flight: bool) -> Result
         .into());
     }
     if in_flight {
+        // 🔴 이 거절은 **앱이 살아 있는 동안 안 풀릴 수도 있다**: 진행 중인 전송이 매달린
+        // RPC 를 기다리는 중이면(우리 송금 경로엔 시간 상한이 없다 — 상한을 걸면 「응답만
+        // 유실」이 실패로 둔갑해 AI 가 재시도한다, 개발 51) 카운터가 안 내려온다. 그때
+        // 사용자가 할 수 있는 일은 앱 재시작뿐이므로 문구에 적는다. 안내 없이 「다시
+        // 시도하세요」만 말하면 영영 오지 않는 때를 기다리게 된다.
         return Err(ts!(
-            "결제를 아직 처리하는 중이에요. 끝난 뒤 다시 시도하세요.",
-            "A payment is still being processed. Try again once it finishes."
+            "결제를 아직 처리하는 중이에요. 끝난 뒤 다시 시도하세요. 한참 이대로면 앱을 다시 시작해 주세요.",
+            "A payment is still being processed. Try again once it finishes — and if it stays this way, restart the app."
         )
         .into());
     }
@@ -404,6 +415,31 @@ const DEAD_WAKES: u32 = 3;
 
 /// 프론트(WebView)가 마지막으로 폴링한 시각. 0 = 아직 한 번도.
 static LAST_POLL: AtomicU64 = AtomicU64::new(0);
+
+/// 이 요청 파일을 치워야 하는가 (순수 — 테스트용).
+///
+/// 조건 둘을 **모두** 만족할 때만: ① 승인 창 시간(5분)에 유예 60초까지 지났다 = 기다리는
+/// 쪽이 이미 없다 ② 지금 진행 중인 승인이 없다 — 진행 중이면 그쪽이 `resolve_request` 로
+/// 결과를 쓸 때 자기 요청이 아직 있는지 보므로, 먼저 지우면 **성공한 결제의 결과가 버려진다**.
+fn should_clear_request(req: Option<&PaymentRequest>, in_flight: bool) -> bool {
+    match req {
+        Some(r) => !in_flight && is_stale(r),
+        None => false,
+    }
+}
+
+/// 죽은 요청 파일을 치운다 — 판정과 삭제를 **한 잠금 안에서** 한다(승인 시작과 순서를 다투지
+/// 않게). 잠금을 못 잡으면 아무것도 안 한다: 이건 청소이지 안전 장치가 아니라, 다음 초에 다시 온다.
+fn clear_dead_request() {
+    let Ok(_lock) = APPROVAL_ARBITER.lock() else {
+        return;
+    };
+    if should_clear_request(read_request().as_ref(), approval_in_flight()) {
+        if let Ok(p) = request_path() {
+            let _ = fs::remove_file(p);
+        }
+    }
+}
 
 /// 하트비트를 찍고, 프론트가 자는 동안 도착한 결제 요청에 창을 깨우는 상주 스레드.
 ///
@@ -516,6 +552,25 @@ fn watchdog(app: tauri::AppHandle) {
                     }
                 }
             }
+        }
+        // 🔴 **죽은 요청 파일을 치운다** (개발 63, 에이전트 백지 리뷰 P2).
+        //
+        // 여기 말고는 요청 파일을 지우는 곳이 `resolve_request` 하나뿐이었다 — `is_stale` 은
+        // 보여줄지 말지를 **거르기만** 하고 파일은 남긴다. 그래서 MCP 가 승인 대기 중
+        // SIGKILL 로 죽거나(`CancelOnDrop` 이 못 도는 경우) `kura pay` 를 Ctrl-C 로 끊으면
+        // 고아 파일이 남고, MCP 의 `has_pending()` 은 **존재만** 보므로 그 뒤 모든 결제가
+        // 「이미 승인 대기 중인 결제가 있어요」로 막힌다 — 영구히, 복구는 터미널에서 JSON
+        // 파일 지우기. 사용자는 그 파일이 있는 줄도 모른다.
+        //
+        // 지우는 것이 안전한 이유: 여기 걸리는 요청은 승인 창(5분)에 유예 60초까지 지난
+        // 것이라 **기다리는 쪽이 이미 없다**(MCP 는 5분에 거둬가고, 죽었으면 애초에 없다).
+        // GUI 도 그 요청은 이미 안 보여준다(`live_request`). 즉 이 파일이 막고 있던 유일한
+        // 것은 「다음 결제」다(개발 59 교훈: 지우기 전에 그게 막던 걸 세라).
+        // **승인이 진행 중이면 손대지 않는다** — 그쪽이 `resolve_request` 로 결과를 쓸 때
+        // 자기 요청이 아직 있는지 보기 때문에, 먼저 지우면 성공한 결제의 결과가 버려진다.
+        // 위 사망 판정과 같은 잠금 안에서 보고 지운다(그쪽과 순서를 다투지 않게).
+        if !told_dead {
+            clear_dead_request();
         }
         // 사람에게도 알린다: 화면이 죽은 걸 알 방법이 알림뿐이다(창이 안 뜬다).
         if told_dead {
@@ -640,6 +695,12 @@ async fn approve_pinned(req: PaymentRequest, password: String) -> Result<Payment
 }
 
 /// 결제 요청을 거부한다 — MCP에 "거부됨"을 알리고 대기 요청을 치운다.
+///
+/// 🔴 **진행 중인 승인이 있으면 거부도 받지 않는다** (개발 63). 거부는 요청 파일을 치우고
+/// 결과 칸에 「거부됨」을 쓴다 — 그게 전송 중인 승인과 겹치면 **돈은 나갔는데 상대는
+/// 「거부됨」으로 읽고**, 그 뒤 도착한 진짜 결과는 `resolve_request` 가 조용히 버린다.
+/// 지금은 프론트가 이 상황을 안 만들지만(승인 중 버튼 잠금·자율 처리 중 모달 없음),
+/// 돈의 경계는 프론트가 아니라 여기다 — 승인과 같은 문을 쓰게 한다.
 #[tauri::command]
 pub(crate) fn reject_payment(id: String, reason: Option<String>) -> Result<(), String> {
     let req = read_request().ok_or(ts!(
@@ -652,6 +713,21 @@ pub(crate) fn reject_payment(id: String, reason: Option<String>) -> Result<(), S
             "That request ID doesn't match"
         )
         .into());
+    }
+    {
+        let _lock = APPROVAL_ARBITER.lock().map_err(|_| {
+            ts!(
+                "거부를 처리할 수 없어요. 앱을 다시 시작해 주세요.",
+                "Couldn't process the rejection. Please restart the app."
+            )
+        })?;
+        if approval_in_flight() {
+            return Err(ts!(
+                "결제를 처리하는 중이라 지금은 거부할 수 없어요.",
+                "That payment is being processed right now, so it can't be rejected."
+            )
+            .into());
+        }
     }
     resolve_request(&PaymentResult {
         id: req.id,
@@ -786,6 +862,28 @@ mod tests {
         );
         // 순서: 「요청이 없다」가 「처리 중」보다 먼저 — 진행 중인 것이 남의 것이라도 내 요청은 이미 없다.
         assert_eq!(admit_approval(None, "A", true).unwrap_err(), gone);
+    }
+
+    /// 🔴 죽은 요청 파일 청소의 조건 (개발 63). 하나라도 어긋나면 **안 지운다** —
+    /// 살아 있는 요청을 지우면 사람이 승인할 수 있는 결제가 사라지고, 승인이 진행 중일 때
+    /// 지우면 성공한 결제의 결과가 버려진다(`resolve_request` 가 자기 요청을 못 찾는다).
+    #[test]
+    fn clears_only_dead_requests_when_nothing_in_flight() {
+        let dead = req_created(now_secs() - (APPROVAL_WINDOW_SECS + STALE_GRACE_SECS + 10));
+        let alive = req_created(now_secs());
+        assert!(
+            should_clear_request(Some(&dead), false),
+            "죽은 요청은 치운다"
+        );
+        assert!(
+            !should_clear_request(Some(&dead), true),
+            "승인 진행 중이면 죽은 요청도 안 건드린다"
+        );
+        assert!(
+            !should_clear_request(Some(&alive), false),
+            "살아 있는 요청은 사람이 승인할 것이다"
+        );
+        assert!(!should_clear_request(None, false), "없으면 치울 것도 없다");
     }
 
     // 방금 만들어진 요청은 살아 있다 = 팝오버를 붙잡아야 한다.

@@ -12,7 +12,7 @@ use crate::wallet::jigap_dir;
 use crate::{tf, ts};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// GUI가 살아있다고 볼 하트비트 최대 나이(초). 이보다 오래되면 앱이 꺼진 것으로 본다.
@@ -360,16 +360,22 @@ fn read_result(id: &str) -> Option<PaymentResult> {
 
 /// 타임아웃 시 내 요청 파일을 치운다 (다른 요청이 덮어쓴 경우는 건드리지 않음).
 pub fn cancel_request(id: &str) {
-    let mine = request_path()
+    if let Ok(p) = request_path() {
+        cancel_request_at(&p, id);
+    }
+}
+
+/// `cancel_request` 의 속알맹이 — 경로를 받는다. **경로를 안에서 구하면 테스트가 실지갑
+/// (`~/.jigap`)을 건드리게 되므로** 여기를 갈라 두고 테스트는 임시 폴더를 넘긴다
+/// (`claim_request_file` 과 같은 이음매). 파일 안의 id 가 내 것일 때만 지운다.
+fn cancel_request_at(path: &Path, id: &str) {
+    let mine = fs::read_to_string(path)
         .ok()
-        .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<PaymentRequest>(&s).ok())
         .map(|r| r.id == id)
         .unwrap_or(false);
     if mine {
-        if let Ok(p) = request_path() {
-            let _ = fs::remove_file(p);
-        }
+        let _ = fs::remove_file(path);
     }
 }
 
@@ -392,12 +398,21 @@ pub fn cancel_request(id: &str) {
 /// 생길 수 있다**는 것이었다(전송은 RPC 가 느리면 30초까지). 개발 59 엔 GUI 가 B 의 승인을
 /// A 와 겹쳐 시작할 수 있어 자율 승인이면 사람 없이 두 건이 나갔다 → 되돌렸다. 개발 63 부터
 /// GUI 의 `begin_approval` 이 **진행 중인 승인이 있으면 두 번째 승인을 거절**하므로(ipc.rs),
-/// B 는 A 가 끝날 때까지 자율로도 수동으로도 시작되지 않는다 — 그 뒤 B 를 낼지는 사람이 정한다.
+/// B 는 A 가 끝날 때까지 자율로도 수동으로도 시작되지 않는다.
 ///
-/// SIGKILL 로 이 프로세스가 죽으면 Drop 은 안 돈다 — 그건 원래도 그랬고 막을 방법이 없다
-/// (그 경우는 GUI 의 `is_stale` 이 6분 안에 치운다).
+/// ⚠️ 닫히는 것은 **겹치는 창**뿐이다. A 가 끝난 **뒤** 다시 켜진 AI 가 같은 결제를 또
+/// 요청하면(순차 재시도) 그건 한도·신뢰 주소·승인 창이 막는 몫이고, 이 가드와 무관하다.
+///
+/// SIGKILL 로 이 프로세스가 죽으면 Drop 은 안 돈다 — 그건 원래도 그랬고 막을 방법이 없다.
+/// 그렇게 남은 고아 요청은 `has_pending()` 이 **존재만** 보므로 그 뒤 모든 결제를 막는데,
+/// 개발 63 부터 **GUI 의 감시 스레드가 승인 창 시간(5분+유예)을 넘긴 요청 파일을 지운다**
+/// (`src-tauri/src/ipc.rs` watchdog). 개발 63 이전엔 그 청소가 어디에도 없어서 — `is_stale`
+/// 은 보여줄지 말지를 거르기만 한다 — 터미널에서 손으로 지우는 수밖에 없었다.
 struct CancelOnDrop<'a> {
     id: &'a str,
+    /// 거둘 요청 파일. 경로를 들고 있어야 테스트가 임시 폴더로 이 가드를 그대로 시험할 수
+    /// 있다(`cancel_request_at` 과 같은 이음매). 실제 경로는 `await_result` 가 넘긴다.
+    path: &'a Path,
     /// 정상 종료(결과 수신·시간 초과)면 내려서 Drop 이 아무것도 안 하게 한다.
     armed: bool,
 }
@@ -405,7 +420,7 @@ struct CancelOnDrop<'a> {
 impl Drop for CancelOnDrop<'_> {
     fn drop(&mut self) {
         if self.armed {
-            cancel_request(self.id);
+            cancel_request_at(self.path, self.id);
         }
     }
 }
@@ -415,7 +430,13 @@ impl Drop for CancelOnDrop<'_> {
 /// 이 함수의 future 가 **완료되기 전에 버려지면**(= 클라이언트가 죽어 런타임이 내려가면)
 /// 대기 중이던 요청을 거둔다 — 위 `CancelOnDrop` 참고.
 pub async fn await_result(id: &str, timeout: Duration) -> Option<PaymentResult> {
-    let mut guard = CancelOnDrop { id, armed: true };
+    // 경로를 못 구하는 상황(홈 디렉터리 없음)은 애초에 요청도 못 썼다는 뜻이라, 거둘 것도 없다.
+    let req_path = request_path().unwrap_or_default();
+    let mut guard = CancelOnDrop {
+        id,
+        path: &req_path,
+        armed: true,
+    };
     let start = SystemTime::now();
     loop {
         if let Some(r) = read_result(id) {
@@ -583,6 +604,78 @@ mod tests {
         // 처리 후(파일 제거) 다시 획득 가능.
         let _ = fs::remove_file(&path);
         assert!(claim_request_file(&path, b"third").is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 요청 하나를 그 경로에 써 둔다(테스트 도우미).
+    fn write_req(path: &Path, id: &str) {
+        let r = PaymentRequest {
+            id: id.into(),
+            token: "USDC".into(),
+            to: "0x0".into(),
+            amount: "1".into(),
+            memo: String::new(),
+            created: 0,
+            kind: "transfer".into(),
+            resource: String::new(),
+            chain_id: 0,
+            account: 0,
+            from: String::new(),
+            agent: None,
+        };
+        fs::write(path, serde_json::to_string(&r).unwrap()).unwrap();
+    }
+
+    /// 🔴 거두기는 **내 요청일 때만** 지운다 (개발 59·63). 남의 요청을 지우면 그쪽의
+    /// single-flight 슬롯이 깨져 겹친 결제가 생긴다.
+    #[test]
+    fn cancel_only_removes_my_request() {
+        let dir = std::env::temp_dir().join(format!("kura-mcp-cancel-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("payment_request.json");
+
+        write_req(&path, "A");
+        cancel_request_at(&path, "B"); // 남의 요청 → 안 건드린다
+        assert!(path.exists(), "다른 id 의 요청은 남아야 한다");
+        cancel_request_at(&path, "A"); // 내 요청 → 지운다
+        assert!(!path.exists(), "내 요청은 거둬야 한다");
+
+        cancel_request_at(&path, "A"); // 이미 없는 경우도 조용히 통과
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 🔴 **대기 중에 future 가 버려지면 요청을 거둔다** (`CancelOnDrop`, 개발 63 복원).
+    /// 클라이언트가 죽으면 런타임이 내려가며 이 future 가 버려지는데, 그때 요청 파일이 남으면
+    /// 「아무도 안 기다리는 승인 창」이 뜬다. 결과를 받았거나 시간 초과로 정상 반환한 경우엔
+    /// **거두면 안 된다**(그 뒷정리는 호출자 몫이고, 결과를 받은 요청은 이미 남의 것일 수 있다).
+    #[test]
+    fn drop_while_waiting_cancels_but_normal_return_does_not() {
+        let dir = std::env::temp_dir().join(format!("kura-mcp-drop-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("payment_request.json");
+
+        // 대기 중 버려짐 → 거둔다.
+        write_req(&path, "A");
+        {
+            let _g = CancelOnDrop {
+                id: "A",
+                path: &path,
+                armed: true,
+            };
+        }
+        assert!(!path.exists(), "대기 중 버려지면 요청을 거둔다");
+
+        // 정상 반환(결과 수신·시간 초과)에서 내려 둔 가드는 아무것도 안 한다.
+        write_req(&path, "A");
+        {
+            let mut g = CancelOnDrop {
+                id: "A",
+                path: &path,
+                armed: true,
+            };
+            g.armed = false;
+        }
+        assert!(path.exists(), "정상 반환이면 거두지 않는다");
         let _ = fs::remove_dir_all(&dir);
     }
 }

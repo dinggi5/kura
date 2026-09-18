@@ -271,7 +271,7 @@ git checkout main && git merge --ff-only <그 커밋> && git push origin main
 | 릴리스 | `gh release create` 로 자산 5종(DMG · tar · sig · latest.json · .mcpb) 업로드 | 빠진 자산만 올린다 |
 | 재검증 | 올라간 자산 **다섯 개를 다 다시 받아** 로컬 산출물과 바이트 대조. 업데이트 엔드포인트가 이 버전을 광고할 때까지 최대 5번 확인(끝내 다르면 멈춘다) | — |
 | 캐스크 | tap 의 `Casks/kura.rb` 에 version·sha256 반영, `brew audit` 통과 후 커밋·푸시 | 커밋할 것 없음 (안 밀린 커밋이 남아 있으면 민다) |
-| tap CI | 캐스크를 민 커밋의 GitHub Actions 런에 붙어서 결과를 요약에 적는다(빨강이어도 배포는 이미 끝났으므로 멈추지 않는다) | — |
+| tap CI | 캐스크를 민 커밋의 GitHub Actions 런에 붙어서 결과를 요약에 적는다(빨강이어도 배포는 이미 끝났으므로 멈추지 않는다) | 「안 봄 (캐스크에 밀 게 없었다)」로 요약에 적는다 |
 
 ⚠️ **로컬 `brew audit` 통과가 tap CI 통과를 뜻하지 않는다.** Homebrew 가 폐기한 문법(0.4.0 때는
 캐스크의 `verified:`)은 로컬 audit 이 경고도 안 내는데 CI 는 오류로 올린다(개발 60). 요약의 tap CI

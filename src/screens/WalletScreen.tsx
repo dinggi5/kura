@@ -316,6 +316,10 @@ export function WalletScreen({
         }
       } catch {
         // 자율 불가(세션 잠김·한도 초과·자율 꺼짐) 또는 차단 → 사람 승인 모달.
+        // ⚠️ `autoTried` 는 요청 id 당 영구라, **다른 결제가 마침 처리 중이라** 거절된 경우
+        // (개발 63 의 겹침 거절)에도 이 요청은 영영 수동이 된다. 일부러 그대로 둔다 — 자동
+        // 재시도를 넣으면 「A 가 끝나자마자 B 가 사람 없이 나가는」 순차 재시도를 우리가
+        // 만들어 주는 꼴이다. 사람 쪽으로 기우는 실패가 맞는 방향이다.
         if (active) setPending(req);
       } finally {
         autoBusy.current = null;
