@@ -4,6 +4,11 @@
 // 그 선택 판정은 shared/policy.rs(`policy::chain_id_for`)가 정본이다 — settings.rs 의 Settings 읽기와
 // MCP(kura-mcp/src/chain.rs)가 같은 함수를 쓴다(개발 56: 「같은 파일을 다르게 읽는」 뿌리 제거).
 
+// EIP-3009 의 `transferWithAuthorization` 은 인자가 원래 9개다(+self = 10). `sol!` 이 만드는
+// 호출 함수라 우리가 줄일 수 있는 것이 아니고, 매크로 호출에 붙인 `#[allow]` 은 생성된 함수까지
+// 안 내려간다 → 모듈 단위로 끈다. 이 파일은 체인 상수와 인터페이스 선언만 있어 잃는 게 없다.
+#![allow(clippy::too_many_arguments)]
+
 use alloy::primitives::{address, Address};
 use alloy::sol;
 
@@ -110,6 +115,17 @@ pub(crate) const ARC_TESTNET: ChainConfig = ChainConfig {
 ///   적용하면 0.12 인데, 이 값은 **못 보내는 하한**이지 실제 가스가 아니라 3배면 충분하다고 봤다 —
 ///   모자라면 체인이 거절할 뿐 돈은 안 나간다(insufficient funds). 수수료가 몇 주 뒤 어디에 자리 잡는지
 ///   보고 다시 잰다(DEVLOG 개발 62 「다음」).
+///
+/// **개발 64 재측정(2026-09-18) — 값은 그대로 0.05, 근거가 바뀌었다.**
+/// - 수수료는 바닥으로 돌아왔다: baseFee 가 최근 100블록·1천·1만·10만·50만 블록 앞 어느 지점에서도
+///   **20.0 gwei 고정**(공개 당일의 80~200 은 그날 혼잡이었다). tip p50 은 0.5~5 gwei.
+/// - 그래서 개발 63 이 「20배 과하다」고 적어 뒀는데, **그 계산이 두 가지를 놓쳤다**:
+///   ① tip 은 여전히 튄다(같은 구간의 tip p90 최대가 202 / 1,280 / 5,897 gwei).
+///   ② 🔴 **더 큰 가스 소비자가 생겼다** — x402 직접 제출(개발 64)은 `transfer`(74,814)가 아니라
+///   `transferWithAuthorization` 이다. Arc 메인넷 실결제 둘을 영수증으로 직접 재 보니
+///   **87,543** / **112,519** gas(둘 다 20 gwei 대). 여유분은 이제 **112.5k 짜리**를 덮어야 한다.
+/// - 최악 재계산: 112,519 gas × (base 200 + tip 30) ≈ **0.026 USDC**. 0.05 = 그 2배 = 유지.
+///   (낮췄다면 새 경로가 생긴 바로 그날 모자라는 값이 됐다 — 아래 테스트가 이 계산을 박아 둔다.)
 pub(crate) const ARC_MAINNET: ChainConfig = ChainConfig {
     chain_id: policy::ARC_MAINNET_ID,
     default_rpc: "https://rpc.mainnet.arc.io",
@@ -181,6 +197,19 @@ sol! {
         function transfer(address to, uint256 amount) external returns (bool);
         // EIP-712 도메인 세퍼레이터 — 우리가 만든 도메인이 컨트랙트와 일치하는지 검증용.
         function DOMAIN_SEPARATOR() external view returns (bytes32);
+    }
+
+    // EIP-3009 온체인 제출 (개발 64) — **우리가 직접** 인가를 올리는 갈래(Arc client-broadcast).
+    // 여태 이 인가는 서명만 하고 페이실리테이터가 올렸다. 가스가 곧 USDC 인 체인에선 우리가 올린다.
+    // 인자 9개는 EIP-3009 시그니처 그대로다(v/r/s 로 쪼갠 형태 — 개발 50 의 Arc eth_call 시뮬레이션이
+    // 이 오버로드로 통과했다).
+    #[sol(rpc)]
+    interface IEIP3009 {
+        function transferWithAuthorization(
+            address from, address to, uint256 value,
+            uint256 validAfter, uint256 validBefore, bytes32 nonce,
+            uint8 v, bytes32 r, bytes32 s
+        ) external;
     }
 
     // EIP-3009 결제 인가 — x402 "exact" 스킴이 오프체인으로 서명하는 구조체.
@@ -259,6 +288,22 @@ mod tests {
         // 가스 여유분은 테스트넷(0.01)보다 크다 — 메인넷 기본 수수료가 7~10배라 0.01 로는 첫 수령 송금이
         // 실패한다(74,814 gas × 157 gwei ≈ 0.0117). 테스트넷 값을 그대로 복사하면 여기서 잡힌다.
         assert_eq!(ARC_MAINNET.gas_reserve_usdc, "0.05");
+        // 🔴 개발 64 — 여유분은 **직접 제출 트랜잭션 한 방의 최악값**을 덮어야 한다. 근거 숫자는
+        // Arc 메인넷 실결제 영수증(112,519 gas)과 혼잡 시 가스값(base 200 + tip 30 gwei)이다.
+        // 이 검사가 있는 이유: 「지금 수수료가 싸니 낮추자」가 **가장 큰 소비자를 안 보고** 내려지기
+        // 쉬운 판단이라서다(개발 63 이 실제로 그 방향을 적어 뒀다).
+        {
+            // Arc 는 네이티브 18dp = USDC 6dp × 10^12 → 6dp 단위로 환산.
+            let worst_wei: u128 = 112_519 * 230_000_000_000; // gas × (base+tip) wei
+            let worst_units = worst_wei / 1_000_000_000_000;
+            let reserve =
+                crate::limits::parse_usdc_nonneg(ARC_MAINNET.gas_reserve_usdc, 6).unwrap();
+            assert!(
+                reserve >= alloy::primitives::U256::from(worst_units),
+                "Arc 메인넷 가스 여유분이 직접 제출 최악값({worst_units} = {} USDC)보다 작다",
+                worst_units as f64 / 1e6
+            );
+        }
         assert_ne!(ARC_MAINNET.gas_reserve_usdc, ARC_TESTNET.gas_reserve_usdc);
         assert_eq!(chain_by_id(5042).unwrap().chain_id, 5042);
         // 메인넷과 테스트넷은 다른 체인 ID — 데이터 파일(접미사 -5042 / -5042002)이 안 섞인다.

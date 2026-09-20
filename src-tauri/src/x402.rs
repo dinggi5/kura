@@ -51,11 +51,19 @@ pub(crate) struct X402Payment {
 
 /// 주어진 서명자로 EIP-3009 인가를 서명한다 (순수 암호 연산 — 잠금/한도 검사 없음, 테스트용).
 /// validAfter=0(즉시 유효), validBefore=now+valid_secs, nonce=랜덤 32바이트.
+/// 새 인가용 랜덤 nonce (재생 방지). 표준 경로는 이걸 쓴다 — 서버가 nonce 를 지정하지 않으므로.
+fn random_nonce() -> B256 {
+    let mut nonce_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    B256::from(nonce_bytes)
+}
+
 async fn sign_authorization(
     signer: &PrivateKeySigner,
     to: Address,
     value: U256,
     valid_secs: u64,
+    nonce: B256,
 ) -> Result<X402Payment, String> {
     use alloy::signers::Signer;
     use alloy::sol_types::{eip712_domain, SolStruct};
@@ -67,10 +75,6 @@ async fn sign_authorization(
         chain_id: chain.chain_id,
         verifying_contract: chain.usdc_address,
     };
-
-    let mut nonce_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = B256::from(nonce_bytes);
 
     let valid_after = U256::ZERO;
     let valid_before = U256::from(now_secs().saturating_add(valid_secs));
@@ -217,7 +221,7 @@ async fn do_sign_x402_inner(
     // 서명만 하므로 RPC/가스 불필요. 서명자는 호출자가 넘긴다(비번 래퍼 또는 자율 세션 키).
     // 서명 실패 시 예약한 사용액을 환불한다(예약한 날에만).
     let valid = valid_secs.unwrap_or(600); // 기본 10분 유효
-    let payment = match sign_authorization(signer, to_addr, value, valid).await {
+    let payment = match sign_authorization(signer, to_addr, value, valid, random_nonce()).await {
         Ok(p) => p,
         Err(e) => {
             refund_spend("USDC", value, reserved_day).await;
@@ -230,6 +234,206 @@ async fn do_sign_x402_inner(
     log_attempt("USDC", to, amt, "signed", &payment.authorization.nonce);
 
     Ok(payment)
+}
+
+/// 🔴 **x402 「직접 제출」 — 서명하고 그 자리에서 우리가 체인에 올린다** (개발 64, Arc).
+///
+/// 표준 x402 는 서명만 하고 페이실리테이터가 올린다(가스도 그쪽). 가스가 곧 USDC 인 체인엔 그런
+/// 페이실리테이터가 없고, 대신 **구매자가 직접 올릴 수 있다** — 결제액과 가스가 같은 잔액에서
+/// 나가므로 누가 대 줄 이유가 없다. 자세한 규격은 kura-mcp 의 `arc_direct` 모듈 머리말.
+///
+/// 이 함수가 하는 일은 **서명이 아니라 송금**이다. 그래서 `do_send_usdc` 와 같은 규칙을 그대로 쓴다:
+/// 긴급 잠금 → 단일/일일 한도 예약 → 전송(실패 시 환불) → 내역 "sent" + tx 해시. 다른 점은 둘뿐 —
+/// ① 전송 수단이 `transfer` 가 아니라 `transferWithAuthorization`(내 인가를 내가 올린다)
+/// ② nonce 를 랜덤이 아니라 **호출자(MCP)가 준 값**으로 쓴다(서버가 그 값으로 이 결제를 알아본다).
+///
+/// nonce 는 불투명한 32바이트로 다룬다 — 인가의 의미(누구에게 얼마)는 to·value 가 정하고, nonce 는
+/// 1회용 표식일 뿐이다. 그래서 값이 어디서 왔는지는 이 함수의 안전성과 무관하다.
+pub(crate) async fn do_x402_direct(
+    signer: &PrivateKeySigner,
+    to: String,
+    amount_usdc: String,
+    nonce_hex: String,
+) -> Result<String, String> {
+    with_pinned_chain(
+        active_chain().chain_id,
+        with_pinned_account(
+            active_account_index(),
+            do_x402_direct_inner(signer, to, amount_usdc, nonce_hex),
+        ),
+    )
+    .await
+}
+
+async fn do_x402_direct_inner(
+    signer: &PrivateKeySigner,
+    to: String,
+    amount_usdc: String,
+    nonce_hex: String,
+) -> Result<String, String> {
+    use crate::chain::IEIP3009;
+    use crate::settings::redact_urls;
+    use crate::transfer::{humanize_chain_error, signing_provider};
+
+    let chain = active_chain();
+    // 가스가 곧 결제자산인 체인에서만 성립한다 — MCP 도 같은 것을 보고 거르지만, **돈의 경계는
+    // 백엔드**다. Base 에서 이 요청이 오면 우리 ETH 로 가스를 내게 되는데 그 회계가 없다.
+    if !chain.native_is_usdc {
+        return Err(ts!(
+            "이 체인에선 직접 제출 결제를 지원하지 않아요.",
+            "Client-broadcast payments aren't supported on this chain."
+        )
+        .into());
+    }
+    let nonce: B256 = nonce_hex.trim().parse().map_err(|_| {
+        ts!(
+            "결제 번호(nonce) 형식이 올바르지 않아요.",
+            "That payment nonce isn't a valid 32-byte value."
+        )
+        .to_string()
+    })?;
+
+    let dec = chain.usdc_decimals;
+    let amt = amount_usdc.trim();
+    let value: U256 = parse_usdc_nonneg(amt, dec)?;
+    if value.is_zero() {
+        return Err(ts!(
+            "0보다 큰 금액을 입력하세요",
+            "Enter an amount greater than 0"
+        )
+        .into());
+    }
+    let to_addr = parse_to_addr(&to)?;
+    let to = to.trim();
+
+    if read_lock() {
+        log_attempt(
+            "USDC",
+            to,
+            amt,
+            "blocked",
+            ts!("긴급 잠금 (x402 직접 제출)", "Emergency lock (x402 direct)"),
+        );
+        return Err(ts!(
+            "긴급 잠금이 켜져 있어 결제가 차단됐어요. 해제 후 다시 시도하세요.",
+            "Emergency lock is on, so the payment was blocked. Turn it off and try again."
+        )
+        .into());
+    }
+
+    let settings = read_settings();
+    let single: U256 = parse_usdc_nonneg(&settings.single_usdc, dec)?;
+    let daily: U256 = parse_usdc_nonneg(&settings.daily_usdc, dec)?;
+    let reserved_day = match reserve_spend("USDC", value, single, daily, dec).await {
+        Ok(d) => d,
+        Err(e) => {
+            log_attempt("USDC", to, amt, "blocked", &e);
+            return Err(e);
+        }
+    };
+
+    // 인가 유효기간은 짧게 — 우리가 **지금 바로** 올리므로 길 이유가 없다. 브로드캐스트가 늦어
+    // 이 창을 넘기면 체인이 거절한다(그건 실패로 정확히 보고된다).
+    let payment = match sign_authorization(signer, to_addr, value, 600, nonce).await {
+        Ok(p) => p,
+        Err(e) => {
+            refund_spend("USDC", value, reserved_day).await;
+            log_attempt("USDC", to, amt, "failed", &e);
+            return Err(e);
+        }
+    };
+    // 서명 문자열 → (v,r,s). 우리가 방금 만든 값이라 실패할 일이 없지만, 실패하면 **예약한
+    // 사용액을 돌려놓고** 끝낸다 — 나가지 않은 돈이 한도를 먹으면 다음 결제가 막힌다.
+    let sig: alloy::primitives::Signature = match payment.signature.parse() {
+        Ok(s) => s,
+        Err(e) => {
+            refund_spend("USDC", value, reserved_day).await;
+            let msg = tf!("서명 형식 오류: {e}", "The signature is malformed: {e}");
+            log_attempt("USDC", to, amt, "failed", &msg);
+            return Err(msg);
+        }
+    };
+
+    let provider = match signing_provider(signer.clone()).await {
+        Ok(p) => p,
+        Err(e) => {
+            refund_spend("USDC", value, reserved_day).await;
+            log_attempt("USDC", to, amt, "failed", &e);
+            return Err(e);
+        }
+    };
+    let usdc = IEIP3009::new(chain.usdc_address, &provider);
+    let valid_before: U256 = payment
+        .authorization
+        .valid_before
+        .parse()
+        .unwrap_or(U256::from(now_secs().saturating_add(600)));
+    let pending = usdc
+        .transferWithAuthorization(
+            signer.address(),
+            to_addr,
+            value,
+            U256::ZERO,
+            valid_before,
+            nonce,
+            27 + sig.v() as u8,
+            B256::from(sig.r().to_be_bytes::<32>()),
+            B256::from(sig.s().to_be_bytes::<32>()),
+        )
+        .send()
+        .await;
+    let pending = match pending {
+        Ok(p) => p,
+        Err(e) => {
+            refund_spend("USDC", value, reserved_day).await;
+            let msg = humanize_chain_error(&redact_urls(&e.to_string()), "USDC");
+            log_attempt("USDC", to, amt, "failed", &msg);
+            return Err(msg);
+        }
+    };
+
+    // 송금과 같은 모양으로 남긴다 — 사용자는 내역에서 «나간 돈»을 한 줄로 본다(서명만 한 x402 의
+    // "signed" 와 다르다. 이건 이미 나간 전송이다).
+    let hash = pending.tx_hash().to_string();
+    log_attempt("USDC", to, amt, "sent", &hash);
+    Ok(hash)
+}
+
+/// 비번으로 키를 열어 x402 직접 제출을 수행한다(사람 승인 경로). tx 해시를 돌려준다.
+///
+/// **일부러 `#[tauri::command]` 가 아니다** — 프론트가 직접 부를 수 있는 새 IPC 문을 만들지 않는다.
+/// 이 갈래를 시작할 수 있는 곳은 MCP 가 쓴 요청 파일 하나뿐이고, 그 문은 `approve_payment` 다.
+pub(crate) async fn x402_direct_payment(
+    password: String,
+    to: String,
+    amount_usdc: String,
+    nonce: String,
+) -> Result<String, String> {
+    let password = Zeroizing::new(password);
+    with_pinned_account(
+        active_account_index(),
+        x402_direct_pinned(password, to, amount_usdc, nonce),
+    )
+    .await
+}
+
+async fn x402_direct_pinned(
+    password: Zeroizing<String>,
+    to: String,
+    amount_usdc: String,
+    nonce: String,
+) -> Result<String, String> {
+    let signer = match unlock_signer(&password) {
+        Ok(s) => s,
+        Err(e) => {
+            log_attempt("USDC", to.trim(), amount_usdc.trim(), "failed", &e);
+            return Err(e);
+        }
+    };
+    let to_addr = to.clone();
+    let hash = do_x402_direct(&signer, to, amount_usdc, nonce).await?;
+    record_trusted(&to_addr); // 비번(사람) 승인 성공 = 신뢰 주소 학습 (송금·서명 경로와 동일)
+    Ok(hash)
 }
 
 #[cfg(test)]
@@ -263,7 +467,9 @@ mod tests {
                 .unwrap();
         let to = address!("0x209693Bc6afc0C5328bA36FaF03C514EF312287C");
         let value = U256::from(10_000u64); // 0.01 USDC
-        let payment = sign_authorization(&signer, to, value, 600).await.unwrap();
+        let payment = sign_authorization(&signer, to, value, 600, random_nonce())
+            .await
+            .unwrap();
 
         // authorization 직렬화 필드 점검.
         assert_eq!(payment.authorization.from, signer.address().to_string());
@@ -294,6 +500,150 @@ mod tests {
         let sig: alloy::primitives::Signature = payment.signature.parse().unwrap();
         let recovered = sig.recover_address_from_prehash(&hash).unwrap();
         assert_eq!(recovered, signer.address());
+    }
+
+    /// 🔴 개발 64 — **주어진 nonce 로 서명한다**(랜덤이 아니다). 직접 제출에서 서버는 자기
+    /// 요구사항으로 같은 nonce 를 다시 만들어 «이 tx 가 그 요청의 결제인가»를 판정한다. 여기가
+    /// 랜덤으로 되돌아가면 모든 결제가 `nonce_mismatch` 로 거절된다 — 그런데 서명 자체는 성공하고
+    /// 돈도 나가므로, **테스트가 없으면 실물에서만 드러난다**(그것도 돈을 쓴 뒤에).
+    #[tokio::test]
+    async fn signs_with_the_nonce_we_were_given() {
+        let signer = PrivateKeySigner::random();
+        let want = B256::from([0x5au8; 32]);
+        let p = sign_authorization(
+            &signer,
+            Address::from([0x11u8; 20]),
+            U256::from(1u64),
+            600,
+            want,
+        )
+        .await
+        .unwrap();
+        assert_eq!(p.authorization.nonce, want.to_string());
+        // 랜덤 경로는 그대로 랜덤이어야 한다(표준 x402 는 서버가 nonce 를 지정하지 않는다).
+        assert_ne!(random_nonce(), random_nonce());
+    }
+
+    /// 직접 제출은 **가스가 곧 USDC 인 체인에서만** 선다. Base 계열에서 오면 우리 ETH 로 가스를
+    /// 내게 되는데 x402 경로엔 그 회계가 없다 → 네트워크·파일을 건드리기 전에 거절한다.
+    /// (MCP 도 같은 것을 거르지만 **돈의 경계는 백엔드**다 — 요청 파일은 앱 밖에서 쓰인다.)
+    #[tokio::test]
+    async fn direct_submit_is_refused_when_gas_is_not_usdc() {
+        let signer = PrivateKeySigner::random();
+        let err = with_pinned_chain(
+            crate::chain::BASE_SEPOLIA.chain_id,
+            do_x402_direct(
+                &signer,
+                "0x1111111111111111111111111111111111111111".into(),
+                "0.01".into(),
+                format!("0x{}", "5a".repeat(32)),
+            ),
+        )
+        .await
+        .expect_err("Base 에서 직접 제출이 통과했다");
+        assert!(
+            err.contains("직접 제출") || err.contains("client-broadcast"),
+            "{err}"
+        );
+    }
+
+    /// 32바이트가 아닌 nonce 는 **한도를 예약하기 전에** 거절한다 — 나가지도 않을 결제가 일일
+    /// 한도를 먹으면 다음 진짜 결제가 막힌다.
+    #[tokio::test]
+    async fn direct_submit_rejects_a_malformed_nonce() {
+        let signer = PrivateKeySigner::random();
+        let err = with_pinned_chain(
+            crate::chain::ARC_TESTNET.chain_id,
+            do_x402_direct(
+                &signer,
+                "0x1111111111111111111111111111111111111111".into(),
+                "0.01".into(),
+                "0xnot-a-nonce".into(),
+            ),
+        )
+        .await
+        .expect_err("깨진 nonce 가 통과했다");
+        assert!(err.contains("nonce") || err.contains("결제 번호"), "{err}");
+    }
+
+    /// 🔴 개발 64 — **우리가 직접 올릴 calldata 를 Arc 컨트랙트가 받아들이는가**(돈 0원).
+    ///
+    /// 개발 50 의 시뮬레이션(x402-4)은 「서명이 정산될 수 있는가」를 금액 0 으로 물었다. 직접 제출은
+    /// 거기서 한 걸음 더 간다 — **우리가 만드는 트랜잭션 그 자체**(v/r/s 로 쪼갠 9인자 호출,
+    /// 주어진 nonce)를 `eth_call` 로 태워 본다. 판정은 **revert 사유**다(상대 구현이 문서에 적어 둔
+    /// 판별법과 같다):
+    ///   · 서명이 맞으면 → `ERC20: transfer amount exceeds balance` (잔액 0 인 새 키니까 당연하다)
+    ///     = **서명 검증을 통과했다**. 돈만 있으면 나간다는 뜻.
+    ///   · 서명을 한 바이트 건드리면 → `FiatTokenV2: invalid signature`
+    /// 대조군이 없으면 위 실패가 「아무 서명이나 거기까지 간다」는 뜻일 수도 있어 증거가 못 된다
+    /// (개발 12 의 «통과하지만 아무것도 안 보는 검사» 방지).
+    #[tokio::test]
+    #[ignore = "네트워크 필요 — Arc 테스트넷에 eth_call 로 직접 제출 시뮬레이션"]
+    async fn x402_direct_calldata_is_accepted_on_arc() {
+        use crate::chain::{ARC_TESTNET, IEIP3009};
+        use alloy::providers::ProviderBuilder;
+
+        let chain = ARC_TESTNET;
+        let signer = PrivateKeySigner::random();
+        let to = Address::from([0x11u8; 20]);
+        let value = U256::from(10_000u64); // 0.01 USDC — **0 이 아니어야** 잔액 검사까지 간다
+        let nonce = B256::from([0x5au8; 32]);
+
+        // 서명은 실제 경로 그대로(같은 함수·같은 도메인).
+        let payment = with_pinned_chain(
+            chain.chain_id,
+            sign_authorization(&signer, to, value, 600, nonce),
+        )
+        .await
+        .expect("서명");
+        let sig: alloy::primitives::Signature = payment.signature.parse().unwrap();
+        let provider = ProviderBuilder::new()
+            .connect(chain.default_rpc)
+            .await
+            .expect("Arc RPC 연결");
+        let usdc = IEIP3009::new(chain.usdc_address, &provider);
+
+        let from = signer.address();
+        let call = |r: B256, s: B256| {
+            let usdc = &usdc;
+            async move {
+                usdc.transferWithAuthorization(
+                    from,
+                    to,
+                    value,
+                    U256::ZERO,
+                    U256::from(now_secs() + 600),
+                    nonce,
+                    27 + sig.v() as u8,
+                    r,
+                    s,
+                )
+                .call()
+                .await
+                .map(|_| ())
+            }
+        };
+
+        let r = B256::from(sig.r().to_be_bytes::<32>());
+        let s_val = B256::from(sig.s().to_be_bytes::<32>());
+        let ours = call(r, s_val).await;
+        println!("Arc 직접 제출 시뮬레이션 (우리 서명): {ours:?}");
+        let msg = format!("{ours:?}");
+        assert!(
+            msg.contains("exceeds balance"),
+            "서명 검증을 통과하지 못했다 — 잔액 사유가 아닌 다른 이유로 실패: {msg}"
+        );
+
+        // 대조군 — r 의 한 바이트만 뒤집는다.
+        let mut bad = r.0;
+        bad[0] ^= 0xff;
+        let tampered = call(B256::from(bad), s_val).await;
+        println!("대조군 (서명 변조): {tampered:?}");
+        let tmsg = format!("{tampered:?}");
+        assert!(
+            !tmsg.contains("exceeds balance"),
+            "변조한 서명도 잔액 검사까지 갔다 — 위 성공은 증거가 못 된다: {tmsg}"
+        );
     }
 
     /// 🔴 [x402-4] 개발 50 — **Arc 에서 우리 서명이 실제로 정산될까**를 체인에 직접 물어본다(돈 0원).

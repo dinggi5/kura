@@ -78,9 +78,15 @@ export function PaymentApprovalModal({
       .catch(() => setTrusted(null));
   }, [request.to]);
 
-  const isX402 = request.kind === "x402";
-  // x402는 USDC 서명만(온체인 전송 X). transfer는 USDC/ETH 송금 — 단 가스가 곧 USDC 인 체인(Arc)엔
-  // 보낼 ETH 라는 게 없다(백엔드도 막는다). 여기서 걸러야 "승인할 수 없는 요청"으로 정직하게 뜬다.
+  // x402 는 두 갈래다 (개발 64):
+  //  · "x402"        = 서명만. 온체인 제출·가스는 페이실리테이터 몫 → 우리 잔액에서 가스가 안 나간다.
+  //  · "x402-direct" = **우리가 직접 올린다**(가스가 곧 USDC 인 체인). 결제액 + 가스가 우리 잔액에서 나간다.
+  // 표시(제목·리소스 URL)는 둘이 같고, **잔액 검사만 갈린다** — 그게 실제로 다른 유일한 사실이다.
+  const isX402Sign = request.kind === "x402";
+  const isX402Direct = request.kind === "x402-direct";
+  const isX402 = isX402Sign || isX402Direct;
+  // x402는 USDC 결제만(서명이든 직접 제출이든). transfer는 USDC/ETH 송금 — 단 가스가 곧 USDC 인
+  // 체인(Arc)엔 보낼 ETH 라는 게 없다(백엔드도 막는다). 여기서 걸러야 "승인할 수 없는 요청"으로 정직하게 뜬다.
   const tokenOk = isX402
     ? request.token === "USDC"
     : request.token === "USDC" || (request.token === "ETH" && !chain.nativeIsUsdc);
@@ -98,10 +104,11 @@ export function PaymentApprovalModal({
   // 보내면 가스를 못 내 체인에서 실패한다. 보내기 화면은 이미 여유분을 빼는데(SendCard) 승인 창은
   // 안 빼서, MCP `request_payment` 로 온 「잔액 전부」가 이 검사만 통과하고 실패했다(개발 50 이월).
   //
-  // **x402 엔 안 건다** — 서명만 하고 온체인 제출·가스는 페이실리테이터 몫이라 우리 가스가 안 나간다.
-  // 여기에 여유분을 걸면 낼 수 있는 결제를 막는다.
+  // **서명만 하는 x402 엔 안 건다** — 온체인 제출·가스가 페이실리테이터 몫이라 우리 가스가 안 나간다.
+  // 여기에 여유분을 걸면 낼 수 있는 결제를 막는다. 🔴 반대로 **직접 제출(x402-direct)엔 건다**
+  // (개발 64) — 그 갈래는 우리가 올리므로 송금과 똑같이 가스가 이 잔액에서 나간다.
   const reserveUnits =
-    request.kind === "x402" || request.token === "ETH"
+    isX402Sign || request.token === "ETH"
       ? 0n
       : (toBaseUnits(String(chain.gasReserveUsdc ?? 0), decimals) ?? 0n);
   const insufficient =
@@ -204,6 +211,17 @@ export function PaymentApprovalModal({
           <p className="mt-2 flex items-center gap-1.5 text-[11px] font-mono text-[var(--color-ink-500)] break-all">
             <Globe size={12} className="shrink-0" />
             {request.resource}
+          </p>
+        )}
+
+        {/* 직접 제출(개발 64): 서명으로 끝나는 결제가 아니라 **지금 체인에 올라가는 전송**이다.
+            승인하면 되돌릴 수 없다는 점에서 송금과 같아, 그 사실만 한 줄로 말한다. */}
+        {isX402Direct && (
+          <p className="mt-2 text-[11px] text-[var(--color-ink-300)]">
+            {t(
+              "승인하면 지갑이 직접 체인에 올려요 — 수수료도 이 잔액에서 나갑니다.",
+              "Approving broadcasts it from this wallet — the fee comes out of this balance too.",
+            )}
           </p>
         )}
 

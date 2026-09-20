@@ -6,14 +6,21 @@
 // 비번은 절대 여기로 들어오지 않는다. 이 모듈은 GUI 에 "요청"만 하고, 서명·전송은 GUI 가
 // 사람 승인을 받아 수행한다(payment.rs 의 파일 IPC). 한도·긴급잠금·화이트리스트도 GUI 가 강제한다.
 
+use crate::arc_direct::{self, DirectProof, ReceiptOutcome};
 use crate::chain::active_chain;
 use crate::erc8004::{self, AgentTrust};
+use crate::x402::TransferMethod;
 use crate::{payment, x402};
 use crate::{tf, ts};
 
 /// 외부 서버가 거대 본문으로 어댑터 메모리를 채우지 못하게 하는 상한(바이트). 본문을 읽기 전에
 /// Content-Length 로 먼저 거른다(버퍼링 후 자르면 메모리 보호가 안 됨).
 const MAX_BODY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
+
+/// 직접 제출(개발 64)에서 **영수증을 기다리는 상한**. 서버는 최소 1 확인을 요구하므로 브로드캐스트
+/// 직후 바로 내면 거절된다. Arc 블록은 1초 남짓이라 넉넉한 값이다. 넘겨도 **실패로 바꾸지 않는다** —
+/// 돈은 이미 나갔고, 「못 받았다」와 「안 냈다」는 다른 말이다(arc_direct::wait_for_receipt).
+const RECEIPT_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// 표시용 본문 문자 상한 — 에이전트/터미널 컨텍스트 보호. 문자 단위라 UTF-8 안전.
 const MAX_BODY_CHARS: usize = 100_000;
@@ -279,6 +286,17 @@ pub enum X402Outcome {
     NotPaid { http_status: u16, body: String },
     /// 결제가 필요했지만 사용자가 승인하지 않았다(rejected | failed).
     Declined { status: String, detail: String },
+    /// 🔴 **돈은 나갔는데 콘텐츠를 못 받았다** (개발 64, 직접 제출 전용).
+    /// 영수증이 제때 안 잡혔거나(Pending) 체인에서 revert 했다 → 서버에 증거를 내지 못했다.
+    /// 이 갈래가 따로 있는 이유: 이걸 `Declined`(안 냈다)나 `Err`(진행 불가)로 뭉치면 AI 가
+    /// **다시 결제한다**. tx 해시와 「다시 요청하면 또 결제된다」를 구조로 들고 나간다.
+    PaidNoContent {
+        tx: String,
+        explorer: String,
+        /// "pending"(확인 못 함) | "reverted"(체인에서 실패)
+        reason: String,
+        notice: String,
+    },
     /// 결제하고 콘텐츠를 받았다.
     Paid {
         http_status: u16,
@@ -434,14 +452,46 @@ pub async fn run_x402(
     if !payment::app_alive() {
         return Err(app_unavailable());
     }
+    // 🔴 **갈래**: 서버가 `eip3009-client-broadcast` 를 요구하면 우리가 직접 올린다(개발 64).
+    let direct = req.method == TransferMethod::ClientBroadcast;
+    // 직접 제출의 nonce 는 랜덤이 아니라 **서버 요구사항에서 규격대로 유도한 값**이다(arc_direct 머리말).
+    // 승인 창을 띄우기 **전에** 계산해, 서버가 게시한 값과 어긋나면 사람을 부르지도 않는다 —
+    // 그건 이 챌린지가 주장하는 것과 다른 결제라는 뜻이다.
+    let (client_nonce, seed, nonce) = if direct {
+        arc_direct::fresh_nonce(req.seed.as_deref(), &req.binding())
+    } else {
+        (None, None, String::new())
+    };
+    // 🔴 **옛 앱에는 새 방식을 보내지 않는다** (개발 64). 옛 앱은 모르는 kind 를 평범한 송금으로
+    // 처리했다 — 돈은 나가고 서버는 그 전송을 결제로 알아보지 못한다. 앱이 하트비트에 적어 둔
+    // 「내가 아는 방식」에 없으면 여기서 멈춘다(요청 파일을 쓰기 전).
+    if direct && !payment::app_supports("x402-direct") {
+        return Err(ts!(
+            "이 결제는 지갑이 직접 체인에 올려야 하는데, 켜져 있는 지갑 앱이 그 방식을 아직 몰라요. 앱을 업데이트한 뒤 다시 시도하세요.",
+            "This payment has to be broadcast by the wallet itself, and the running wallet app doesn't know that method yet. Update the app and try again."
+        )
+        .into());
+    }
+    if direct && !arc_direct::published_nonce_ok(req.published_nonce.as_deref(), &nonce) {
+        return Err(ts!(
+            "서버가 게시한 결제 번호가 우리 계산과 달라요 — 결제하지 않았습니다.",
+            "The nonce the server published doesn't match the one this challenge derives — nothing was paid."
+        )
+        .into());
+    }
     // 여기도 같은 규칙 — 요청에 실린 대조만 결과로 돌려준다(개발 47 부터 있던 어긋남).
-    let (id, agent) = payment::write_x402_request(
-        req.pay_to.trim(),
-        &amount_usdc,
-        &memo,
-        &resource,
-        agent,
-    )?;
+    let (id, agent) = if direct {
+        payment::write_x402_direct_request(
+            req.pay_to.trim(),
+            &amount_usdc,
+            &memo,
+            &resource,
+            &nonce,
+            agent,
+        )?
+    } else {
+        payment::write_x402_request(req.pay_to.trim(), &amount_usdc, &memo, &resource, agent)?
+    };
     let result = match payment::await_result(&id, payment::APPROVAL_TIMEOUT).await {
         Some(r) => r,
         None => {
@@ -463,27 +513,92 @@ pub async fn run_x402(
             agent_note,
         });
     }
-    let payment = result.x402.ok_or(ts!(
-        "승인됐지만 서명 페이로드가 비어 있어요",
-        "Approved, but the signature payload is empty"
-    ))?;
-
-    // 6) 결제 헤더를 붙여 재요청 → 콘텐츠 수신.
-    // V2면 PAYMENT-SIGNATURE(+ resource/accepted 에코), V1이면 X-PAYMENT. 정산 응답 헤더 이름도 버전별.
-    let sub = required.build_submission(&req, &payment)?;
+    // 6) 제출할 증거를 만든다 — 표준은 **서명**, 직접 제출은 **우리가 올린 tx 해시**.
+    let mut signed: Option<x402::X402Payment> = None;
+    let sub = if direct {
+        let tx = result.tx_hash.trim().to_string();
+        if tx.is_empty() {
+            return Err(ts!(
+                "승인됐지만 전송 결과(tx 해시)가 비어 있어요",
+                "Approved, but the transaction hash came back empty"
+            )
+            .into());
+        }
+        let explorer = format!("{}{}", active_chain().explorer_tx_prefix, tx);
+        // 서버는 **채굴된** 영수증을 요구한다(레퍼런스 구현 기본값 = 최소 1 확인) → 여기서 기다린다.
+        // 못 잡거나 revert 면 **돈이 나간 채로** 끝난다 — 그 사실을 구조로 돌려준다(PaidNoContent).
+        let outcome = arc_direct::wait_for_receipt(&tx, RECEIPT_WAIT)
+            .await
+            .unwrap_or(ReceiptOutcome::Pending); // RPC 를 못 붙은 것도 「모른다」지 「안 냈다」가 아니다
+        match outcome {
+            ReceiptOutcome::Mined => {}
+            ReceiptOutcome::Reverted => {
+                return Ok(X402Result {
+                    outcome: X402Outcome::PaidNoContent {
+                        notice: arc_direct::reverted_notice(&tx),
+                        tx,
+                        explorer,
+                        reason: "reverted".into(),
+                    },
+                    agent,
+                    agent_note,
+                });
+            }
+            ReceiptOutcome::Pending => {
+                return Ok(X402Result {
+                    outcome: X402Outcome::PaidNoContent {
+                        notice: arc_direct::pending_notice(&tx, &explorer),
+                        tx,
+                        explorer,
+                        reason: "pending".into(),
+                    },
+                    agent,
+                    agent_note,
+                });
+            }
+        }
+        required.build_direct_submission(
+            &req,
+            &DirectProof {
+                transaction: tx,
+                client_nonce,
+                seed,
+                nonce,
+            },
+        )?
+    } else {
+        let payment = result.x402.ok_or(ts!(
+            "승인됐지만 서명 페이로드가 비어 있어요",
+            "Approved, but the signature payload is empty"
+        ))?;
+        // V2면 PAYMENT-SIGNATURE(+ resource/accepted 에코), V1이면 X-PAYMENT. 정산 응답 헤더 이름도 버전별.
+        let sub = required.build_submission(&req, &payment)?;
+        signed = Some(payment);
+        sub
+    };
     // 결제 헤더(서명된 인가)는 리다이렉트를 따라가지 않는 클라이언트로 최종 URL 에만 보낸다.
     let pay_client = http_client_no_redirect()?;
-    let paid_resp = pay_client
+    let mut builder = pay_client
         .get(final_url)
-        .header(sub.header_name, &sub.value)
+        .header(sub.header_name, &sub.value);
+    if let Some(alt) = sub.alt_header {
+        builder = builder.header(alt, &sub.value); // 같은 값 — 헤더 이름만 다르게 읽는 서버 대비
+    }
+    let paid_resp = builder
         .send()
         .await
         .map_err(|e| tf!("결제 재요청 실패: {e}", "The paid re-request failed: {e}"))?;
     let paid_status = paid_resp.status().as_u16();
-    let settlement = paid_resp
-        .headers()
-        .get(sub.response_header)
-        .and_then(|v| v.to_str().ok())
+    // 정산 증빙 헤더도 이름이 갈린다 — V2 는 PAYMENT-RESPONSE, 옛 어댑터(와 직접 제출 레퍼런스
+    // 서버)는 X-PAYMENT-RESPONSE. 둘 다 본다(우선순위는 버전이 정한 이름).
+    let mut response_names = vec![sub.response_header];
+    if sub.alt_header.is_some() {
+        response_names.push("X-PAYMENT-RESPONSE");
+    }
+    let settlement = response_names
+        .iter()
+        .filter_map(|name| paid_resp.headers().get(*name))
+        .find_map(|v| v.to_str().ok())
         .map(String::from)
         .unwrap_or_default();
     let body = read_body_capped(paid_resp).await;
@@ -491,9 +606,12 @@ pub async fn run_x402(
     // 정산 tx 해시를 뽑아 GUI 내역에 반영되도록 기록(nonce 로 "signed" 항목과 매칭).
     // **2xx(실제 정산 성공) 응답일 때만** 기록한다 — 비-2xx 응답에 위조 PAYMENT-RESPONSE 헤더를
     // 실어 보내 GUI 내역을 가짜 "정산됨"으로 오염시키는 걸 막는다.
+    // 직접 제출은 이 기록이 필요 없다 — 내역엔 이미 우리가 올린 전송이 tx 해시와 함께 "sent" 로
+    // 남아 있다(GUI 가 송금과 같은 경로로 기록한다). 여긴 **서명만 한 결제**를 정산 tx 로 잇는 자리다.
     let ok = (200..300).contains(&paid_status);
     if ok && !settlement.is_empty() {
-        if let Some((tx, success)) = x402::parse_settlement(&settlement) {
+        if let (Some(payment), Some((tx, success))) = (&signed, x402::parse_settlement(&settlement))
+        {
             let _ = payment::record_settlement(&payment.authorization.nonce, &tx, success);
         }
     }

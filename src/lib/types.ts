@@ -120,7 +120,9 @@ export type PaymentRequest = {
   amount: string;
   memo: string;
   created: number;
-  /** "transfer"(온체인 송금) | "x402"(EIP-3009 오프체인 서명). 없으면 transfer. */
+  /** "transfer"(온체인 송금) | "x402"(EIP-3009 오프체인 서명) |
+   *  "x402-direct"(EIP-3009 인가를 지갑이 **직접 체인에 올린다** — 개발 64, 가스가 USDC 인 체인).
+   *  없으면 transfer. */
   kind?: string;
   /** x402일 때 결제 대상 리소스 URL. */
   resource?: string;

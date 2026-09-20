@@ -1056,6 +1056,7 @@ mod tests {
             memo: String::new(),
             created: crate::store::now_secs(),
             kind: "transfer".into(),
+            nonce: String::new(),
             resource: String::new(),
             chain_id: 0,
             account: 1,

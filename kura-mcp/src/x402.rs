@@ -27,6 +27,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::arc_direct::{DirectProof, NonceBinding, METHOD_CLIENT_BROADCAST};
 use crate::chain::active_chain;
 
 /// 우리가 지원하는 결제 스킴 (체인 무관 프로토콜 값).
@@ -59,6 +60,16 @@ pub struct PaymentRequired {
     pub version: u8,
 }
 
+/// 이 요구를 **누가 온체인에 올리는가** (`extra.assetTransferMethod`, x402 제안 #3504).
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub enum TransferMethod {
+    /// 표준 `exact` — 우리는 서명만, 제출·가스는 페이실리테이터. 필드가 없으면 이것(기존 동작).
+    Facilitator,
+    /// `eip3009-client-broadcast` — **우리가 직접 올리고 우리 USDC 로 가스를 낸다**(개발 64).
+    /// 가스가 곧 결제자산인 체인(Arc)에서만 성립한다.
+    ClientBroadcast,
+}
+
 /// accepts[] 중 우리가 고른 결제 요구 1건. raw = 원본 항목(V2 제출 때 통째로 에코).
 pub struct Requirement {
     pub raw: Value,
@@ -67,6 +78,29 @@ pub struct Requirement {
     /// base unit 금액("10000"). V2 "amount" / V1 "maxAmountRequired" 중 있는 쪽.
     pub amount: String,
     pub pay_to: String,
+    /// 이 체인의 USDC 주소(서버가 준 표기 그대로 — nonce 바인딩이 이 문자열을 쓴다).
+    pub asset: String,
+    /// 누가 올리는가. 갈래가 여기서 갈린다.
+    pub method: TransferMethod,
+    /// `extra.resource` — **nonce 계산 전용**(표시용 URL 이 아니다, 개발 51).
+    pub extra_resource: String,
+    /// seed 모드 서버가 준 seed(있으면 그 모드).
+    pub seed: Option<String>,
+    /// 서버가 미리 게시한 nonce(있으면 우리 계산과 대조한다).
+    pub published_nonce: Option<String>,
+}
+
+impl Requirement {
+    /// nonce 가 묶이는 조각 — **서버가 준 값 그대로**(자세한 이유는 arc_direct 모듈 머리말).
+    pub fn binding(&self) -> NonceBinding {
+        NonceBinding {
+            network: self.network.clone(),
+            asset: self.asset.clone(),
+            pay_to: self.pay_to.clone(),
+            amount: self.amount.clone(),
+            resource: self.extra_resource.clone(),
+        }
+    }
 }
 
 /// 조립된 결제 제출(헤더 이름 + base64 값 + 정산 응답을 읽을 헤더 이름). V1/V2가 다르다.
@@ -74,6 +108,10 @@ pub struct Submission {
     pub header_name: &'static str,
     pub value: String,
     pub response_header: &'static str,
+    /// 같은 값을 함께 실어 줄 두 번째 헤더(없으면 None). 직접 제출 규격의 서버들이 V2 본문으로
+    /// 챌린지를 주면서 헤더는 `X-PAYMENT` 로 읽는 경우가 있어(레퍼런스 서버가 그렇다), 그 갈래에선
+    /// 둘 다 보낸다 — 값이 같으므로 양쪽 다 읽는 서버에도 무해하다(상대 구현의 클라이언트도 그렇게 한다).
+    pub alt_header: Option<&'static str>,
 }
 
 /// 네트워크 표기가 우리가 지원하는 활성 체인인지 (V1 단축명/V2 CAIP-2 둘 다 허용).
@@ -136,6 +174,37 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
 
+/// **이 요구를 누가 온체인에 올리는가** (개발 64). `extra.assetTransferMethod` 를 본다.
+///
+/// - 필드 없음 → `Facilitator` (여태 우리가 해 온 것. 대부분의 서버가 여기).
+/// - `eip3009-client-broadcast` → `ClientBroadcast` (우리가 직접 올린다).
+/// - **그 밖의 값 → `None` = 이 요구는 못 고른다.**
+///
+/// 마지막 갈래가 이 함수의 존재 이유다. 모르는 방식을 「어차피 exact 니까」 하고 집어 들면,
+/// 사람이 승인 창까지 보고 비번을 넣은 뒤 서버가 우리 헤더를 못 읽어 조용히 거절한다 —
+/// 개발 50 이 `extra` 도메인 가드로 막았던 바로 그 실패 모드가 **다른 필드로** 다시 열린다.
+/// 실제로 개발 64 직전까지 우리는 `eip3009-client-broadcast` 요구(stockwaves.net 실물)를 그대로
+/// 골라 서명하고 있었다: 돈은 안 나가지만 일일 한도는 깎이고 내역엔 "signed" 가 남았다.
+/// (`native_is_usdc` 를 인자로 받는 이유: 이 판정은 체인마다 답이 달라야 하는데, 단위 테스트는
+/// 활성 체인이 Base Sepolia 로 고정돼 있어 «Arc 에선 고른다» 를 검사할 길이 없다. 순수 함수로
+/// 두면 양쪽을 다 문다.)
+fn transfer_method(entry: &Value, native_is_usdc: bool) -> Option<TransferMethod> {
+    let raw = entry
+        .get("extra")
+        .and_then(|x| str_field(x, "assetTransferMethod"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match raw {
+        None => Some(TransferMethod::Facilitator),
+        Some(m) if m.eq_ignore_ascii_case(METHOD_CLIENT_BROADCAST) => {
+            // 🔴 가스가 곧 결제자산인 체인에서만 성립한다(제안의 전제). Base 에서 이걸 고르면
+            // 우리 ETH 로 가스를 내야 하는데, x402 경로엔 ETH 회계가 없다 → 고르지 않는다.
+            native_is_usdc.then_some(TransferMethod::ClientBroadcast)
+        }
+        Some(_) => None,
+    }
+}
+
 /// 402 응답에서 결제 요구를 추출한다. V2는 `payment-required` 헤더(base64 JSON)를,
 /// 없으면 V1처럼 응답 본문(JSON)을 파싱한다.
 pub fn parse_required(header: Option<&str>, body: &str) -> Result<PaymentRequired, String> {
@@ -175,6 +244,9 @@ pub fn pick_requirement(pr: &PaymentRequired) -> Result<Requirement, String> {
             let scheme = str_field(entry, "scheme").unwrap_or("");
             let network = str_field(entry, "network").unwrap_or("");
             let asset = str_field(entry, "asset").unwrap_or("");
+            let Some(method) = transfer_method(entry, active_chain().native_is_usdc) else {
+                continue; // 우리가 못 내는 방식 — 서명해 봐야 서버가 못 쓴다
+            };
             if scheme.eq_ignore_ascii_case(SCHEME)
                 && network_supported(network)
                 && asset.to_lowercase() == usdc_lower
@@ -184,12 +256,24 @@ pub fn pick_requirement(pr: &PaymentRequired) -> Result<Requirement, String> {
                     .or_else(|| str_field(entry, "maxAmountRequired"))
                     .unwrap_or("")
                     .to_string();
+                let extra = entry.get("extra");
                 return Ok(Requirement {
                     raw: entry.clone(),
                     scheme: scheme.to_string(),
                     network: network.to_string(),
                     amount,
                     pay_to: str_field(entry, "payTo").unwrap_or("").to_string(),
+                    asset: asset.to_string(),
+                    method,
+                    // nonce 바인딩은 **서버 문자열 그대로**(없으면 빈 문자열 — 상대 구현도 같은 규칙).
+                    extra_resource: extra
+                        .and_then(|x| str_field(x, "resource"))
+                        .unwrap_or("")
+                        .to_string(),
+                    seed: extra.and_then(|x| str_field(x, "seed")).map(str::to_string),
+                    published_nonce: extra
+                        .and_then(|x| str_field(x, "nonce"))
+                        .map(str::to_string),
                 });
             }
         }
@@ -206,7 +290,18 @@ pub fn pick_requirement(pr: &PaymentRequired) -> Result<Requirement, String> {
                         str_field(e, "network").unwrap_or("?"),
                         str_field(e, "asset").unwrap_or("?")
                     );
-                    if extra_domain_ok(e) {
+                    if transfer_method(e, active_chain().native_is_usdc).is_none() {
+                        let m = e
+                            .get("extra")
+                            .and_then(|x| str_field(x, "assetTransferMethod"))
+                            .unwrap_or("?");
+                        // 「방식은 아는데 이 체인이 아닌」 경우와 「아예 모르는 방식」을 한 문구로 묶는다 —
+                        // 둘 다 사용자가 할 수 있는 일은 없고, 알아야 할 것은 «왜 못 냈나» 뿐이다.
+                        tf!(
+                            "{base} (전송 방식 {m} — 이 체인에선 우리가 낼 수 없어요)",
+                            "{base} (asset transfer method {m} — Kura can't pay that on this chain)"
+                        )
+                    } else if extra_domain_ok(e) {
                         base
                     } else {
                         let name = e
@@ -282,6 +377,42 @@ impl PaymentRequired {
             header_name,
             value: B64.encode(bytes),
             response_header,
+            alt_header: None,
+        })
+    }
+}
+
+impl PaymentRequired {
+    /// **직접 제출**(client-broadcast)의 제출 헤더 — payload 가 서명이 아니라 **우리가 올린 tx 해시**다.
+    ///
+    /// 모양은 규격(그리고 상대 구현의 `toPaymentHeader`)대로 언제나 V2 다: `{x402Version:2, resource,
+    /// accepted, payload}`. 서버가 챌린지를 V1 본문으로 줬더라도 이 갈래는 V2 규격에만 정의돼 있다.
+    /// `accepted` 는 서버가 준 요구 raw 를 통째로 에코한다 — 서버가 검증 때 자기 요구사항을 다시 만들어
+    /// `required.extra ⊆ accepted.extra` 로 맞춰 보기 때문에, 한 필드라도 빠지면 「맞는 요구가 없다」가 된다.
+    pub fn build_direct_submission(
+        &self,
+        req: &Requirement,
+        proof: &DirectProof,
+    ) -> Result<Submission, String> {
+        let body = serde_json::json!({
+            "x402Version": 2,
+            "resource": self.raw.get("resource").cloned().unwrap_or(Value::Null),
+            "accepted": req.raw,
+            "payload": proof.payload(),
+        });
+        let bytes = serde_json::to_vec(&body).map_err(|e| {
+            tf!(
+                "payload 직렬화 실패: {e}",
+                "Couldn't serialize the payload: {e}"
+            )
+        })?;
+        Ok(Submission {
+            header_name: "PAYMENT-SIGNATURE",
+            value: B64.encode(bytes),
+            response_header: "PAYMENT-RESPONSE",
+            // 레퍼런스 서버(kaditang/x402-arc 의 examples/server.ts)는 챌린지를 V2 로 주면서 헤더는
+            // `X-PAYMENT` 로 읽는다 — 상대 구현의 클라이언트도 그래서 둘 다 보낸다. 값이 같다.
+            alt_header: Some("X-PAYMENT"),
         })
     }
 }
@@ -405,6 +536,94 @@ mod tests {
         };
         // 왜 못 골랐는지가 문구에 남아야 한다 — 세 값만 찍으면 "다 맞는데 왜"로 읽힌다.
         assert!(err.contains("GatewayWalletBatched"), "{err}");
+    }
+
+    /// 🔴 개발 64 — **`assetTransferMethod` 를 모르면 고르지 않는다(닫히는 쪽으로 실패).**
+    ///
+    /// 표본은 stockwaves.net 의 실제 402 챌린지 모양이다(개발 64 에서 받아 확인). scheme·network·
+    /// asset·extra 도메인이 **전부 우리와 같다** — 개발 50 가드는 그대로 통과한다. 다른 것은
+    /// `assetTransferMethod` 하나뿐이고, 그 하나가 「누가 온체인에 올리나」를 통째로 바꾼다.
+    /// 이 가드가 없으면 사람이 비번을 넣어 서명한 뒤 서버가 그 헤더를 못 읽는다(돈은 안 나가고
+    /// 일일 한도만 깎인다) — 개발 64 직전까지 실제로 그 상태였다.
+    #[test]
+    fn unknown_transfer_method_is_not_picked() {
+        let body = r#"{"x402Version":2,"accepts":[
+          {"scheme":"exact","network":"base-sepolia","amount":"10000",
+           "payTo":"0x1111111111111111111111111111111111111111",
+           "asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+           "extra":{"name":"USDC","version":"2","assetTransferMethod":"some-future-scheme"}}]}"#;
+        let pr = parse_required(None, body).unwrap();
+        let err = match pick_requirement(&pr) {
+            Ok(_) => panic!("모르는 전송 방식을 골랐다"),
+            Err(e) => e,
+        };
+        // 왜 못 골랐는지가 문구에 남아야 한다 — 「다 맞는데 왜」로 읽히면 안 된다.
+        assert!(err.contains("some-future-scheme"), "{err}");
+    }
+
+    /// 직접 제출은 **가스가 곧 결제자산인 체인에서만** 고른다. Base 에서 고르면 우리 ETH 로
+    /// 가스를 내야 하는데 x402 경로엔 그 회계가 없다 → 체인이 아니면 안 고른다.
+    #[test]
+    fn client_broadcast_only_where_gas_is_usdc() {
+        let entry: Value = serde_json::from_str(
+            r#"{"scheme":"exact","network":"eip155:5042","amount":"30000",
+                "payTo":"0xDc9F94A8b93F070B58cfa580cbE740d763005FE6",
+                "asset":"0x3600000000000000000000000000000000000000",
+                "extra":{"name":"USDC","version":"2","assetTransferMethod":"eip3009-client-broadcast"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            transfer_method(&entry, true),
+            Some(TransferMethod::ClientBroadcast)
+        );
+        assert_eq!(transfer_method(&entry, false), None); // Base 계열 = 안 고른다
+
+        // 대소문자는 흡수한다(프로토콜 문자열이지 서명 도메인이 아니다).
+        let upper: Value =
+            serde_json::from_str(r#"{"extra":{"assetTransferMethod":"EIP3009-Client-Broadcast"}}"#)
+                .unwrap();
+        assert_eq!(
+            transfer_method(&upper, true),
+            Some(TransferMethod::ClientBroadcast)
+        );
+        // 필드가 없거나 비었으면 예전 그대로(페이실리테이터 정산) — 서버 대다수가 이쪽이다.
+        let plain: Value = serde_json::from_str(r#"{"extra":{"name":"USDC"}}"#).unwrap();
+        assert_eq!(
+            transfer_method(&plain, true),
+            Some(TransferMethod::Facilitator)
+        );
+        let no_extra: Value = serde_json::from_str(r#"{"scheme":"exact"}"#).unwrap();
+        assert_eq!(
+            transfer_method(&no_extra, false),
+            Some(TransferMethod::Facilitator)
+        );
+        let blank: Value =
+            serde_json::from_str(r#"{"extra":{"assetTransferMethod":"  "}}"#).unwrap();
+        assert_eq!(
+            transfer_method(&blank, true),
+            Some(TransferMethod::Facilitator)
+        );
+    }
+
+    /// 고른 요구에서 nonce 바인딩 재료가 그대로 나온다 — **서버가 준 문자열 그대로**여야 한다
+    /// (한 글자만 다듬어도 서버가 기대하는 nonce 와 갈린다).
+    #[test]
+    fn requirement_carries_binding_fields() {
+        let body = r#"{"x402Version":2,"accepts":[
+          {"scheme":"exact","network":"base-sepolia","amount":"10000",
+           "payTo":"0x1111111111111111111111111111111111111111",
+           "asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+           "extra":{"name":"USDC","version":"2","resource":"https://ex.com/a","nonce":"0xaa"}}]}"#;
+        let pr = parse_required(None, body).unwrap();
+        let req = pick_requirement(&pr).unwrap();
+        assert_eq!(req.method, TransferMethod::Facilitator);
+        assert_eq!(req.extra_resource, "https://ex.com/a");
+        assert_eq!(req.published_nonce.as_deref(), Some("0xaa"));
+        assert!(req.seed.is_none());
+        let b = req.binding();
+        assert_eq!(b.amount, "10000");
+        assert_eq!(b.asset, "0x036CbD53842c5426634e7929541eC2318f3dCF7e"); // 대소문자 그대로
+        assert_eq!(b.resource, "https://ex.com/a");
     }
 
     /// extra 가 아예 없거나 우리 도메인과 같으면 예전처럼 통과한다(회귀 방지 — 대부분의 서버가 이쪽).
@@ -559,5 +778,64 @@ mod tests {
         assert_eq!(v["accepted"]["extra"]["version"], "2");
         assert_eq!(v["payload"]["signature"], "0xabcd");
         assert_eq!(v["payload"]["authorization"]["value"], "10000");
+    }
+}
+
+/// 🔴 **교차 구현 하네스** (개발 64) — 상대 구현(kaditang/x402-arc)이 만든 진짜 402 챌린지를 읽어
+/// **우리가 낼 제출 헤더**를 만들어 파일로 내보낸다. 그 헤더를 상대 구현의 검증기(`ArcLocalFacilitator`)에
+/// 그대로 먹여 통과하는지 보는 것이 이 하네스의 목적이다.
+///
+/// 왜 테스트로 두나: 여기서 도는 것이 **실제 경로 그 자체**여야 의미가 있다 — `pick_requirement` →
+/// `Requirement::binding` → `arc_direct::fresh_nonce` → `build_direct_submission` 는 flow.rs 가 부르는
+/// 함수와 한 글자도 다르지 않다(HTTP·GUI 만 빠진다). 테스트가 판정을 베껴 쓰면 「초록인데 실물은
+/// 다른 값」이 된다(개발 63).
+///
+/// 실행: `HARNESS_DIR=… KURA_CHAIN_ID=5042002 cargo test --ignored direct_submission_for_harness`
+#[cfg(test)]
+mod harness {
+    use super::*;
+    use crate::arc_direct;
+
+    #[test]
+    #[ignore = "하네스 — HARNESS_DIR 이 필요하다(상대 구현과 교차 검증)"]
+    fn direct_submission_for_harness() {
+        let dir = std::env::var("HARNESS_DIR").expect("HARNESS_DIR");
+        let body =
+            std::fs::read_to_string(format!("{dir}/challenge.json")).expect("challenge.json");
+        let pr = parse_required(None, &body).expect("402 파싱");
+        let req = pick_requirement(&pr).expect("요구 선택");
+        assert_eq!(
+            req.method,
+            TransferMethod::ClientBroadcast,
+            "직접 제출 요구로 안 읽혔다"
+        );
+        let (client_nonce, seed, nonce) =
+            arc_direct::fresh_nonce(req.seed.as_deref(), &req.binding());
+        // tx 해시는 하네스가 정한다(체인 조회는 노드 쪽 스텁이 답한다).
+        let tx = std::env::var("HARNESS_TX").expect("HARNESS_TX");
+        let sub = pr
+            .build_direct_submission(
+                &req,
+                &arc_direct::DirectProof {
+                    transaction: tx,
+                    client_nonce,
+                    seed,
+                    nonce: nonce.clone(),
+                },
+            )
+            .expect("제출 조립");
+        std::fs::write(format!("{dir}/header.b64"), &sub.value).expect("header 쓰기");
+        std::fs::write(
+            format!("{dir}/derived.json"),
+            serde_json::json!({
+                "nonce": nonce,
+                "header_name": sub.header_name,
+                "alt_header": sub.alt_header,
+                "amount": req.amount,
+                "pay_to": req.pay_to,
+            })
+            .to_string(),
+        )
+        .expect("derived 쓰기");
     }
 }

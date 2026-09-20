@@ -26,7 +26,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
 # 잔액 조회 (Base Sepolia RPC + ERC20 balanceOf). src-tauri와 동일 버전.
-alloy = { version = "2.0.5", features = ["network", "rpc-types"] }
+# "rand" = 결제마다 새로 뽑는 clientNonce 의 엔트로피 (개발 64 — 같은 값이 두 번 나가면 체인에서 revert).
+alloy = { version = "2.0.5", features = ["network", "rpc-types", "rand"] }
 # 홈 디렉터리(~/.jigap) 탐색.
 dirs = "6.0.0"
 anyhow = "1"
@@ -35,6 +36,9 @@ anyhow = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # X-PAYMENT 헤더 base64 인코딩 (src-tauri와 동일 버전).
 base64 = "0.22"
+# x402 직접 제출(Arc)의 EIP-3009 nonce = sha256(binding ‖ clientNonce) (개발 64).
+# 규격이 sha256 을 못박는다(상대 구현과 바이트가 같아야 한다) — keccak 으로 대신할 수 없다.
+sha2 = "0.10"
 
 [dev-dependencies]
 # 목 x402 서버 검증: 받은 X-PAYMENT의 EIP-3009 서명을 만들고/복구해 라운드트립 검증.

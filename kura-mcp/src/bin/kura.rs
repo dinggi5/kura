@@ -520,6 +520,34 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                     );
                 }
             }
+            // 🔴 돈은 나갔는데 콘텐츠를 못 받은 갈래(개발 64, 직접 제출). 「거부됨」과 붙여 놓으면
+            // 사람이 «안 나갔구나» 로 읽는다 — tx 를 먼저 보여 준다.
+            X402Outcome::PaidNoContent {
+                tx,
+                explorer,
+                reason,
+                notice,
+            } => {
+                eprintln!(
+                    "{}",
+                    if reason == "reverted" {
+                        ts!(
+                            "✗ 결제 트랜잭션이 체인에서 실패했어요 (가스만 소모).",
+                            "✗ The payment transaction reverted on-chain (only gas was spent)."
+                        )
+                    } else {
+                        ts!(
+                            "△ 결제는 나갔는데 확인이 늦어 콘텐츠를 못 받았어요.",
+                            "△ The payment went out, but the receipt didn't confirm in time — no content."
+                        )
+                    }
+                );
+                eprintln!("{}", tf!("  tx  {tx}", "  tx  {tx}"));
+                if !explorer.is_empty() {
+                    eprintln!("{}", tf!("  링크  {explorer}", "  link  {explorer}"));
+                }
+                eprintln!("{notice}");
+            }
             X402Outcome::Paid {
                 http_status,
                 ok,
@@ -637,6 +665,16 @@ fn x402_outcome_json(out: &X402Outcome) -> serde_json::Value {
         }),
         X402Outcome::Declined { status, detail } => serde_json::json!({
             "paid": false, "status": status, "detail": detail,
+        }),
+        // 돈이 나갔다는 사실을 `paid: true` 로 정직하게 싣는다 — 자동화가 «안 냈다»로 읽고
+        // 다시 부르면 두 번 결제된다.
+        X402Outcome::PaidNoContent {
+            tx,
+            explorer,
+            reason,
+            notice,
+        } => serde_json::json!({
+            "paid": true, "status": reason, "tx": tx, "explorer": explorer, "notice": notice,
         }),
         X402Outcome::Paid {
             http_status,

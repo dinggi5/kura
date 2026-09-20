@@ -119,6 +119,7 @@ export const ARC_MAINNET: ChainConfig = {
   // 거래소 드롭다운 이름. 아직 상장 거래소가 없어 체인 이름 그대로 — 실제 거래소 표기가 확인되면 갱신.
   depositNetwork: "Arc",
   nativeIsUsdc: true,
+  // 개발 64 재측정으로 유지 — 이제 이 값이 덮어야 하는 최악값은 x402 직접 제출(112,519 gas).
   gasReserveUsdc: 0.05,
   erc8004: true,
   // Circle 공식 브릿지(CCTP). 목적지 목록에 Arc 가 있다(개발 62, 09-17 화면 확인). 내장 브릿지는

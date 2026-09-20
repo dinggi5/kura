@@ -256,13 +256,19 @@ impl WalletServer {
 
     #[tool(
         description = "Fetches an x402 paid resource (a URL). It GETs the URL first; if the server answers \
-        402 Payment Required, it asks the user to approve the required payment (exact scheme, the active Base \
-        network, USDC) in the wallet app, builds an EIP-3009 signature, and re-requests the same URL with an \
-        X-PAYMENT header to return the content. If no payment is required (no 402), it just returns the body. \
-        Approval works exactly as in request_payment (password by default; automatic only when the user has \
-        turned autopay on), and the app enforces per-payment and daily limits and the emergency lock. Never \
-        send a password as an argument. Arguments: url (required), memo (what the payment is for — the user \
-        reads it to decide). Returns: paid, status, http_status, body, and amount/pay_to/settlement when paid."
+        402 Payment Required, it asks the user to approve the required payment (exact scheme, the active \
+        network, that chain's USDC) in the wallet app, then re-requests the same URL with the payment header \
+        to return the content. If no payment is required (no 402), it just returns the body. Settlement takes \
+        one of two shapes, chosen by the server's requirement: a facilitator settles the signed EIP-3009 \
+        authorization (no gas from this wallet), or — where gas is paid in USDC itself and the server asks for \
+        `eip3009-client-broadcast` — the wallet broadcasts the transfer itself, so the price AND its gas leave \
+        this balance. Approval works exactly as in request_payment (password by default; automatic only when \
+        the user has turned autopay on), and the app enforces per-payment and daily limits and the emergency \
+        lock. Never send a password as an argument. Arguments: url (required), memo (what the payment is for \
+        — the user reads it to decide). Returns: paid, status, http_status, body, and amount/pay_to/settlement \
+        when paid. IMPORTANT: status \"pending\" or \"reverted\" with paid:true means the money already left \
+        the wallet (tx is in the reply) but no content came back — do NOT call this URL again to retry, \
+        because that pays a second time; tell the user instead."
     )]
     async fn x402_fetch(
         &self,
@@ -287,6 +293,20 @@ impl WalletServer {
                 "paid": false,
                 "status": status,   // rejected | failed
                 "detail": detail,
+            }),
+            // 🔴 **돈은 나갔는데 콘텐츠가 없다**(개발 64, 직접 제출). `paid: true` 로 내보내는 것이
+            // 핵심이다 — 「결제 안 됨」으로 읽히면 AI 가 같은 URL 을 다시 불러 **두 번 결제한다**.
+            X402Outcome::PaidNoContent {
+                tx,
+                explorer,
+                reason,
+                notice,
+            } => serde_json::json!({
+                "paid": true,
+                "status": reason,       // pending | reverted
+                "tx": tx,
+                "explorer": explorer,
+                "notice": notice,
             }),
             X402Outcome::Paid {
                 http_status,

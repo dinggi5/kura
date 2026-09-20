@@ -3,6 +3,8 @@
 // 모듈을 lib 으로 노출해 바이너리(main.rs)와 통합 테스트(tests/)가 함께 쓴다.
 // 비밀(니모닉/키)은 어느 모듈도 다루지 않는다 — 파일 읽기 + RPC + HTTP 만.
 
+/// x402 「직접 제출」(Arc client-broadcast) 전용 계산 — nonce 바인딩·증거 payload·영수증 대기 (개발 64).
+pub mod arc_direct;
 pub mod chain;
 pub mod erc8004;
 pub mod flow;

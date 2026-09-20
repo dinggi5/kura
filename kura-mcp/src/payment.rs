@@ -29,10 +29,18 @@ pub struct PaymentRequest {
     pub amount: String,
     pub memo: String,
     pub created: u64,
-    /// "transfer"(온체인 송금, 기본) | "x402"(EIP-3009 오프체인 서명).
+    /// "transfer"(온체인 송금, 기본) | "x402"(EIP-3009 오프체인 서명) |
+    /// "x402-direct"(EIP-3009 인가를 **우리가 직접 체인에 올린다** — 개발 64, Arc).
     /// 기존 요청 파일 호환을 위해 default = "transfer".
     #[serde(default = "default_kind")]
     pub kind: String,
+    /// `x402-direct` 일 때 **서명에 쓸 EIP-3009 nonce**(0x + 32바이트 hex). 다른 kind 면 빈 값.
+    ///
+    /// 왜 MCP 가 정해 주나: 이 값은 서버 요구사항에서 규격대로 유도한 것이라(arc_direct 참고)
+    /// 랜덤이면 안 된다 — 서버가 자기 요구사항으로 같은 값을 다시 만들어 대조한다. GUI 는 이걸
+    /// **불투명한 32바이트**로 받아 그대로 서명한다(어떤 값이든 인가의 의미는 to·value 가 정한다).
+    #[serde(default)]
+    pub nonce: String,
     /// x402일 때 결제 대상 리소스 URL (사용자가 팝업에서 본다). transfer면 빈 문자열.
     #[serde(default)]
     pub resource: String,
@@ -76,10 +84,19 @@ struct Heartbeat {
     /// 없으면 true (이 필드가 없던 옛 앱과의 호환 — 예전과 똑같이 동작).
     #[serde(default = "ui_ok_default")]
     ui_ok: bool,
+    /// **앱이 처리할 수 있는 결제 방식** (개발 64). 새 방식을 옛 앱에 보내지 않으려고 본다 —
+    /// 옛 앱은 모르는 kind 를 **평범한 송금으로 처리**했다(돈은 나가고 결제는 성립하지 않는다).
+    /// 필드가 없으면 그 시절 앱이므로 송금·x402 서명 둘만 할 수 있는 것으로 본다.
+    #[serde(default = "kinds_default")]
+    kinds: Vec<String>,
 }
 
 fn ui_ok_default() -> bool {
     true
+}
+
+fn kinds_default() -> Vec<String> {
+    vec!["transfer".into(), "x402".into()]
 }
 
 fn request_path() -> Result<PathBuf, String> {
@@ -215,6 +232,14 @@ fn read_heartbeat() -> Option<Heartbeat> {
     is_fresh(now_secs(), h.ts).then_some(h)
 }
 
+/// **지금 켜져 있는 앱이 이 결제 방식을 아는가** (개발 64). 모르면 요청을 아예 쓰지 않는다 —
+/// 옛 앱에 `x402-direct` 를 보내면 그쪽은 그걸 평범한 송금으로 처리한다(서버가 알아볼 수 없는
+/// 전송이 나가고 돈만 없어진다). 하트비트가 없으면(앱 꺼짐) false — 그 경우는 호출자가 이미
+/// `app_alive()` 로 갈라 안내한다.
+pub fn app_supports(kind: &str) -> bool {
+    read_heartbeat().is_some_and(|h| h.kinds.iter().any(|k| k == kind))
+}
+
 /// 앱은 떠 있는데 **화면(WebView)이 죽어** 승인 창을 못 띄우는 상태인가 (개발 51).
 /// 「앱을 켜세요」와 「앱을 다시 시작하세요」는 사용자가 할 일이 다르므로 갈라서 안내한다.
 pub fn ui_stalled() -> bool {
@@ -245,7 +270,7 @@ pub fn write_request_agent(
     memo: &str,
     agent: Option<AgentTrust>,
 ) -> Result<(String, Option<AgentTrust>), String> {
-    write_request_kind(token, to, amount, memo, "transfer", "", agent)
+    write_request_kind(token, to, amount, memo, "transfer", "", "", agent)
 }
 
 /// x402 결제 서명 요청을 파일에 쓴다 (kind="x402", USDC 고정).
@@ -257,7 +282,29 @@ pub fn write_x402_request(
     resource: &str,
     agent: Option<AgentTrust>,
 ) -> Result<(String, Option<AgentTrust>), String> {
-    write_request_kind("USDC", to, amount, memo, "x402", resource, agent)
+    write_request_kind("USDC", to, amount, memo, "x402", resource, "", agent)
+}
+
+/// x402 **직접 제출** 요청 (개발 64) — 서명만 받는 게 아니라 **온체인 전송까지** GUI 에 맡긴다.
+/// GUI 는 이 kind 를 송금과 같은 것으로 다룬다(가스 여유분·내역 "sent"·tx 해시 반환).
+pub fn write_x402_direct_request(
+    to: &str,
+    amount: &str,
+    memo: &str,
+    resource: &str,
+    nonce: &str,
+    agent: Option<AgentTrust>,
+) -> Result<(String, Option<AgentTrust>), String> {
+    write_request_kind(
+        "USDC",
+        to,
+        amount,
+        memo,
+        "x402-direct",
+        resource,
+        nonce,
+        agent,
+    )
 }
 
 /// 공통 요청 작성기 — kind/resource 만 다르고 나머지 single-flight 로직은 동일.
@@ -273,6 +320,7 @@ fn write_request_kind(
     memo: &str,
     kind: &str,
     resource: &str,
+    nonce: &str,
     agent: Option<AgentTrust>,
 ) -> Result<(String, Option<AgentTrust>), String> {
     let id = new_id();
@@ -293,6 +341,7 @@ fn write_request_kind(
         memo: memo.to_string(),
         created: now_secs(),
         kind: kind.to_string(),
+        nonce: nonce.to_string(),
         resource: resource.to_string(),
         chain_id,               // 요청 시점 활성 체인 각인(승인 시 GUI가 대조)
         account: account.index, // 요청 시점 활성 계정 각인(승인 시 GUI가 대조, 개발 54)
@@ -460,6 +509,22 @@ pub async fn await_result(id: &str, timeout: Duration) -> Option<PaymentResult> 
 mod tests {
     use super::*;
 
+    /// 🔴 개발 64 — **옛 앱의 하트비트엔 `kinds` 가 없다.** 그때 새 방식을 「지원한다」로 읽으면
+    /// 옛 앱에 `x402-direct` 요청이 가고, 그 앱은 그것을 **평범한 송금으로** 처리한다(돈은 나가고
+    /// 결제는 성립하지 않는다). 기본값은 그 시절 앱이 실제로 할 수 있던 둘뿐이어야 한다.
+    #[test]
+    fn heartbeat_kinds_default_is_the_old_apps_abilities() {
+        let old: Heartbeat = serde_json::from_str(r#"{"ts":1}"#).unwrap();
+        assert_eq!(old.kinds, vec!["transfer".to_string(), "x402".to_string()]);
+        assert!(!old.kinds.iter().any(|k| k == "x402-direct"));
+        // 새 앱이 적어 주면 그대로 읽는다.
+        let new: Heartbeat = serde_json::from_str(
+            r#"{"ts":1,"ui_ok":true,"kinds":["transfer","x402","x402-direct"]}"#,
+        )
+        .unwrap();
+        assert!(new.kinds.iter().any(|k| k == "x402-direct"));
+    }
+
     /// 결제 요청 JSON 왕복 — src-tauri가 읽는 형식과 호환돼야 한다.
     #[test]
     fn payment_request_roundtrip() {
@@ -471,6 +536,7 @@ mod tests {
             memo: "데이터 API 호출".into(),
             created: 100,
             kind: "transfer".into(),
+            nonce: String::new(),
             resource: String::new(),
             chain_id: 84_532,
             account: 1,
@@ -519,6 +585,7 @@ mod tests {
             memo: String::new(),
             created: 1,
             kind: "x402".into(),
+            nonce: String::new(),
             resource: "https://api.example.com/x".into(),
             chain_id: 8453,
             account: 0,
@@ -617,6 +684,7 @@ mod tests {
             memo: String::new(),
             created: 0,
             kind: "transfer".into(),
+            nonce: String::new(),
             resource: String::new(),
             chain_id: 0,
             account: 0,

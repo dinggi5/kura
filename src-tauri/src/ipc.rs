@@ -33,10 +33,16 @@ pub(crate) struct PaymentRequest {
     pub(crate) memo: String,
     /// 요청 생성 유닉스 초 (타임아웃 카운트다운용).
     pub(crate) created: u64,
-    /// "transfer"(온체인 송금, 기본) | "x402"(EIP-3009 오프체인 서명).
+    /// "transfer"(온체인 송금, 기본) | "x402"(EIP-3009 오프체인 서명) |
+    /// "x402-direct"(EIP-3009 인가를 **우리가 직접 체인에 올린다** — 개발 64, 가스가 USDC 인 체인).
     /// 기존(Session 10) 요청 파일 호환을 위해 default = "transfer".
     #[serde(default = "default_kind")]
     pub(crate) kind: String,
+    /// `x402-direct` 일 때 **서명에 쓸 EIP-3009 nonce**(0x + 32바이트 hex). 다른 kind 면 빈 값.
+    /// MCP 가 서버 요구사항에서 규격대로 유도한 값이라 우리가 랜덤으로 만들면 안 된다 — 서버가
+    /// 같은 값을 다시 만들어 «이 결제가 그 요청의 결제인가»를 판정한다.
+    #[serde(default)]
+    pub(crate) nonce: String,
     /// x402일 때 결제 대상 리소스 URL (팝업 표시용). transfer면 빈 문자열.
     #[serde(default)]
     pub(crate) resource: String,
@@ -183,10 +189,31 @@ struct Heartbeat {
     /// 거절하게 한다. 기본 true = 이 필드가 없던 옛 파일과의 호환.
     #[serde(default = "ui_ok_default")]
     ui_ok: bool,
+    /// 🔴 **이 앱이 처리할 수 있는 결제 방식들** (개발 64). MCP 가 요청을 쓰기 전에 본다.
+    ///
+    /// 왜 필요한가: MCP 사이드카는 앱 번들 안에 함께 실려 보통 앱과 같은 버전이지만, 소스 빌드로
+    /// 등록했거나 앱만 옛것인 조합이 있을 수 있다. 그때 **새 MCP + 옛 앱**이면 옛 앱은
+    /// `x402-direct` 를 모른 채 그 요청을 **평범한 송금으로 처리**했다(옛 코드의 `_ =>` 갈래).
+    /// 돈은 나가는데 서버가 알아볼 수 없는 전송이라 결제는 성립하지 않는다 — 가장 나쁜 조합이다.
+    /// 이제 앱은 모르는 kind 를 거절하고, MCP 는 **여기에 없는 방식이면 요청 자체를 안 쓴다**.
+    /// 필드가 없으면(옛 앱) 예전 두 가지만 할 수 있는 것으로 본다.
+    #[serde(default = "kinds_default")]
+    kinds: Vec<String>,
 }
 
 fn ui_ok_default() -> bool {
     true
+}
+
+/// 이 필드가 없던 시절의 앱이 할 수 있던 것 — 송금과 x402 서명.
+fn kinds_default() -> Vec<String> {
+    vec!["transfer".into(), "x402".into()]
+}
+
+/// 지금 이 앱이 처리하는 결제 방식 전부. `approve_payment`·`auto_approve_payment` 의 match 팔과
+/// **같이 움직여야 한다** — 하나를 늘리면 여기도 늘린다(안 늘리면 MCP 가 새 방식을 안 보낸다).
+fn supported_kinds() -> Vec<String> {
+    vec!["transfer".into(), "x402".into(), "x402-direct".into()]
 }
 
 fn request_path() -> Result<PathBuf, String> {
@@ -514,7 +541,11 @@ fn watchdog(app: tauri::AppHandle) {
             last_beat = now;
             let _ = write_json(
                 heartbeat_path().unwrap_or_default(),
-                &Heartbeat { ts: now, ui_ok },
+                &Heartbeat {
+                    ts: now,
+                    ui_ok,
+                    kinds: supported_kinds(),
+                },
             );
         }
         // 사용자가 **일부러 닫아 둔** 승인 창(개발 53, tray::hide_by_user)은 아래 깨우기에서
@@ -694,8 +725,28 @@ async fn approve_pinned(req: PaymentRequest, password: String) -> Result<Payment
                 x402: Some(payment),
             }
         }
+        // x402-direct: 서명 + **우리가 직접 전송**(개발 64). 송금과 같은 규칙(한도·잠금·내역 "sent").
+        "x402-direct" => {
+            let hash = crate::x402::x402_direct_payment(
+                password,
+                req.to.clone(),
+                req.amount.clone(),
+                req.nonce.clone(),
+            )
+            .await?;
+            PaymentResult {
+                id: req.id,
+                status: "approved".into(),
+                tx_hash: hash,
+                detail: String::new(),
+                x402: None,
+            }
+        }
         // transfer(기본): 실제 온체인 송금 — 기존 경로 재사용.
-        _ => {
+        // 🔴 **모르는 kind 는 여기로 오면 안 된다**(개발 64). 예전엔 `_` 가 전부 송금으로 떨어져서,
+        // 새 kind 를 아는 MCP + 옛 앱 조합이면 「서버가 알아볼 수 없는 평범한 송금」이 나갔다 —
+        // 돈은 나가고 결제는 성립하지 않는 최악의 조합이다. 모르면 거절하고 이유를 말한다.
+        "transfer" => {
             let hash = match req.token.as_str() {
                 "USDC" => send_usdc(password, req.to.clone(), req.amount.clone()).await,
                 "ETH" => send_eth(password, req.to.clone(), req.amount.clone()).await,
@@ -711,6 +762,13 @@ async fn approve_pinned(req: PaymentRequest, password: String) -> Result<Payment
                 detail: String::new(),
                 x402: None,
             }
+        }
+        other => {
+            let msg = tf!(
+                "이 앱이 모르는 결제 방식이에요({other}). 지갑 앱을 최신 버전으로 업데이트해 주세요.",
+                "This app doesn't know that payment kind ({other}). Please update the wallet app."
+            );
+            return Err(msg);
         }
     };
     resolve_request(&result)?;
@@ -808,6 +866,27 @@ pub(crate) fn get_agent_status() -> AgentStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 개발 64 — 하트비트가 **실제 처리할 수 있는 방식 전부**를 적어야 한다. MCP 는 이 목록에
+    /// 없는 방식이면 요청을 아예 안 쓴다 → 여기서 빠뜨리면 새 결제 방식이 조용히 죽고, 반대로
+    /// 여기에만 적고 `approve_payment` 의 팔을 안 만들면 MCP 가 보낸 요청이 거절된다.
+    /// 두 곳이 같이 움직이는지 사람이 기억하는 대신 이 검사가 문다.
+    #[test]
+    fn heartbeat_advertises_every_kind_we_handle() {
+        let kinds = supported_kinds();
+        for k in ["transfer", "x402", "x402-direct"] {
+            assert!(kinds.contains(&k.to_string()), "{k} 가 하트비트에 없다");
+        }
+        // 하트비트 JSON 에 실제로 실리는지(직렬화 누락 방지).
+        let json = serde_json::to_string(&Heartbeat {
+            ts: 1,
+            ui_ok: true,
+            kinds: supported_kinds(),
+        })
+        .unwrap();
+        assert!(json.contains("x402-direct"), "{json}");
+    }
+
     use crate::x402::X402Authorization;
 
     fn req_created(created: u64) -> PaymentRequest {
@@ -819,6 +898,7 @@ mod tests {
             memo: String::new(),
             created,
             kind: "transfer".into(),
+            nonce: String::new(),
             resource: String::new(),
             chain_id: 0,
             account: 0,
@@ -1036,6 +1116,7 @@ mod tests {
             memo: "데이터 API 1회 호출".into(),
             created: 1780623842,
             kind: "transfer".into(),
+            nonce: String::new(),
             resource: String::new(),
             chain_id: 84_532,
             account: 2,
@@ -1050,6 +1131,22 @@ mod tests {
         assert_eq!(back.memo, "데이터 API 1회 호출");
         assert_eq!(back.created, 1780623842);
         assert_eq!(back.kind, "transfer");
+    }
+
+    /// 🔴 개발 64 — MCP 가 쓰는 `x402-direct` 요청을 그대로 읽는다. **이 둘은 파일 JSON 이 계약**이라
+    /// (두 크레이트가 타입을 공유하지 않는다) 한쪽만 고치면 조용히 어긋난다. nonce 가 빠지면 서명이
+    /// 서버가 기대하는 것과 달라져 결제가 전부 거절된다.
+    #[test]
+    fn x402_direct_request_parses_with_nonce() {
+        let json = r#"{"id":"1","token":"USDC","to":"0xabc","amount":"0.03","memo":"","created":1,
+          "kind":"x402-direct","resource":"https://ex.com/a","chain_id":5042,"account":0,
+          "from":"0xdef","nonce":"0x82fc16dbda29c8d2e5305f4226e34d1c253abaca86030b6acaf681a081397e3b"}"#;
+        let r: PaymentRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(r.kind, "x402-direct");
+        assert_eq!(
+            r.nonce,
+            "0x82fc16dbda29c8d2e5305f4226e34d1c253abaca86030b6acaf681a081397e3b"
+        );
     }
 
     // 기존(Session 10) 요청 파일은 kind/resource 가 없다 → default 로 채워진다(무손실 호환).

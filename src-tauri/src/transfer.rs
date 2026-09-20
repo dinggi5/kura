@@ -41,7 +41,7 @@ pub(crate) struct Balances {
 /// 흔한 원인은 또렷한 안내로 매핑하고, 모르는 건 서버 프리픽스·hex data 노이즈를 떼어 간결하게.
 /// (이 메시지는 GUI 승인 모달·거래 내역·CLI/MCP 결과에 그대로 노출된다.)
 /// `token` = 호출 문맥("USDC"/"ETH") — 막연한 "exceeds balance" 류를 토큰에 맞게 안내하려고.
-fn humanize_chain_error(raw: &str, token: &str) -> String {
+pub(crate) fn humanize_chain_error(raw: &str, token: &str) -> String {
     let low = raw.to_lowercase();
     // ERC20 transfer 가 잔액 초과로 revert — USDC 경로에서만 나는 구체 revert 사유.
     if low.contains("transfer amount exceeds balance") {
@@ -194,8 +194,9 @@ pub(crate) fn parse_to_addr(to: &str) -> Result<Address, String> {
     })
 }
 
-/// 서명 가능한(지갑 붙은) provider 를 만든다.
-async fn signing_provider(signer: PrivateKeySigner) -> Result<impl Provider, String> {
+/// 서명 가능한(지갑 붙은) provider 를 만든다. x402 직접 제출(개발 64)도 같은 것을 쓴다 —
+/// 그 갈래는 서명이 아니라 **온체인 전송**이라 송금과 같은 배관을 타야 한다.
+pub(crate) async fn signing_provider(signer: PrivateKeySigner) -> Result<impl Provider, String> {
     let wallet = EthereumWallet::from(signer);
     ProviderBuilder::new()
         .wallet(wallet)

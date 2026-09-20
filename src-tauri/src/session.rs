@@ -243,7 +243,12 @@ async fn auto_approve_pinned(
     // 사람 앞으로 돌리는 것**이다(NEEDS_PASSWORD). 사람은 승인 창에서 이유를 보고 정한다 —
     // 백엔드가 금액을 말없이 줄이는 것은 이 지갑이 하지 않는 일이다.
     // 잔액을 못 읽으면(RPC 오류) 검사를 건너뛴다 — 조회 실패가 자율 결제를 막는 사유는 아니다.
-    // x402 는 제외: 우리는 서명만 하고 온체인 제출·가스는 페이실리테이터 몫이라 가스가 안 나간다.
+    //
+    // **서명만 하는 x402(`kind == "x402"`)만 제외한다** — 그건 온체인 제출·가스가 페이실리테이터
+    // 몫이라 우리 잔액에서 가스가 안 나간다. 🔴 반면 **`x402-direct` 는 제외 대상이 아니다**
+    // (개발 64): 그 갈래는 우리가 직접 올리므로 **결제액 + 가스**가 같은 잔액에서 나간다. 조건을
+    // `!= "x402"` 로 둔 덕에 새 kind 가 자동으로 검사에 들어오는데, 그게 우연이 아니라 의도다 —
+    // 「x402 면 가스가 안 나간다」가 아니라 **「우리가 올리면 가스가 나간다」** 가 판정 기준이다.
     if req.kind != "x402" && active_chain().native_is_usdc {
         let reserve = parse_usdc_nonneg(active_chain().gas_reserve_usdc, dec).unwrap_or(U256::ZERO);
         // 🔴 **시간 상한을 둔다** (코덱스 개발51 3차 P1). RPC 가 멎으면 이 조회가 무한정 걸리고,
@@ -295,7 +300,27 @@ async fn auto_approve_pinned(
                 x402: Some(payment),
             }
         }
-        _ => {
+        // x402 직접 제출 (개발 64) — 서명하고 **우리가** 올린다. 자율 한도·신뢰 주소·ERC-8004·
+        // 가스 여유분 검사를 전부 그대로 지난 뒤라, 사람 승인 경로와 같은 규칙으로 나간다.
+        "x402-direct" => {
+            let hash = crate::x402::do_x402_direct(
+                &signer,
+                req.to.clone(),
+                req.amount.clone(),
+                req.nonce.clone(),
+            )
+            .await?;
+            PaymentResult {
+                id: req.id,
+                status: "approved".into(),
+                tx_hash: hash,
+                detail: String::new(),
+                x402: None,
+            }
+        }
+        // 🔴 모르는 kind 를 송금으로 떨어뜨리지 않는다(개발 64 — ipc::approve_pinned 와 같은 이유).
+        // 자율 경로는 **창이 없어서** 사람이 «이상한 결제»를 볼 기회조차 없다.
+        "transfer" => {
             let hash = do_send_usdc(&signer, req.to.clone(), req.amount.clone()).await?;
             PaymentResult {
                 id: req.id,
@@ -305,6 +330,7 @@ async fn auto_approve_pinned(
                 x402: None,
             }
         }
+        _ => return Err(NEEDS_PASSWORD.into()),
     };
     resolve_request(&result)?;
 
