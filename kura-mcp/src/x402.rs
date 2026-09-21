@@ -256,6 +256,14 @@ pub fn pick_requirement(pr: &PaymentRequired) -> Result<Requirement, String> {
                     .or_else(|| str_field(entry, "maxAmountRequired"))
                     .unwrap_or("")
                     .to_string();
+                // 🔴 직접 제출은 **`amount` 필드가 있어야만** 고른다 (개발 64 리뷰 P3). nonce 는
+                // 서버가 검증 때 `requirements.amount` 로 다시 만드는데, 우리가 V1 의
+                // `maxAmountRequired` 로 계산하면 **그 값이 서로 다르다** — 돈은 나가고 서버는
+                // 「이 결제가 아니다」로 거절한다. 서명 갈래는 예전처럼 폴백을 쓴다(돈이 안 나간다).
+                if method == TransferMethod::ClientBroadcast && str_field(entry, "amount").is_none()
+                {
+                    continue;
+                }
                 let extra = entry.get("extra");
                 return Ok(Requirement {
                     raw: entry.clone(),
@@ -610,6 +618,39 @@ mod tests {
             transfer_method(&blank, true),
             Some(TransferMethod::Facilitator)
         );
+    }
+
+    /// 🔴 개발 64 리뷰 — 직접 제출 요구가 **V1 금액 필드만** 갖고 있으면 고르지 않는다.
+    /// 서버는 검증 때 `requirements.amount` 로 nonce 를 다시 만드는데 우리가 `maxAmountRequired`
+    /// 로 계산하면 값이 갈린다 → **돈은 나가고 서버는 「이 결제가 아니다」**. 서명 갈래는 폴백을
+    /// 그대로 쓴다(거절당해도 돈이 안 나간다) — 그 회귀가 안 나게 같이 문다.
+    #[test]
+    fn client_broadcast_requires_the_v2_amount_field() {
+        let entry: Value = serde_json::from_str(
+            r#"{"scheme":"exact","network":"eip155:5042","maxAmountRequired":"30000",
+                "payTo":"0xDc9F94A8b93F070B58cfa580cbE740d763005FE6",
+                "asset":"0x3600000000000000000000000000000000000000",
+                "extra":{"assetTransferMethod":"eip3009-client-broadcast"}}"#,
+        )
+        .unwrap();
+        // 방식 판정 자체는 통과한다 — 걸러지는 자리는 `pick_requirement` 다.
+        assert_eq!(
+            transfer_method(&entry, true),
+            Some(TransferMethod::ClientBroadcast)
+        );
+        let body = format!(r#"{{"x402Version":2,"accepts":[{entry}]}}"#);
+        let pr = parse_required(None, &body).unwrap();
+        assert!(
+            pick_requirement(&pr).is_err(),
+            "amount 없는 직접 제출 요구를 골랐다"
+        );
+        // 서명 갈래(V1 base-sepolia)는 예전처럼 maxAmountRequired 로 통과한다.
+        let v1 = r#"{"x402Version":1,"accepts":[
+          {"scheme":"exact","network":"base-sepolia","maxAmountRequired":"10000",
+           "payTo":"0x1111111111111111111111111111111111111111",
+           "asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e"}]}"#;
+        let req = pick_requirement(&parse_required(None, v1).unwrap()).unwrap();
+        assert_eq!(req.amount, "10000");
     }
 
     /// 고른 요구에서 nonce 바인딩 재료가 그대로 나온다 — **서버가 준 문자열 그대로**여야 한다

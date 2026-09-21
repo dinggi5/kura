@@ -267,12 +267,14 @@ impl WalletServer {
         lock. Never send a password as an argument. Arguments: url (required), memo (what the payment is for \
         — the user reads it to decide). Returns: paid, status, http_status, body, and amount/pay_to/settlement \
         when paid; on a chain where the wallet broadcasts the payment itself, `tx` and `explorer` point at \
-        that transaction (both are empty on the facilitator-settled path, and `tx` is worth surfacing to the \
-        user whenever the server then refuses the proof). IMPORTANT, and the two cases are opposites: status \"pending\" (paid:true) means the money \
-        already left the wallet — the tx is in the reply but the receipt didn't confirm in time, so do NOT \
-        call this URL again, because that pays a second time; tell the user. Status \"reverted\" (paid:false) \
-        means the chain rejected the transfer — only gas was spent and the price was NOT paid, so trying \
-        again is safe."
+        that transaction (both are empty on the facilitator-settled path). IMPORTANT — read `notice` when it \
+        is present, and never retry on the strength of an HTTP status alone. Only \"reverted\" (paid:false) \
+        means nothing was paid: the chain rejected the transfer, only gas was spent, and trying again is \
+        safe. \"pending\" and \"undelivered\" (both paid:true) mean the money ALREADY left the wallet and the \
+        server did not credit it — asking again pays a second time, so stop and tell the user, showing the \
+        tx. The same holds when the wallet broadcast the payment and the reply carries a non-empty `tx` with \
+        status \"settlement_failed\": the server refused the proof AFTER the money moved, and it may answer \
+        with a fresh 402 challenge that reads as if the payment never happened."
     )]
     async fn x402_fetch(
         &self,
@@ -316,6 +318,7 @@ impl WalletServer {
                 "notice": notice,
             }),
             X402Outcome::Paid {
+                notice,
                 tx,
                 explorer,
                 http_status,
@@ -338,6 +341,8 @@ impl WalletServer {
                 "tx": tx,
                 "explorer": explorer,
                 "settlement": settlement,   // X-PAYMENT-RESPONSE (base64) — 정산 증빙
+                // 빈 값이 아니면 **돈은 나갔는데 서버가 증거를 안 받은 것**이다 — 재시도 금지.
+                "notice": notice,
                 "body": body,
             }),
         };

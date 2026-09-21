@@ -22,6 +22,10 @@ const MAX_BODY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 /// 돈은 이미 나갔고, 「못 받았다」와 「안 냈다」는 다른 말이다(arc_direct::wait_for_receipt).
 const RECEIPT_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
+/// 영수증을 잡은 **뒤** 증거를 제출하는 데 남겨 둘 시간(초). seed 수명에서 이만큼을 더 뺀다 —
+/// 영수증이 45초 꽉 차서 나왔는데 제출 왕복 중에 만료되면 그것도 「돈만 나감」이다.
+const PROOF_TAIL_SECS: u64 = 20;
+
 /// 표시용 본문 문자 상한 — 에이전트/터미널 컨텍스트 보호. 문자 단위라 UTF-8 안전.
 const MAX_BODY_CHARS: usize = 100_000;
 
@@ -299,6 +303,9 @@ pub enum X402Outcome {
     },
     /// 결제하고 콘텐츠를 받았다.
     Paid {
+        /// **재시도하면 안 된다**는 말이 필요할 때만 채워진다(직접 제출인데 서버가 증거를 거절한 경우).
+        /// 빈 값 = 할 말 없음(정상 결제이거나, 아무것도 안 나간 서명 갈래의 정산 실패).
+        notice: String,
         /// 직접 제출일 때 **우리가 올린 트랜잭션**(서명 갈래면 빈 값). 성공했을 때도 싣지만,
         /// 진짜로 필요한 건 `ok == false` 일 때다 — 서버가 증거를 거절하면 돈은 이미 나갔는데
         /// 그 자리에 tx 가 없으면 AI 도 사람도 **어디로 갔는지 못 찾는다**(코드 리뷰 P2).
@@ -387,6 +394,13 @@ pub async fn run_x402(
         )
     })?;
     let req = x402::pick_requirement(&required)?;
+    // 🔴 **요구를 고른 그 순간의 체인을 붙잡는다** (개발 64 코덱스 P1). `pick_requirement` 는 활성
+    // 체인으로 고르는데, 아래 ERC-8004 조회가 최대 10초를 먹는다 — 그 사이 사용자가 네트워크를
+    // 바꾸면 요청 작성기가 **바뀐 체인**을 각인하고, GUI 는 그 각인과 현재가 같으니 그대로 승인한다.
+    // 서명 갈래였으면 서버가 거절하고 끝이지만(돈 안 나감), 직접 제출은 **그 체인으로 진짜 송금이
+    // 나간다** — Arc 두 체인은 USDC 주소까지 같아서 조용히 성공한다. 아래에서 다시 대조한다.
+    let picked_chain = active_chain().chain_id;
+    let picked_explorer = active_chain().explorer_tx_prefix;
     let amount_usdc = x402::base_units_to_usdc(&req.amount)?;
     // 🔴 승인 창·내역·알림에 보이는 리소스 URL은 **우리가 실제로 요청한 최종 URL**이다 (개발 47 이월).
     // 예전엔 402 응답이 주장한 `resource` 문자열을 우선 썼다 — 그러면 evil.example 이
@@ -467,6 +481,22 @@ pub async fn run_x402(
     } else {
         (None, None, String::new())
     };
+    // 요청을 쓰기 직전에 **고를 때의 체인 그대로인지** 본다(위 각주). 바뀌었으면 아직 아무것도
+    // 안 썼으니 여기서 멈추는 게 답이다 — 다시 부르면 새 체인의 챌린지로 처음부터 간다.
+    if active_chain().chain_id != picked_chain {
+        return Err(ts!(
+            "결제를 준비하는 사이 네트워크가 바뀌었어요. 아무것도 결제하지 않았습니다 — 다시 시도하세요.",
+            "The network changed while this payment was being prepared. Nothing was paid — try again."
+        )
+        .into());
+    }
+    // seed 수명에서 우리 창(영수증 대기 + 제출 왕복)을 뺀 승인 대기 예산. 기본 모드면 None.
+    let budget = arc_direct::approval_budget_secs(
+        seed.as_deref().and_then(arc_direct::seed_expiry),
+        payment::now_secs(),
+        payment::APPROVAL_TIMEOUT.as_secs(),
+        RECEIPT_WAIT.as_secs() + PROOF_TAIL_SECS,
+    );
     // 🔴 **옛 앱에는 새 방식을 보내지 않는다** (개발 64). 옛 앱은 모르는 kind 를 평범한 송금으로
     // 처리했다 — 돈은 나가고 서버는 그 전송을 결제로 알아보지 못한다. 앱이 하트비트에 적어 둔
     // 「내가 아는 방식」에 없으면 여기서 멈춘다(요청 파일을 쓰기 전).
@@ -497,7 +527,23 @@ pub async fn run_x402(
     } else {
         payment::write_x402_request(req.pay_to.trim(), &amount_usdc, &memo, &resource, agent)?
     };
-    let result = match payment::await_result(&id, payment::APPROVAL_TIMEOUT).await {
+    // 🔴 **seed 모드면 승인 대기를 그 수명 안으로 줄인다** (개발 64 리뷰 P1). seed 는 서버가 수명을
+    // 박아 발급한 챌린지라(상대 구현 기본 300초), 5분을 꽉 채워 기다렸다 승인받으면 **브로드캐스트는
+    // 성공하고 서버는 `seed_expired` 로 거절한다** — 돈만 나간다. 만료 전에 우리가 먼저 접으면
+    // 요청 파일이 사라지고, 그 뒤 사람이 승인 버튼을 눌러도 `begin_approval` 이 막는다(개발 63).
+    // 기본 모드(clientNonce)엔 수명이 없어 `None` — 예전 그대로 5분이다.
+    let approval_wait = match budget {
+        Some(0) => {
+            return Err(ts!(
+                "결제 요청의 유효시간이 이미 거의 끝났어요. 아무것도 결제하지 않았습니다 — 다시 시도하면 새 요청을 받습니다.",
+                "This payment challenge is about to expire. Nothing was paid — try again to get a fresh one."
+            )
+            .into())
+        }
+        Some(secs) => std::time::Duration::from_secs(secs),
+        None => payment::APPROVAL_TIMEOUT,
+    };
+    let result = match payment::await_result(&id, approval_wait).await {
         Some(r) => r,
         None => {
             payment::cancel_request(&id);
@@ -531,7 +577,24 @@ pub async fn run_x402(
             )
             .into());
         }
-        let explorer = format!("{}{}", active_chain().explorer_tx_prefix, tx);
+        // 익스플로러 링크는 **고를 때의 체인** 것으로 만든다 — 아래에서 보듯 지금 활성 체인은
+        // 그사이 바뀌었을 수 있고, 그러면 남의 체인 링크를 사실처럼 보여 주게 된다.
+        let explorer = format!("{picked_explorer}{tx}");
+        // 🔴 **승인 사이에 네트워크가 바뀌었으면 영수증을 묻지 않는다** (개발 64 코덱스 P1).
+        // 영수증 조회는 «지금 설정의 RPC» 를 쓴다 — 바뀐 체인에 물으면 우리 tx 가 없으니 영원히
+        // `Pending` 이고, 그건 「안 나갔다」로 읽힐 수 있는 거짓이다. 돈은 고른 체인에서 이미 나갔다.
+        if active_chain().chain_id != picked_chain {
+            return Ok(X402Result {
+                outcome: X402Outcome::PaidNoContent {
+                    notice: arc_direct::pending_notice(&tx, &explorer),
+                    tx,
+                    explorer,
+                    reason: "pending".into(),
+                },
+                agent,
+                agent_note,
+            });
+        }
         // 서버는 **채굴된** 영수증을 요구한다(레퍼런스 구현 기본값 = 최소 1 확인) → 여기서 기다린다.
         // 못 잡거나 revert 면 **돈이 나간 채로** 끝난다 — 그 사실을 구조로 돌려준다(PaidNoContent).
         let outcome = arc_direct::wait_for_receipt(&tx, RECEIPT_WAIT)
@@ -593,10 +656,29 @@ pub async fn run_x402(
     if let Some(alt) = sub.alt_header {
         builder = builder.header(alt, &sub.value); // 같은 값 — 헤더 이름만 다르게 읽는 서버 대비
     }
-    let paid_resp = builder
-        .send()
-        .await
-        .map_err(|e| tf!("결제 재요청 실패: {e}", "The paid re-request failed: {e}"))?;
+    let paid_resp = match builder.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = tf!("결제 재요청 실패: {e}", "The paid re-request failed: {e}");
+            // 🔴 **직접 제출이면 이 오류는 «결제 실패»가 아니다** (개발 64 코덱스 P1). 돈은 이미
+            // 체인에서 나갔고 서버만 그걸 모른다. 평범한 `Err` 로 돌리면 tx 가 응답에서 사라지고,
+            // AI 는 「HTTP 가 실패했구나」로 읽어 같은 URL 을 다시 부른다 = **두 번째 결제**.
+            // 앞서 고친 `settlement_failed` 는 **응답을 받은** 경우만 덮었다 — 여기가 나머지 반쪽이다.
+            if !direct_tx.is_empty() {
+                return Ok(X402Result {
+                    outcome: X402Outcome::PaidNoContent {
+                        notice: arc_direct::undelivered_notice(&direct_tx, &direct_explorer, &msg),
+                        tx: direct_tx,
+                        explorer: direct_explorer,
+                        reason: "undelivered".into(),
+                    },
+                    agent,
+                    agent_note,
+                });
+            }
+            return Err(msg);
+        }
+    };
     let paid_status = paid_resp.status().as_u16();
     // 정산 증빙 헤더도 이름이 갈린다 — V2 는 PAYMENT-RESPONSE, 옛 어댑터(와 직접 제출 레퍼런스
     // 서버)는 X-PAYMENT-RESPONSE. 둘 다 본다(우선순위는 버전이 정한 이름).
@@ -625,8 +707,26 @@ pub async fn run_x402(
         }
     }
 
+    // 🔴 **`settlement_failed` 는 두 갈래에서 정반대를 뜻한다** (개발 64 opus 리뷰 P1).
+    // 서명 갈래면 아무것도 안 나갔으니 재시도가 맞고, 직접 제출이면 **이미 나갔으니 재시도가
+    // 이중 결제**다. 상대 서버는 거절을 **새 챌린지가 실린 402** 로 돌려주므로, 그 본문만 보면
+    // AI 에겐 「결제가 안 됐고 여기 가격이 다시 있다」로 읽힌다. 말로 못박는 수밖에 없다.
+    let notice = if !ok && !direct_tx.is_empty() {
+        arc_direct::undelivered_notice(
+            &direct_tx,
+            &direct_explorer,
+            &tf!(
+                "서버가 증거를 받지 않음: HTTP {paid_status}",
+                "the server refused the proof: HTTP {paid_status}"
+            ),
+        )
+    } else {
+        String::new()
+    };
+
     Ok(X402Result {
         outcome: X402Outcome::Paid {
+            notice,
             tx: direct_tx,
             explorer: direct_explorer,
             http_status: paid_status,

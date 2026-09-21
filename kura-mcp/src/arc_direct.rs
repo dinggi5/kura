@@ -96,6 +96,31 @@ pub fn new_client_nonce() -> String {
     alloy::hex::encode(&B256::random().0[..16])
 }
 
+/// 🔴 **seed 의 만료 시각**(유닉스 초) — `v1.<exp>.<rand>.<mac>` 의 둘째 칸 (개발 64 리뷰 P1).
+///
+/// seed 모드 서버는 챌린지에 **수명을 박아** 발급한다(상대 구현 기본 300초). 그런데 우리 창은
+/// 승인 대기 5분 + 영수증 대기 45초라, 사람이 느긋하게 승인하면 **브로드캐스트는 성공하고 서버는
+/// `seed_expired` 로 거절한다** — 돈은 나가고 콘텐츠는 못 받는 최악이다. 그래서 만료를 읽는다.
+///
+/// 형식을 못 알아보면 `None` — 모르는 형식의 seed 를 쓰는 서버를 우리가 새로 깨뜨리지는 않는다.
+pub fn seed_expiry(seed: &str) -> Option<u64> {
+    let mut parts = seed.split('.');
+    if parts.next()? != "v1" {
+        return None;
+    }
+    parts.next()?.parse::<u64>().ok().filter(|&e| e > 0)
+}
+
+/// 이 챌린지로 **승인을 얼마나 기다려도 되는가**(초). `None` = 시간 제한이 없다(기본 모드).
+///
+/// 반환값이 `Some(0)` 이면 **지금 시작해도 늦는다** — 아직 아무것도 안 썼을 때 멈추는 게 답이다.
+/// 넉넉하면 원래 상한(`cap`)을 그대로 쓴다. 여유(`tail`)는 영수증 대기 + 제출 왕복 몫이다.
+pub fn approval_budget_secs(expiry: Option<u64>, now: u64, cap: u64, tail: u64) -> Option<u64> {
+    let exp = expiry?;
+    let left = exp.saturating_sub(now);
+    Some(left.saturating_sub(tail).min(cap))
+}
+
 /// 이번 결제의 신선도 값과 nonce 를 한 번에 정한다 — **서버가 seed 를 줬으면 seed 모드, 아니면
 /// 기본(클라이언트 nonce) 모드.** 반환 = (clientNonce, seed, nonce).
 ///
@@ -175,6 +200,18 @@ pub enum ReceiptOutcome {
 /// 나갔고, 여기서 실패라고 말하면 AI 가 **다시 결제한다**. 못 잡으면 `Pending` 으로 돌려주고,
 /// 호출자가 「결제는 나갔다, tx 는 이것이다」를 그대로 알린다.
 pub async fn wait_for_receipt(tx_hash: &str, timeout: Duration) -> Result<ReceiptOutcome, String> {
+    // 🔴 **상한을 바깥에 한 번 더 두른다** (개발 64 리뷰). 아래 루프의 deadline 은 폴링 **사이**에만
+    // 걸린다 — alloy 의 HTTP 트랜스포트는 기본 타임아웃이 없어서, 응답을 끝내지 않는 RPC 하나면
+    // 연결 단계든 조회든 그 자리에서 영원히 멈춘다. 그러면 이 툴 호출이 안 돌아오고 **AI 는 tx 를
+    // 영영 모른다** — 이 함수가 막으려던 바로 그 실패다. 이 리포의 다른 RPC 대기도 전부 이렇게
+    // 감싼다(`erc8004::lookup`·자율 경로 잔액 조회).
+    match tokio::time::timeout(timeout, wait_for_receipt_inner(tx_hash)).await {
+        Ok(r) => r,
+        Err(_) => Ok(ReceiptOutcome::Pending), // 못 봤다 ≠ 안 나갔다
+    }
+}
+
+async fn wait_for_receipt_inner(tx_hash: &str) -> Result<ReceiptOutcome, String> {
     let hash: B256 = tx_hash
         .trim()
         .parse()
@@ -189,18 +226,14 @@ pub async fn wait_for_receipt(tx_hash: &str, timeout: Duration) -> Result<Receip
                 redact_urls(&e.to_string())
             )
         })?;
-    let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        // 조회 실패(일시적 RPC 오류)는 즉시 포기할 사유가 아니다 — 남은 시간 동안 다시 묻는다.
+        // 조회 실패(일시적 RPC 오류)는 즉시 포기할 사유가 아니다 — 바깥 상한이 끊을 때까지 다시 묻는다.
         if let Ok(Some(receipt)) = provider.get_transaction_receipt(hash).await {
             return Ok(if receipt.status() {
                 ReceiptOutcome::Mined
             } else {
                 ReceiptOutcome::Reverted
             });
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(ReceiptOutcome::Pending);
         }
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
@@ -215,9 +248,30 @@ pub fn pending_notice(tx: &str, explorer: &str) -> String {
     };
     tf!(
         "결제는 체인에 이미 올라갔어요(tx {tx}{link}). 다만 확인이 늦어 서버에 증거를 내지 못했습니다. \
-         **다시 요청하면 또 결제됩니다** — 잠시 뒤 같은 URL 을 다시 요청하기 전에 사용자에게 알리세요.",
+         이 결제의 증거는 **나중에 다시 낼 수 없습니다**(증거 재료가 이 호출과 함께 사라집니다). \
+         **다시 요청하면 또 결제됩니다** — 다시 시도하기 전에 사용자에게 알리세요.",
         "The payment is already on-chain (tx {tx}{link}), but the receipt didn't confirm in time, so the \
-         server wasn't given the proof. **Asking again will pay again** — tell the user before retrying."
+         server wasn't given the proof, and that proof **cannot be presented later** (the material for it \
+         goes away with this call). **Asking again will pay again** — tell the user before retrying."
+    )
+}
+
+/// 🔴 **결제는 채굴됐는데 증거를 서버에 보내지도 못했다** — 재요청의 HTTP 가 실패한 경우
+/// (개발 64 코덱스 P1). 「응답을 받았는데 거절당했다」와 다르다: 그쪽은 서버가 알기라도 한다.
+/// 여기선 서버가 이 결제를 **모른 채로** 돈만 나갔다.
+pub fn undelivered_notice(tx: &str, explorer: &str, err: &str) -> String {
+    let link = if explorer.is_empty() {
+        String::new()
+    } else {
+        format!(" ({explorer})")
+    };
+    tf!(
+        "결제는 체인에서 완료됐는데(tx {tx}{link}) 그 증거를 서버에 보내지 못했어요({err}). \
+         서버는 이 결제를 모릅니다. **다시 요청하면 또 결제됩니다** — 사용자에게 알리고, 필요하면 \
+         판매자에게 이 tx 를 보여 주세요.",
+        "The payment completed on-chain (tx {tx}{link}) but the proof never reached the server ({err}), \
+         so the server does not know about it. **Asking again will pay again** — tell the user, and show \
+         the seller this tx if you need the resource."
     )
 }
 
@@ -228,8 +282,12 @@ pub fn pending_notice(tx: &str, explorer: &str) -> String {
 /// 「안 나갔다」고 하면 AI 가 또 결제한다.
 pub fn reverted_notice(tx: &str) -> String {
     tf!(
-        "결제 트랜잭션이 체인에서 실패했어요(tx {tx}). **결제액은 나가지 않았고** 가스만 소모됐습니다 — 다시 시도해도 됩니다.",
-        "The payment transaction reverted on-chain (tx {tx}). **The amount was not paid** — only gas was spent, so it is safe to try again."
+        "결제 트랜잭션이 체인에서 실패했어요(tx {tx}). **결제액은 나가지 않았고** 가스만 소모됐습니다 — \
+         다시 시도해도 됩니다. 다만 이 시도는 **오늘 한도에는 이미 반영됐습니다**(지갑이 체인의 실패를 \
+         되돌려 적지는 않아요) — 한도에 걸리면 사용자에게 알리세요.",
+        "The payment transaction reverted on-chain (tx {tx}). **The amount was not paid** — only gas was \
+         spent, so it is safe to try again. Note that this attempt still counted against today's limit \
+         (the wallet does not un-count a chain failure) — tell the user if the limit blocks the retry."
     )
 }
 
@@ -329,6 +387,46 @@ mod tests {
             client_nonce_digest("aabb", &b),
             client_nonce_digest("aabb", &pricey)
         );
+    }
+
+    /// 🔴 개발 64 리뷰 — **seed 의 수명을 읽는다.** 이걸 못 읽으면 만료된 챌린지로 브로드캐스트해
+    /// 돈만 나간다(서버는 `seed_expired` 로 거절). 형식이 다르면 `None` — 모르는 형식을 쓰는
+    /// 서버를 새로 깨뜨리지는 않는다(그쪽은 예전처럼 5분을 기다린다).
+    #[test]
+    fn seed_expiry_reads_the_second_field() {
+        assert_eq!(seed_expiry("v1.1800000000.aabb.ccdd"), Some(1_800_000_000));
+        assert_eq!(seed_expiry("v1.0.aabb.ccdd"), None); // 0 = 의미 없는 값
+        assert_eq!(seed_expiry("v2.1800000000.a.b"), None); // 모르는 버전
+        assert_eq!(seed_expiry("그냥문자열"), None);
+        assert_eq!(seed_expiry(""), None);
+        assert_eq!(seed_expiry("v1.not-a-number.a.b"), None);
+    }
+
+    /// 승인 대기 예산 — **만료 전에 우리가 먼저 접어야** 한다(영수증·제출 시간을 남기고).
+    #[test]
+    fn approval_budget_leaves_room_for_the_proof() {
+        let now = 1_000_000u64;
+        let cap = 300;
+        let tail = 65; // 영수증 45 + 제출 20
+
+        // 수명이 없는(기본) 모드 → 제한 없음.
+        assert_eq!(approval_budget_secs(None, now, cap, tail), None);
+        // 넉넉하면 원래 상한 그대로.
+        assert_eq!(
+            approval_budget_secs(Some(now + 3600), now, cap, tail),
+            Some(cap)
+        );
+        // 300초짜리 seed → 상한이 tail 만큼 줄어든다(=235). 5분을 꽉 기다리면 늦는다.
+        assert_eq!(
+            approval_budget_secs(Some(now + 300), now, cap, tail),
+            Some(235)
+        );
+        // 이미 지났거나 tail 도 안 남았으면 0 = **시작하지 마라**.
+        assert_eq!(
+            approval_budget_secs(Some(now + 60), now, cap, tail),
+            Some(0)
+        );
+        assert_eq!(approval_budget_secs(Some(now - 1), now, cap, tail), Some(0));
     }
 
     /// 매번 다른 값이어야 한다 — 같으면 두 번째 결제가 체인에서 revert 한다.

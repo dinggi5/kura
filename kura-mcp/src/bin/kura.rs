@@ -535,6 +535,11 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                             "✗ 결제 트랜잭션이 체인에서 실패했어요 (가스만 소모).",
                             "✗ The payment transaction reverted on-chain (only gas was spent)."
                         )
+                    } else if reason == "undelivered" {
+                        ts!(
+                            "△ 결제는 끝났는데 그 증거를 서버에 보내지 못했어요.",
+                            "△ The payment completed, but its proof never reached the server."
+                        )
                     } else {
                         ts!(
                             "△ 결제는 나갔는데 확인이 늦어 콘텐츠를 못 받았어요.",
@@ -549,6 +554,7 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                 eprintln!("{notice}");
             }
             X402Outcome::Paid {
+                notice,
                 tx,
                 explorer,
                 http_status,
@@ -595,6 +601,9 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                             &settlement[..settlement.len().min(24)]
                         )
                     );
+                }
+                if !notice.is_empty() {
+                    eprintln!("{notice}");
                 }
                 println!("\n{body}");
             }
@@ -684,11 +693,12 @@ fn x402_outcome_json(out: &X402Outcome) -> serde_json::Value {
             notice,
         } => serde_json::json!({
             // 🔴 revert 는 **결제액이 안 나간 것**이다(가스만 나갔다) → paid=false.
-            // pending 만 「나갔는데 확인을 못 했다」다. 둘을 뭉치면 한쪽이 거짓말이 된다.
-            "paid": reason == "pending",
+            // pending·undelivered 는 「나갔는데 콘텐츠를 못 받았다」다. 뭉치면 한쪽이 거짓말이 된다.
+            "paid": reason != "reverted",
             "status": reason, "tx": tx, "explorer": explorer, "notice": notice,
         }),
         X402Outcome::Paid {
+            notice,
             tx,
             explorer,
             http_status,
@@ -708,6 +718,7 @@ fn x402_outcome_json(out: &X402Outcome) -> serde_json::Value {
             "resource": resource,
             "tx": tx,
             "explorer": explorer,
+            "notice": notice,
             "settlement": settlement,
             "body": body,
         }),
@@ -842,6 +853,10 @@ mod tests {
         let reverted = x402_outcome_json(&mk("reverted"));
         assert_eq!(reverted["paid"], false);
         assert_eq!(reverted["status"], "reverted");
+        // 🔴 「증거를 보내지도 못했다」도 **돈은 나간 것**이다(개발 64 코덱스 P1). revert 만 예외다.
+        let undelivered = x402_outcome_json(&mk("undelivered"));
+        assert_eq!(undelivered["paid"], true);
+        assert_eq!(undelivered["tx"], "0xTX");
     }
 
     /// 직접 제출이 서버에 거절당해도(`settlement_failed`) **tx 는 응답에 남아야 한다** — 돈은
@@ -849,6 +864,7 @@ mod tests {
     #[test]
     fn settlement_failure_still_carries_the_tx() {
         let v = x402_outcome_json(&X402Outcome::Paid {
+            notice: "돈은 나갔어요".into(),
             tx: "0xSENT".into(),
             explorer: "https://x/tx/0xSENT".into(),
             http_status: 402,
@@ -861,6 +877,8 @@ mod tests {
         });
         assert_eq!(v["status"], "settlement_failed");
         assert_eq!(v["tx"], "0xSENT");
+        // 🔴 「재시도하면 또 결제된다」는 말이 응답에 실려야 한다 — 이 갈래는 돈이 이미 나갔다.
+        assert_eq!(v["notice"], "돈은 나갔어요");
     }
 
     #[test]

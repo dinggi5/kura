@@ -214,7 +214,6 @@ export function PaymentApprovalModal({
           </p>
         )}
 
-
         {/* 금액 + 받는 주소 (도장 찍듯 확정) */}
         <div className="mt-4 flex flex-col items-center py-2">
           <div className="flex items-baseline gap-1.5">
