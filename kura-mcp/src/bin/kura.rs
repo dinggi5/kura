@@ -549,6 +549,8 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                 eprintln!("{notice}");
             }
             X402Outcome::Paid {
+                tx,
+                explorer,
                 http_status,
                 ok,
                 amount,
@@ -576,6 +578,13 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                     );
                 }
                 println!("{}", tf!("  리소스  {resource}", "  resource  {resource}"));
+                // 직접 제출이면 우리가 올린 tx — 정산이 거절돼도 돈의 행방은 남아야 한다.
+                if !tx.is_empty() {
+                    println!("{}", tf!("  tx      {tx}", "  tx        {tx}"));
+                    if !explorer.is_empty() {
+                        println!("{}", tf!("  링크    {explorer}", "  link      {explorer}"));
+                    }
+                }
                 if !settlement.is_empty() {
                     // settlement 은 base64(ASCII) → 바이트 슬라이스 안전. 앞부분만 미리보기.
                     println!(
@@ -674,9 +683,14 @@ fn x402_outcome_json(out: &X402Outcome) -> serde_json::Value {
             reason,
             notice,
         } => serde_json::json!({
-            "paid": true, "status": reason, "tx": tx, "explorer": explorer, "notice": notice,
+            // 🔴 revert 는 **결제액이 안 나간 것**이다(가스만 나갔다) → paid=false.
+            // pending 만 「나갔는데 확인을 못 했다」다. 둘을 뭉치면 한쪽이 거짓말이 된다.
+            "paid": reason == "pending",
+            "status": reason, "tx": tx, "explorer": explorer, "notice": notice,
         }),
         X402Outcome::Paid {
+            tx,
+            explorer,
             http_status,
             ok,
             amount,
@@ -692,6 +706,8 @@ fn x402_outcome_json(out: &X402Outcome) -> serde_json::Value {
             "asset": "USDC",
             "pay_to": pay_to,
             "resource": resource,
+            "tx": tx,
+            "explorer": explorer,
             "settlement": settlement,
             "body": body,
         }),
@@ -807,6 +823,45 @@ fn rel_time(now: u64, ts: u64, lang: Lang) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 개발 64 — **`reverted` 와 `pending` 은 반대말이다.** revert 는 체인이 거절해 결제액이
+    /// 그대로 있는 것(가스만 나갔다)이고, pending 은 나갔는데 확인을 못 한 것이다. 둘을 같은
+    /// `paid` 로 내보내면 한쪽이 반드시 거짓말이 된다 — 안 나간 걸 「나갔다」 하면 살 수 있는 걸
+    /// 못 사게 막고, 나간 걸 「안 나갔다」 하면 자동화가 두 번 결제한다.
+    #[test]
+    fn paid_flag_splits_pending_from_reverted() {
+        let mk = |reason: &str| X402Outcome::PaidNoContent {
+            tx: "0xTX".into(),
+            explorer: "https://x/tx/0xTX".into(),
+            reason: reason.into(),
+            notice: "n".into(),
+        };
+        let pending = x402_outcome_json(&mk("pending"));
+        assert_eq!(pending["paid"], true);
+        assert_eq!(pending["tx"], "0xTX");
+        let reverted = x402_outcome_json(&mk("reverted"));
+        assert_eq!(reverted["paid"], false);
+        assert_eq!(reverted["status"], "reverted");
+    }
+
+    /// 직접 제출이 서버에 거절당해도(`settlement_failed`) **tx 는 응답에 남아야 한다** — 돈은
+    /// 이미 나갔고, 그 자리에 해시가 없으면 어디로 갔는지 찾을 방법이 없다.
+    #[test]
+    fn settlement_failure_still_carries_the_tx() {
+        let v = x402_outcome_json(&X402Outcome::Paid {
+            tx: "0xSENT".into(),
+            explorer: "https://x/tx/0xSENT".into(),
+            http_status: 402,
+            ok: false,
+            amount: "0.03".into(),
+            pay_to: "0xabc".into(),
+            resource: "https://ex.com/a".into(),
+            settlement: String::new(),
+            body: "nope".into(),
+        });
+        assert_eq!(v["status"], "settlement_failed");
+        assert_eq!(v["tx"], "0xSENT");
+    }
 
     #[test]
     fn parse_reads_subcommand_and_positionals() {

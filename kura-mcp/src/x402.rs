@@ -394,12 +394,19 @@ impl PaymentRequired {
         req: &Requirement,
         proof: &DirectProof,
     ) -> Result<Submission, String> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "x402Version": 2,
-            "resource": self.raw.get("resource").cloned().unwrap_or(Value::Null),
             "accepted": req.raw,
             "payload": proof.payload(),
         });
+        // `resource` 는 **있을 때만** 싣는다 — 챌린지에 없으면 키를 통째로 뺀다(상대 구현의
+        // `toPaymentHeader` 와 같은 규칙). 명시적 `null` 은 「선택 필드가 없음」과 다른 값이라,
+        // 스키마를 엄격히 보는 서버에선 타입 불일치로 튕길 수 있다(코드 리뷰 P2).
+        if let Some(resource) = self.raw.get("resource") {
+            if !resource.is_null() {
+                body["resource"] = resource.clone();
+            }
+        }
         let bytes = serde_json::to_vec(&body).map_err(|e| {
             tf!(
                 "payload 직렬화 실패: {e}",
@@ -741,6 +748,44 @@ mod tests {
         assert_eq!(base_units_to_usdc("1500000").unwrap(), "1.5");
         assert_eq!(base_units_to_usdc("1").unwrap(), "0.000001");
         assert_eq!(base_units_to_usdc("0").unwrap(), "0");
+    }
+
+    /// 🔴 개발 64 — 직접 제출 헤더는 챌린지에 `resource` 가 **없으면 키를 뺀다**(명시적 null 금지).
+    /// 상대 구현의 `toPaymentHeader` 와 같은 규칙이다 — 「선택 필드가 없음」과 「값이 null」은 다른
+    /// 값이라, 스키마를 엄격히 보는 서버에선 후자가 타입 불일치로 튕긴다(코드 리뷰 P2).
+    #[test]
+    fn direct_submission_omits_absent_resource() {
+        use crate::arc_direct::DirectProof;
+        let proof = || DirectProof {
+            transaction: "0xTX".into(),
+            client_nonce: Some("aabb".into()),
+            seed: None,
+            nonce: "0xNONCE".into(),
+        };
+        // 최상위 resource 가 없는 챌린지
+        let bare = r#"{"x402Version":2,"accepts":[
+          {"scheme":"exact","network":"base-sepolia","amount":"10000",
+           "payTo":"0x1111111111111111111111111111111111111111",
+           "asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e"}]}"#;
+        let pr = parse_required(None, bare).unwrap();
+        let req = pick_requirement(&pr).unwrap();
+        let v = decode(&pr.build_direct_submission(&req, &proof()).unwrap().value);
+        assert!(
+            v.get("resource").is_none(),
+            "resource 키가 null 로 실렸다: {v}"
+        );
+        assert_eq!(v["payload"]["transaction"], "0xTX");
+        assert_eq!(v["x402Version"], 2);
+
+        // 있으면 그대로 에코한다
+        let with_res = r#"{"x402Version":2,"resource":{"url":"https://ex.com/a"},"accepts":[
+          {"scheme":"exact","network":"base-sepolia","amount":"10000",
+           "payTo":"0x1111111111111111111111111111111111111111",
+           "asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e"}]}"#;
+        let pr = parse_required(None, with_res).unwrap();
+        let req = pick_requirement(&pr).unwrap();
+        let v = decode(&pr.build_direct_submission(&req, &proof()).unwrap().value);
+        assert_eq!(v["resource"]["url"], "https://ex.com/a");
     }
 
     /// V1 제출: X-PAYMENT 헤더 + {x402Version:1, scheme, network, payload}.

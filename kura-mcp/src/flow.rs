@@ -299,6 +299,11 @@ pub enum X402Outcome {
     },
     /// 결제하고 콘텐츠를 받았다.
     Paid {
+        /// 직접 제출일 때 **우리가 올린 트랜잭션**(서명 갈래면 빈 값). 성공했을 때도 싣지만,
+        /// 진짜로 필요한 건 `ok == false` 일 때다 — 서버가 증거를 거절하면 돈은 이미 나갔는데
+        /// 그 자리에 tx 가 없으면 AI 도 사람도 **어디로 갔는지 못 찾는다**(코드 리뷰 P2).
+        tx: String,
+        explorer: String,
         http_status: u16,
         /// 2xx(정산 성공) 여부. false 면 결제 헤더는 보냈으나 정산 단계에서 실패.
         ok: bool,
@@ -515,6 +520,8 @@ pub async fn run_x402(
     }
     // 6) 제출할 증거를 만든다 — 표준은 **서명**, 직접 제출은 **우리가 올린 tx 해시**.
     let mut signed: Option<x402::X402Payment> = None;
+    let mut direct_tx = String::new();
+    let mut direct_explorer = String::new();
     let sub = if direct {
         let tx = result.tx_hash.trim().to_string();
         if tx.is_empty() {
@@ -557,6 +564,8 @@ pub async fn run_x402(
                 });
             }
         }
+        direct_tx = tx.clone();
+        direct_explorer = explorer;
         required.build_direct_submission(
             &req,
             &DirectProof {
@@ -618,6 +627,8 @@ pub async fn run_x402(
 
     Ok(X402Result {
         outcome: X402Outcome::Paid {
+            tx: direct_tx,
+            explorer: direct_explorer,
             http_status: paid_status,
             ok,
             amount: amount_usdc,

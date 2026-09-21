@@ -266,9 +266,11 @@ impl WalletServer {
         the user has turned autopay on), and the app enforces per-payment and daily limits and the emergency \
         lock. Never send a password as an argument. Arguments: url (required), memo (what the payment is for \
         — the user reads it to decide). Returns: paid, status, http_status, body, and amount/pay_to/settlement \
-        when paid. IMPORTANT: status \"pending\" or \"reverted\" with paid:true means the money already left \
-        the wallet (tx is in the reply) but no content came back — do NOT call this URL again to retry, \
-        because that pays a second time; tell the user instead."
+        when paid. IMPORTANT, and the two cases are opposites: status \"pending\" (paid:true) means the money \
+        already left the wallet — the tx is in the reply but the receipt didn't confirm in time, so do NOT \
+        call this URL again, because that pays a second time; tell the user. Status \"reverted\" (paid:false) \
+        means the chain rejected the transfer — only gas was spent and the price was NOT paid, so trying \
+        again is safe."
     )]
     async fn x402_fetch(
         &self,
@@ -302,13 +304,18 @@ impl WalletServer {
                 reason,
                 notice,
             } => serde_json::json!({
-                "paid": true,
+                // 🔴 **revert 는 결제가 안 된 것**이다 — 체인이 거절해 결제액은 그대로 있고 가스만
+                // 나갔다. 그걸 `paid: true` 로 내보내면 이번엔 반대 거짓말이 된다(못 받은 콘텐츠를
+                // 다시 사면 되는데 사지 말라고 하는 꼴). 「나갔는데 확인을 못 했다」는 pending 뿐이다.
+                "paid": reason == "pending",
                 "status": reason,       // pending | reverted
                 "tx": tx,
                 "explorer": explorer,
                 "notice": notice,
             }),
             X402Outcome::Paid {
+                tx,
+                explorer,
                 http_status,
                 ok,
                 amount,
@@ -324,6 +331,10 @@ impl WalletServer {
                 "asset": "USDC",
                 "pay_to": pay_to,
                 "resource": resource,
+                // 직접 제출이면 **우리가 올린 트랜잭션**. `settlement_failed` 일 때 이게 없으면
+                // 돈은 나갔는데 행방을 알 길이 없다(코드 리뷰 P2).
+                "tx": tx,
+                "explorer": explorer,
                 "settlement": settlement,   // X-PAYMENT-RESPONSE (base64) — 정산 증빙
                 "body": body,
             }),

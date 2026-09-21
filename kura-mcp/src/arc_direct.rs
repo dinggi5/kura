@@ -221,11 +221,15 @@ pub fn pending_notice(tx: &str, explorer: &str) -> String {
     )
 }
 
-/// 서버에 낼 게 없을 때(revert) — 가스는 나갔고 결제는 안 됐다.
+/// 서버에 낼 게 없을 때(revert) — **결제액은 그대로고 가스만 나갔다.**
+///
+/// `pending_notice` 와 반대로 여기선 **다시 시도해도 된다**고 말한다. 둘을 같은 문구로 뭉치면
+/// 한쪽이 거짓말이 된다 — 안 나간 돈을 「나갔다」고 하면 사용자가 잃은 줄 알고, 나간 돈을
+/// 「안 나갔다」고 하면 AI 가 또 결제한다.
 pub fn reverted_notice(tx: &str) -> String {
     tf!(
-        "결제 트랜잭션이 체인에서 실패했어요(tx {tx}). 결제액은 나가지 않았지만 가스는 소모됐습니다.",
-        "The payment transaction reverted on-chain (tx {tx}). The amount wasn't paid, but gas was spent."
+        "결제 트랜잭션이 체인에서 실패했어요(tx {tx}). **결제액은 나가지 않았고** 가스만 소모됐습니다 — 다시 시도해도 됩니다.",
+        "The payment transaction reverted on-chain (tx {tx}). **The amount was not paid** — only gas was spent, so it is safe to try again."
     )
 }
 

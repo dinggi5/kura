@@ -214,16 +214,6 @@ export function PaymentApprovalModal({
           </p>
         )}
 
-        {/* 직접 제출(개발 64): 서명으로 끝나는 결제가 아니라 **지금 체인에 올라가는 전송**이다.
-            승인하면 되돌릴 수 없다는 점에서 송금과 같아, 그 사실만 한 줄로 말한다. */}
-        {isX402Direct && (
-          <p className="mt-2 text-[11px] text-[var(--color-ink-300)]">
-            {t(
-              "승인하면 지갑이 직접 체인에 올려요 — 수수료도 이 잔액에서 나갑니다.",
-              "Approving broadcasts it from this wallet — the fee comes out of this balance too.",
-            )}
-          </p>
-        )}
 
         {/* 금액 + 받는 주소 (도장 찍듯 확정) */}
         <div className="mt-4 flex flex-col items-center py-2">
@@ -251,12 +241,25 @@ export function PaymentApprovalModal({
           {/* ERC-8004 대조 (개발 47) — AI 가 에이전트 번호를 준 결제에만 붙는다.
               번호가 없으면 아무것도 안 붙고 창은 예전 그대로다: 말할 사실이 있을 때만 말한다. */}
           {request.agent && <AgentTrustLines agent={request.agent} />}
-          {isX402 && (
+          {/* 🔴 이 줄은 **이 결제가 어떻게 나가는가**를 말한다 — x402 라고 다 같지 않다(개발 64).
+              서명 갈래는 우리 가스가 안 나가고, 직접 제출 갈래는 지갑이 그 자리에서 올린다.
+              한 승인 화면에 「가스 없음」과 「수수료도 이 잔액에서」가 같이 뜨면 사람이 무엇을
+              믿어야 할지 모른다 — 말은 한 자리에서 한 번만 한다. */}
+          {isX402Sign && (
             <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--color-ink-300)]">
               <FileSignature size={11} />
               {t(
                 "오프체인 서명 · 가스 없음 (정산은 페이실리테이터)",
                 "Off-chain signature · no gas (the facilitator settles it)",
+              )}
+            </p>
+          )}
+          {isX402Direct && (
+            <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--color-ink-300)]">
+              <ArrowUpRight size={11} />
+              {t(
+                "지갑이 직접 체인에 올려요 · 수수료도 이 잔액에서",
+                "This wallet broadcasts it · the fee comes out of this balance",
               )}
             </p>
           )}
@@ -288,7 +291,7 @@ export function PaymentApprovalModal({
                   `${request.token} 잔액이 부족해요 · 보유 ${fmtAmount(haveStr ?? "0", 6)} / 필요 ${fmtAmount(request.amount, 6)}`,
                   `Not enough ${request.token} · you have ${fmtAmount(haveStr ?? "0", 6)}, this needs ${fmtAmount(request.amount, 6)}`,
                 )}
-            {isX402 && t(" (정산 시 실패)", " (settlement would fail)")}
+            {isX402Sign && t(" (정산 시 실패)", " (settlement would fail)")}
           </p>
         )}
 
@@ -297,7 +300,7 @@ export function PaymentApprovalModal({
             value={pw}
             onChange={setPw}
             placeholder={
-              isX402
+              isX402Sign
                 ? t("비밀번호로 서명 승인", "Password to approve the signature")
                 : t("비밀번호로 승인", "Password to approve")
             }
@@ -320,12 +323,12 @@ export function PaymentApprovalModal({
           >
             {busy ? (
               <Loader2 size={15} className="animate-spin" />
-            ) : isX402 ? (
+            ) : isX402Sign ? (
               <FileSignature size={15} />
             ) : (
               <Lock size={15} />
             )}
-            {isX402 ? t("승인하고 서명", "Approve and sign") : t("승인하고 보내기", "Approve and send")}
+            {isX402Sign ? t("승인하고 서명", "Approve and sign") : t("승인하고 보내기", "Approve and send")}
           </button>
         </div>
       </motion.section>
