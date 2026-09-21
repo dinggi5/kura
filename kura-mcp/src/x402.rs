@@ -777,6 +777,20 @@ mod tests {
         assert_eq!(v["payload"]["transaction"], "0xTX");
         assert_eq!(v["x402Version"], 2);
 
+        // 서버가 `"resource": null` 을 **명시적으로** 보낸 경우도 키를 뺀다(2차 리뷰 P3 — 코드는
+        // 맞는데 검사가 없었다. 「없음」과 「null」을 다르게 다루는 게 이 함수의 요점이라 둘 다 문다).
+        let explicit_null = r#"{"x402Version":2,"resource":null,"accepts":[
+          {"scheme":"exact","network":"base-sepolia","amount":"10000",
+           "payTo":"0x1111111111111111111111111111111111111111",
+           "asset":"0x036CbD53842c5426634e7929541eC2318f3dCF7e"}]}"#;
+        let pr = parse_required(None, explicit_null).unwrap();
+        let req = pick_requirement(&pr).unwrap();
+        let v = decode(&pr.build_direct_submission(&req, &proof()).unwrap().value);
+        assert!(
+            v.get("resource").is_none(),
+            "명시적 null 이 그대로 실렸다: {v}"
+        );
+
         // 있으면 그대로 에코한다
         let with_res = r#"{"x402Version":2,"resource":{"url":"https://ex.com/a"},"accepts":[
           {"scheme":"exact","network":"base-sepolia","amount":"10000",

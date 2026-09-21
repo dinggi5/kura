@@ -266,7 +266,9 @@ impl WalletServer {
         the user has turned autopay on), and the app enforces per-payment and daily limits and the emergency \
         lock. Never send a password as an argument. Arguments: url (required), memo (what the payment is for \
         — the user reads it to decide). Returns: paid, status, http_status, body, and amount/pay_to/settlement \
-        when paid. IMPORTANT, and the two cases are opposites: status \"pending\" (paid:true) means the money \
+        when paid; on a chain where the wallet broadcasts the payment itself, `tx` and `explorer` point at \
+        that transaction (both are empty on the facilitator-settled path, and `tx` is worth surfacing to the \
+        user whenever the server then refuses the proof). IMPORTANT, and the two cases are opposites: status \"pending\" (paid:true) means the money \
         already left the wallet — the tx is in the reply but the receipt didn't confirm in time, so do NOT \
         call this URL again, because that pays a second time; tell the user. Status \"reverted\" (paid:false) \
         means the chain rejected the transfer — only gas was spent and the price was NOT paid, so trying \
