@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::chain::active_chain;
-use crate::ipc::{read_request, resolve_request, PaymentResult};
+use crate::ipc::{read_request, PaymentResult};
 use crate::limits::parse_usdc_nonneg;
 use crate::notify::{auto_pay_notice, show_notification};
 use crate::settings::{read_settings, Settings};
@@ -229,11 +229,40 @@ async fn auto_approve_pinned(
 
     // 여기서부터는 돈이 나갈 수 있는 구간 — 감시 스레드가 이 요청을 실패로 끝내면 안 된다
     // (코덱스 개발51 1차 P1: 자율 경로는 창이 없어 「프론트가 잔다」와 구별이 더 어렵다).
-    let _in_flight = crate::ipc::begin_approval(&req.id)?;
+    let _in_flight = crate::ipc::begin_approval(&req)?;
+    // 여기서부터의 결말은 전부 결제 시도 기록에 남는다(개발 66, ipc::finish_approval) — 사람 승인과
+    // **같은 함수**로 끝낸다. NEEDS_PASSWORD 도 기록상 「실패(안 나감)」라 곧이어 사람이 승인할 수 있다.
+    let outcome = auto_work(&req, &session, &settings, amount, dec).await;
+    let result = crate::ipc::finish_approval(&req, outcome)?;
 
+    // 자율 결제 사후 통지 (Session 15) — 비번 없이 돈이 나간 유일한 경로이므로,
+    // 보호자가 자리에 없어도 OS 알림으로 인지하게 한다. 알림 실패가 결제를 막으면 안 된다.
+    // 불명(unknown)은 전송 쪽이 이미 「확인 필요」 알림을 띄웠다 — 「자동으로 결제했어요」를 겹쳐 말하지 않는다.
+    if settings.notify_auto && result.status == "approved" {
+        let notice = auto_pay_notice(
+            &req.kind,
+            &req.token,
+            &req.amount,
+            &req.to,
+            &req.resource,
+            settings.notify_hide_amount,
+        );
+        show_notification(&notice.0, &notice.1);
+    }
+    Ok(result)
+}
+
+/// 승인이 시작된 뒤의 자율 처리 본체 — 세션 키·가스 여유분·재확인·전송. 결말은 호출자가 기록한다.
+async fn auto_work(
+    req: &crate::ipc::PaymentRequest,
+    session: &tauri::State<'_, SessionKey>,
+    settings: &Settings,
+    amount: U256,
+    dec: u8,
+) -> Result<PaymentResult, String> {
     // 세션이 잠금 해제돼 있어야 키가 메모리에 있다(유휴 타임아웃도 여기서 검사).
-    let idle = auto_lock_secs(&settings);
-    let signer = session_signer(&session, idle).ok_or_else(|| NEEDS_PASSWORD.to_string())?;
+    let idle = auto_lock_secs(settings);
+    let signer = session_signer(session, idle).ok_or_else(|| NEEDS_PASSWORD.to_string())?;
 
     // 가스가 곧 USDC 인 체인(Arc): 보낼 금액과 가스가 **같은 잔액**에서 나간다 → 잔액에 딱 맞는
     // 송금은 가스를 못 내 체인에서 실패한다. 보내기 화면(SendCard)과 승인 창은 여유분을 빼고
@@ -281,65 +310,38 @@ async fn auto_approve_pinned(
 
     // 실제 처리 — 긴급잠금·단일/일일 한도·내역·누적은 do_* 가 송금과 동일하게 적용.
     // 여기서 Err(잠금·한도 등)이면 요청을 치우지 않는다 → 프론트가 모달로 사람에게 넘긴다.
-    let notice = auto_pay_notice(
-        &req.kind,
-        &req.token,
-        &req.amount,
-        &req.to,
-        &req.resource,
-        settings.notify_hide_amount,
-    );
-    let result = match req.kind.as_str() {
+    match req.kind.as_str() {
         "x402" => {
             let payment = do_sign_x402(&signer, req.to.clone(), req.amount.clone(), None).await?;
-            PaymentResult {
-                id: req.id,
+            Ok(PaymentResult {
+                id: req.id.clone(),
                 status: "approved".into(),
                 tx_hash: String::new(),
                 detail: String::new(),
                 x402: Some(payment),
-            }
+            })
         }
         // x402 직접 제출 (개발 64) — 서명하고 **우리가** 올린다. 자율 한도·신뢰 주소·ERC-8004·
         // 가스 여유분 검사를 전부 그대로 지난 뒤라, 사람 승인 경로와 같은 규칙으로 나간다.
-        "x402-direct" => {
-            let hash = crate::x402::do_x402_direct(
+        // 불명(개발 66)은 오류가 아니라 결과다 — `result_from_send` 가 사람 승인과 같게 가른다.
+        "x402-direct" => crate::ipc::result_from_send(
+            &req.id,
+            crate::x402::do_x402_direct(
                 &signer,
                 req.to.clone(),
                 req.amount.clone(),
                 req.nonce.clone(),
             )
-            .await?;
-            PaymentResult {
-                id: req.id,
-                status: "approved".into(),
-                tx_hash: hash,
-                detail: String::new(),
-                x402: None,
-            }
-        }
+            .await,
+        ),
         // 🔴 모르는 kind 를 송금으로 떨어뜨리지 않는다(개발 64 — ipc::approve_pinned 와 같은 이유).
         // 자율 경로는 **창이 없어서** 사람이 «이상한 결제»를 볼 기회조차 없다.
-        "transfer" => {
-            let hash = do_send_usdc(&signer, req.to.clone(), req.amount.clone()).await?;
-            PaymentResult {
-                id: req.id,
-                status: "approved".into(),
-                tx_hash: hash,
-                detail: String::new(),
-                x402: None,
-            }
-        }
-        _ => return Err(NEEDS_PASSWORD.into()),
-    };
-    resolve_request(&result)?;
-
-    // 자율 결제 사후 통지 (Session 15) — 비번 없이 돈이 나간 유일한 경로이므로,
-    // 보호자가 자리에 없어도 OS 알림으로 인지하게 한다. 알림 실패가 결제를 막으면 안 된다.
-    if settings.notify_auto {
-        show_notification(&notice.0, &notice.1);
+        "transfer" => crate::ipc::result_from_send(
+            &req.id,
+            do_send_usdc(&signer, req.to.clone(), req.amount.clone()).await,
+        ),
+        _ => Err(NEEDS_PASSWORD.into()),
     }
-    Ok(result)
 }
 
 #[cfg(test)]

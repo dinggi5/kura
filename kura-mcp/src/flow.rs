@@ -248,13 +248,8 @@ pub async fn run_payment(
     // 요청에 실린 대조 = 응답에 실리는 대조 (코덱스 개발51 1차 P2). 조회 도중 사용자가 네트워크를
     // 바꿨으면 write 쪽이 대조를 버리는데, 여기서 필터 전 값을 돌려주면 **승인 창에도 안 뜬 대조**를
     // AI 에게 사실처럼 말하게 된다.
-    let (id, agent) = payment::write_request_agent(
-        &token,
-        to.trim(),
-        amount.trim(),
-        memo.trim(),
-        agent,
-    )?;
+    let (id, agent) =
+        payment::write_request_agent(&token, to.trim(), amount.trim(), memo.trim(), agent)?;
     on_pending();
 
     match payment::await_result(&id, payment::APPROVAL_TIMEOUT).await {
@@ -273,14 +268,13 @@ pub async fn run_payment(
                 agent_note,
             })
         }
-        None => {
-            payment::cancel_request(&id);
-            Err(ts!(
-                "승인 시간 초과(5분). 사용자가 응답하지 않았어요.",
-                "Approval timed out after 5 minutes — the user didn't respond."
-            )
-            .into())
-        }
+        // None = **아무것도 안 나갔을 때만**(개발 66) — 요청은 await_result 가 이미 거뒀다.
+        // 사람이 승인해 전송 중이었으면 None 이 아니라 status "unknown" 결과가 온다.
+        None => Err(ts!(
+            "승인 시간 초과(5분). 사용자가 응답하지 않았어요.",
+            "Approval timed out after 5 minutes — the user didn't respond."
+        )
+        .into()),
     }
 }
 
@@ -297,7 +291,8 @@ pub enum X402Outcome {
     PaidNoContent {
         tx: String,
         explorer: String,
-        /// "pending"(확인 못 함) | "reverted"(체인에서 실패)
+        /// "pending"(GUI 는 받혔다는데 영수증을 못 봄) | "unknown"(GUI 도 받혔는지 모름 — 개발 66)
+        /// | "undelivered"(채굴됐는데 증거를 못 보냄) | "reverted"(체인에서 실패 — 결제액은 안 나감)
         reason: String,
         notice: String,
     },
@@ -321,6 +316,103 @@ pub enum X402Outcome {
         settlement: String,
         body: String,
     },
+}
+
+/// 돈의 행방 세 갈래 (개발 66, 개발 65 코덱스 #7). `paid` 한 비트로는 「확실히 나갔다」와 「나갔을 수 있다」가
+/// 한 덩이였다 — 그래서 서명 갈래에서 서버가 402/500 을 돌려준 경우(페이실리테이터가 정산했는지 이 응답만으론
+/// 모른다)를 `paid:true` 로 말할 수밖에 없었다. `false` 로 바꾸면 개발 51 의 「정직한 실패 = 이중 결제」가 된다.
+pub const PAYMENT_CONFIRMED: &str = "confirmed";
+/// 나갔을 수 있다 — **재시도하면 두 번 나갈 수 있다.** 사람에게 알리고 확인한다.
+pub const PAYMENT_UNKNOWN: &str = "unknown";
+/// 확실히 아무것도 안 나갔다 — 재시도해도 된다.
+pub const PAYMENT_NONE: &str = "none";
+
+impl X402Outcome {
+    /// 이 결과에서 돈이 어떻게 됐는가 — **MCP 와 CLI 가 이 함수 하나를 쓴다**(개발 65 교훈: 같은 규칙을 두 벌로
+    /// 두면 한쪽이 뒤처진다).
+    pub fn payment_state(&self) -> &'static str {
+        match self {
+            X402Outcome::NotPaid { .. } | X402Outcome::Declined { .. } => PAYMENT_NONE,
+            X402Outcome::PaidNoContent { reason, .. } => match reason.as_str() {
+                // 체인이 거절했다 — 가스만 나갔고 결제액은 그대로다.
+                "reverted" => PAYMENT_NONE,
+                // 영수증까지 봤다(성공) — 서버만 모른다.
+                "undelivered" => PAYMENT_CONFIRMED,
+                // pending·unknown·모르는 값 → 모른다. 모르는 값을 「안 나감」으로 접으면 재시도를 부른다.
+                _ => PAYMENT_UNKNOWN,
+            },
+            // 정산 성공(2xx) 또는 직접 제출(영수증이 채굴 성공일 때만 여기까지 온다) → 나갔다.
+            // 서명 갈래에서 서버가 거절했으면 페이실리테이터가 정산했는지 모른다.
+            X402Outcome::Paid { ok, tx, .. } => {
+                if *ok || !tx.is_empty() {
+                    PAYMENT_CONFIRMED
+                } else {
+                    PAYMENT_UNKNOWN
+                }
+            }
+        }
+    }
+
+    /// 예전 `paid` 필드 — **「안 나갔다고 단정할 수 없다」** 면 true(= 그냥 재시도하지 말라). 호환용으로 남긴다.
+    pub fn paid(&self) -> bool {
+        self.payment_state() != PAYMENT_NONE
+    }
+    /// MCP·CLI 가 AI/자동화에 내보내는 JSON — **한 곳에서 만든다**(개발 66 전엔 main.rs 와 bin/kura.rs 에
+    /// 같은 match 가 두 벌 있었고, 개발 65 의 `undelivered` P1 이 바로 그 두 벌 사이에서 났다).
+    pub fn to_json(&self) -> serde_json::Value {
+        let paid = self.paid();
+        let payment = self.payment_state();
+        match self {
+            X402Outcome::NotPaid { http_status, body } => serde_json::json!({
+                "paid": paid, "payment": payment, "status": "ok",
+                "http_status": http_status, "body": body,
+            }),
+            X402Outcome::Declined { status, detail } => serde_json::json!({
+                "paid": paid, "payment": payment,
+                "status": status,   // rejected | failed
+                "detail": detail,
+            }),
+            // 🔴 돈은 나갔거나 나갔을 수 있는데 콘텐츠가 없다(직접 제출). revert 만 「안 나감」이다.
+            X402Outcome::PaidNoContent {
+                tx,
+                explorer,
+                reason,
+                notice,
+            } => serde_json::json!({
+                "paid": paid, "payment": payment,
+                "status": reason,   // pending | unknown | undelivered | reverted
+                "tx": tx, "explorer": explorer, "notice": notice,
+            }),
+            X402Outcome::Paid {
+                notice,
+                tx,
+                explorer,
+                http_status,
+                ok,
+                amount,
+                pay_to,
+                resource,
+                settlement,
+                body,
+            } => serde_json::json!({
+                "paid": paid, "payment": payment,
+                "status": if *ok { "ok" } else { "settlement_failed" },
+                "http_status": http_status,
+                "amount": amount,
+                "asset": "USDC",
+                "pay_to": pay_to,
+                "resource": resource,
+                // 직접 제출이면 **우리가 올린 트랜잭션**. `settlement_failed` 일 때 이게 없으면
+                // 돈은 나갔는데 행방을 알 길이 없다(코드 리뷰 P2).
+                "tx": tx,
+                "explorer": explorer,
+                "settlement": settlement,   // X-PAYMENT-RESPONSE (base64) — 정산 증빙
+                // 빈 값이 아니면 **돈은 나갔는데 서버가 증거를 안 받은 것**이다 — 재시도 금지.
+                "notice": notice,
+                "body": body,
+            }),
+        }
+    }
 }
 
 /// x402 실행 결과 + (요청했다면) ERC-8004 대조 결과.
@@ -546,10 +638,35 @@ pub async fn run_x402(
         Some(secs) => std::time::Duration::from_secs(secs), // 0 은 위에서 요청을 쓰기 전에 걸렀다
         None => payment::APPROVAL_TIMEOUT,
     };
+    // 증거 재료를 남긴다(개발 66, 직접 제출만) — 영수증이 늦거나 이 프로세스가 죽어도 나중에 증거를
+    // 다시 만들 수 있게. 서명 갈래는 남길 게 없다(서명은 GUI 결과에 실려 오고, 안 오면 아무것도 안 나갔다).
+    if direct {
+        let dropped = body402.len() > payment::PROOF_BODY_CAP;
+        payment::write_proof(
+            &id,
+            &payment::ProofRecord {
+                v: 1,
+                id: id.clone(),
+                created: payment::now_secs(),
+                chain_id: picked_chain,
+                url: final_url.to_string(),
+                challenge_header: pr_header.clone(),
+                challenge_body: if dropped {
+                    String::new()
+                } else {
+                    body402.clone()
+                },
+                body_dropped: dropped,
+                client_nonce: client_nonce.clone(),
+                seed: seed.clone(),
+                nonce: nonce.clone(),
+            },
+        );
+    }
     let result = match payment::await_result(&id, approval_wait).await {
         Some(r) => r,
+        // 아무것도 안 나갔다(요청은 await_result 가 거뒀다). 전송 중이었으면 여기가 아니라 "unknown" 이 온다.
         None => {
-            payment::cancel_request(&id);
             return Err(ts!(
                 "승인 시간 초과(5분). 사용자가 응답하지 않았어요.",
                 "Approval timed out after 5 minutes — the user didn't respond."
@@ -557,7 +674,26 @@ pub async fn run_x402(
             .into());
         }
     };
-    if result.status != "approved" {
+    // 🔴 **「불명」은 갈래마다 뜻이 다르다** (개발 66).
+    // 서명 갈래: GUI 가 서명을 끝내기 전에 우리가 기다림을 접었다 → 서명은 **서버로 가지 않는다**(보낼
+    // 사람이 우리뿐이다). 그러니 이건 「아무것도 안 나감」이다 — 불명으로 말하면 살 수 있는 걸 못 사게 막는다.
+    // 직접 제출: 돈은 GUI 가 체인에 낸다 — 나갔을 수 있다. 아래에서 tx 가 있으면 영수증을 물어 가른다.
+    if result.status == "unknown" && !direct {
+        return Ok(X402Result {
+            outcome: X402Outcome::Declined {
+                status: "failed".into(),
+                detail: ts!(
+                    "지갑이 서명을 끝내기 전에 기다림이 끝났어요. 서명은 서버로 보내지 않았으니 아무것도 결제되지 않았습니다 — 다시 시도해도 됩니다.",
+                    "This call stopped waiting before the wallet finished signing. The signature was never sent to the server, so nothing was paid — it is safe to try again."
+                )
+                .into(),
+            },
+            agent,
+            agent_note,
+        });
+    }
+    let unknown = result.status == "unknown";
+    if result.status != "approved" && !unknown {
         return Ok(X402Result {
             outcome: X402Outcome::Declined {
                 status: result.status, // rejected | failed
@@ -573,6 +709,20 @@ pub async fn run_x402(
     let mut direct_explorer = String::new();
     let sub = if direct {
         let tx = result.tx_hash.trim().to_string();
+        // 불명인데 tx 도 모른다 = GUI 가 전송을 끝내기 전에 우리가 기다림을 접었다(개발 66). 물어볼 해시가
+        // 없으니 여기서 멈추고 「나갔을 수 있다」를 그대로 말한다.
+        if tx.is_empty() && unknown {
+            return Ok(X402Result {
+                outcome: X402Outcome::PaidNoContent {
+                    notice: result.detail,
+                    tx,
+                    explorer: String::new(),
+                    reason: "unknown".into(),
+                },
+                agent,
+                agent_note,
+            });
+        }
         if tx.is_empty() {
             return Err(ts!(
                 "승인됐지만 전송 결과(tx 해시)가 비어 있어요",
@@ -592,7 +742,7 @@ pub async fn run_x402(
                     notice: arc_direct::pending_notice(&tx, &explorer),
                     tx,
                     explorer,
-                    reason: "pending".into(),
+                    reason: if unknown { "unknown" } else { "pending" }.into(),
                 },
                 agent,
                 agent_note,
@@ -617,13 +767,15 @@ pub async fn run_x402(
                     agent_note,
                 });
             }
+            // 영수증이 안 잡혔다. GUI 가 「받혔다」고 했으면 pending(곧 들어갈 공산이 크다), GUI 도
+            // 받혔는지 몰랐으면 unknown(아예 안 퍼졌을 수도 있다). 둘 다 「나갔을 수 있다 — 재시도 금지」다.
             ReceiptOutcome::Pending => {
                 return Ok(X402Result {
                     outcome: X402Outcome::PaidNoContent {
                         notice: arc_direct::pending_notice(&tx, &explorer),
                         tx,
                         explorer,
-                        reason: "pending".into(),
+                        reason: if unknown { "unknown" } else { "pending" }.into(),
                     },
                     agent,
                     agent_note,
@@ -743,4 +895,69 @@ pub async fn run_x402(
         agent,
         agent_note,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn no_content(reason: &str) -> X402Outcome {
+        X402Outcome::PaidNoContent {
+            tx: "0xTX".into(),
+            explorer: String::new(),
+            reason: reason.into(),
+            notice: "n".into(),
+        }
+    }
+
+    fn paid(ok: bool, tx: &str) -> X402Outcome {
+        X402Outcome::Paid {
+            notice: String::new(),
+            tx: tx.into(),
+            explorer: String::new(),
+            http_status: if ok { 200 } else { 402 },
+            ok,
+            amount: "0.01".into(),
+            pay_to: "0xabc".into(),
+            resource: "https://ex.com/a".into(),
+            settlement: String::new(),
+            body: String::new(),
+        }
+    }
+
+    /// 🔴 돈의 행방 세 갈래 (개발 66, 코덱스 #7) — 표 하나로 전부 박는다. MCP·CLI 가 이 판정 하나를 쓴다.
+    #[test]
+    fn payment_state_table() {
+        let cases: Vec<(X402Outcome, &str)> = vec![
+            (
+                X402Outcome::NotPaid {
+                    http_status: 200,
+                    body: String::new(),
+                },
+                PAYMENT_NONE,
+            ),
+            (
+                X402Outcome::Declined {
+                    status: "rejected".into(),
+                    detail: String::new(),
+                },
+                PAYMENT_NONE,
+            ),
+            (no_content("reverted"), PAYMENT_NONE), // 가스만 — 결제액은 그대로
+            (no_content("undelivered"), PAYMENT_CONFIRMED), // 채굴 성공, 서버만 모름
+            (no_content("pending"), PAYMENT_UNKNOWN),
+            (no_content("unknown"), PAYMENT_UNKNOWN),
+            (no_content("someday-new"), PAYMENT_UNKNOWN), // 모르는 값을 「안 나감」으로 접지 않는다
+            (paid(true, ""), PAYMENT_CONFIRMED),          // 서명 갈래 정산 성공
+            (paid(false, ""), PAYMENT_UNKNOWN),           // 서명 갈래 거절 — 정산 여부 모름(#7)
+            (paid(false, "0xTX"), PAYMENT_CONFIRMED),     // 직접 제출은 채굴 성공 뒤에만 여기 온다
+        ];
+        for (o, want) in &cases {
+            assert_eq!(o.payment_state(), *want, "{}", o.to_json());
+            // 예전 `paid` 는 「안 나갔다고 단정할 수 없다」 — none 일 때만 false.
+            assert_eq!(o.paid(), *want != PAYMENT_NONE);
+            assert_eq!(o.to_json()["payment"], *want);
+            assert_eq!(o.to_json()["paid"], *want != PAYMENT_NONE);
+        }
+    }
 }

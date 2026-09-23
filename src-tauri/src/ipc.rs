@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::store::{jigap_dir, now_secs, write_json};
-use crate::transfer::{send_eth, send_usdc};
+use crate::transfer::{send_eth_checked, send_usdc_checked};
 use crate::x402::{sign_x402_payment, X402Payment};
 
 /// AI 에이전트가 보낸 결제 요청 1건. 비밀은 없다(비번은 GUI에서만 입력).
@@ -103,9 +103,7 @@ fn default_kind() -> String {
 pub(crate) fn agent_contradicts(agent: Option<&AgentTrust>) -> bool {
     match agent {
         None => false,
-        Some(a) => {
-            !a.registered || a.wallet_check == "differs" || a.domain_check == "differs"
-        }
+        Some(a) => !a.registered || a.wallet_check == "differs" || a.domain_check == "differs",
     }
 }
 
@@ -357,19 +355,196 @@ impl Drop for ApprovalGuard {
 ///
 /// 거절된 쪽이 자율 경로면 프론트가 사람 승인 모달로 넘기고, 사람이면 오류를 보고 잠시 뒤
 /// 다시 누른다 — 어느 쪽도 돈이 나가지 않는다.
-pub(crate) fn begin_approval(id: &str) -> Result<ApprovalGuard, String> {
+pub(crate) fn begin_approval(req: &PaymentRequest) -> Result<ApprovalGuard, String> {
     let _lock = APPROVAL_ARBITER.lock().map_err(|_| {
         ts!(
             "승인을 시작할 수 없어요. 앱을 다시 시작해 주세요.",
             "Couldn't start the approval. Please restart the app."
         )
     })?;
-    admit_approval(
-        read_request().map(|r| r.id).as_deref(),
-        id,
-        approval_in_flight(),
-    )?;
+    // 겹침 거절을 **기록을 건드리기 전에** 본다 — 진행 중인 승인의 기록을 이 시도가 덮었다가
+    // 되돌리면, 그 사이 진행 중인 쪽이 적은 결말(done)을 옛 값(sending)으로 되돌려 쓰게 된다.
+    if approval_in_flight() {
+        return Err(in_flight_message());
+    }
+    // 🔴 **결제 시도 기록을 먼저 쓰고, 그다음 요청이 아직 있는지 본다** (개발 66).
+    // MCP 는 시간 초과 때 요청을 먼저 지우고 그다음 기록을 읽는다(shared/policy.rs 순서 규약) — 이 순서가
+    // 둘 다 지켜져야 「GUI 는 요청을 보고 전송을 시작했는데 MCP 는 아무것도 못 보고 『응답 없음』이라
+    // 답한다」가 불가능해진다. 두 프로세스 사이엔 잠금이 없어서, 닫는 것은 순서뿐이다.
+    let prev = read_attempt(&req.id);
+    if !crate::policy::attempt_allows_retry(prev.as_ref()) {
+        // 이미 나갔거나(done·unknown) 앱이 전송 중에 죽은(sending) 요청 — 다시 승인하면 두 번째 결제다.
+        return Err(ts!(
+            "이 결제는 이미 처리됐거나, 나갔는지 확인하지 못한 상태예요. 다시 승인하지 않습니다 — 내역을 확인하세요.",
+            "This payment was already processed, or its outcome couldn't be confirmed. It won't be approved again — check the history."
+        )
+        .into());
+    }
+    let now = now_secs();
+    write_attempt(&crate::policy::AttemptRecord {
+        v: 1,
+        id: req.id.clone(),
+        state: crate::policy::ATTEMPT_SENDING.into(),
+        kind: req.kind.clone(),
+        chain_id: req.chain_id,
+        started: now,
+        updated: now,
+        status: String::new(),
+        tx_hash: String::new(),
+        detail: String::new(),
+        x402: None,
+    })?; // 기록을 못 남기면 시작하지 않는다 — MCP 가 시간 초과 뒤 이 승인을 못 보게 된다.
+    if let Err(e) = admit_approval(read_request().map(|r| r.id).as_deref(), &req.id, false) {
+        // 요청이 그새 사라졌다(상대가 거둬감) — 우리가 쓴 기록을 되돌린다. MCP 가 그 사이 `sending` 을
+        // 봤다면 곧 사라지는 걸 보고 「아무것도 안 나감」으로 끝낸다.
+        restore_attempt(&req.id, prev.as_ref());
+        return Err(e);
+    }
     Ok(ApprovalGuard::acquire())
+}
+
+/// 겹침 거절 문구.
+fn in_flight_message() -> String {
+    // 🔴 이 거절은 예전엔 **앱이 살아 있는 동안 안 풀릴 수도** 있었다(전송에 시간 상한이 없었다).
+    // 개발 66 부터 전송은 상한이 있고 넘기면 「불명」으로 끝나므로 곧 풀린다 — 그래도 문구는 남긴다.
+    ts!(
+        "결제를 아직 처리하는 중이에요. 끝난 뒤 다시 시도하세요. 한참 이대로면 앱을 다시 시작해 주세요.",
+        "A payment is still being processed. Try again once it finishes — and if it stays this way, restart the app."
+    )
+    .into()
+}
+
+/// 승인 처리를 끝낸다 — 결제 시도 기록에 결말을 적고, 요청이 아직 대기 중이면 결과 파일을 쓴다.
+///
+/// **기록을 먼저 쓴다.** MCP 가 시간 초과로 요청을 거둔 뒤라면 `resolve_request` 는 조용히 아무것도 안
+/// 쓰는데(남의 결과를 덮지 않으려고), 그때 MCP 가 결말을 알 수 있는 곳은 이 기록뿐이다.
+///   Ok(approved) → done  ·  Ok(unknown) → unknown(요청은 소비한다 — 다시 승인하면 두 번째 결제)
+///   Err          → failed(요청은 남는다 — 확실히 안 나갔으니 다시 승인·거부할 수 있다)
+pub(crate) fn finish_approval(
+    req: &PaymentRequest,
+    outcome: Result<PaymentResult, String>,
+) -> Result<PaymentResult, String> {
+    let started = read_attempt(&req.id)
+        .map(|r| r.started)
+        .unwrap_or_else(now_secs);
+    let mut rec = crate::policy::AttemptRecord {
+        v: 1,
+        id: req.id.clone(),
+        state: String::new(),
+        kind: req.kind.clone(),
+        chain_id: req.chain_id,
+        started,
+        updated: now_secs(),
+        status: String::new(),
+        tx_hash: String::new(),
+        detail: String::new(),
+        x402: None,
+    };
+    match outcome {
+        Ok(r) => {
+            rec.state = if r.status == "unknown" {
+                crate::policy::ATTEMPT_UNKNOWN
+            } else {
+                crate::policy::ATTEMPT_DONE
+            }
+            .into();
+            rec.status = r.status.clone();
+            rec.tx_hash = r.tx_hash.clone();
+            rec.detail = r.detail.clone();
+            rec.x402 = r.x402.as_ref().and_then(|p| serde_json::to_value(p).ok());
+            let _ = write_attempt(&rec);
+            resolve_request(&r)?;
+            Ok(r)
+        }
+        Err(e) => {
+            rec.state = crate::policy::ATTEMPT_FAILED.into();
+            rec.status = "failed".into();
+            rec.detail = e.clone();
+            let _ = write_attempt(&rec);
+            Err(e)
+        }
+    }
+}
+
+/// 송금 결과(`SendError` 포함)를 승인 결과로 바꾼다. 불명은 **오류가 아니라 결과**다 — 요청을 소비하고
+/// MCP 에 tx 해시와 함께 「unknown」 으로 넘긴다(오류로 두면 요청이 살아남아 다시 승인할 수 있게 된다).
+pub(crate) fn result_from_send(
+    id: &str,
+    sent: Result<String, crate::transfer::SendError>,
+) -> Result<PaymentResult, String> {
+    use crate::transfer::SendError;
+    match sent {
+        Ok(hash) => Ok(PaymentResult {
+            id: id.to_string(),
+            status: "approved".into(),
+            tx_hash: hash,
+            detail: String::new(),
+            x402: None,
+        }),
+        Err(SendError::Unknown { hash, msg }) => Ok(PaymentResult {
+            id: id.to_string(),
+            status: "unknown".into(),
+            tx_hash: hash,
+            detail: msg,
+            x402: None,
+        }),
+        Err(SendError::Failed(m)) => Err(m),
+    }
+}
+
+fn read_attempt(id: &str) -> Option<crate::policy::AttemptRecord> {
+    let path = crate::policy::attempt_path(&jigap_dir().ok()?, id)?;
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+fn write_attempt(rec: &crate::policy::AttemptRecord) -> Result<(), String> {
+    let path = crate::policy::attempt_path(&jigap_dir()?, &rec.id).ok_or(ts!(
+        "결제 요청 번호가 올바르지 않아요.",
+        "That payment request id isn't valid."
+    ))?;
+    write_json(path, rec)
+}
+
+/// 시작하지 못한 승인이 남긴 기록을 되돌린다 — 이전 기록이 있었으면 그대로, 없었으면 지운다.
+fn restore_attempt(id: &str, prev: Option<&crate::policy::AttemptRecord>) {
+    match prev {
+        Some(r) => {
+            let _ = write_attempt(r);
+        }
+        None => {
+            if let Some(p) = jigap_dir()
+                .ok()
+                .and_then(|d| crate::policy::attempt_path(&d, id))
+            {
+                let _ = fs::remove_file(p);
+            }
+        }
+    }
+}
+
+/// 오래된 결제 시도 기록을 지운다(감시 스레드가 한 시간에 한 번). 청소일 뿐이라 실패는 조용히 넘긴다.
+fn prune_attempts() {
+    let Some(dir) = jigap_dir()
+        .ok()
+        .map(|d| d.join(crate::policy::APPROVALS_DIR))
+    else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for e in entries.flatten() {
+        let age = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .map(|d| d.as_secs());
+        if age.is_some_and(crate::policy::attempt_prunable) {
+            let _ = fs::remove_file(e.path());
+        }
+    }
 }
 
 /// `begin_approval` 의 판정만 떼어 낸 순수 함수 (테스트용). **잠금 안에서, 카운터를 올리기 전에**
@@ -384,16 +559,7 @@ fn admit_approval(pending_id: Option<&str>, id: &str, in_flight: bool) -> Result
         .into());
     }
     if in_flight {
-        // 🔴 이 거절은 **앱이 살아 있는 동안 안 풀릴 수도 있다**: 진행 중인 전송이 매달린
-        // RPC 를 기다리는 중이면(우리 송금 경로엔 시간 상한이 없다 — 상한을 걸면 「응답만
-        // 유실」이 실패로 둔갑해 AI 가 재시도한다, 개발 51) 카운터가 안 내려온다. 그때
-        // 사용자가 할 수 있는 일은 앱 재시작뿐이므로 문구에 적는다. 안내 없이 「다시
-        // 시도하세요」만 말하면 영영 오지 않는 때를 기다리게 된다.
-        return Err(ts!(
-            "결제를 아직 처리하는 중이에요. 끝난 뒤 다시 시도하세요. 한참 이대로면 앱을 다시 시작해 주세요.",
-            "A payment is still being processed. Try again once it finishes — and if it stays this way, restart the app."
-        )
-        .into());
+        return Err(in_flight_message());
     }
     Ok(())
 }
@@ -500,9 +666,15 @@ fn watchdog(app: tauri::AppHandle) {
     let mut last_pinned: Option<bool> = None;
     // 창을 깨운 뒤에도 프론트가 폴링을 안 한 횟수. 폴링이 한 번이라도 돌아오면 0으로 리셋.
     let mut wakes_without_poll: u32 = 0;
+    // 결제 시도 기록 청소(개발 66) 마지막 시각. 0 = 켜자마자 한 번.
+    let mut last_prune = 0u64;
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let now = now_secs();
+        if now.saturating_sub(last_prune) >= 3600 {
+            last_prune = now;
+            prune_attempts();
+        }
         // 🔴 **죽은 요청 파일을 치운다 — 루프의 맨 앞에서** (개발 63).
         //
         // 여기 말고는 요청 파일을 지우는 곳이 `resolve_request` 하나뿐이다 — `is_stale` 은
@@ -529,8 +701,8 @@ fn watchdog(app: tauri::AppHandle) {
         // 올라가므로, 이 조건만 보면 3번째 깨움은 다음 1초 루프에서 곧장 사망 판정을 맞는다 —
         // 실측(개발 51)상 깨운 뒤 폴링이 돌아오는 데 5초쯤 걸리므로 1초는 너무 짧다.
         // 마지막 깨움이 `WAKE_RETRY_SECS` 만큼 묵은 뒤에야 판정한다 = 주석대로 "3회 ≈ 45초".
-        let ui_ok = wakes_without_poll < DEAD_WAKES
-            || now.saturating_sub(last_wake) < WAKE_RETRY_SECS;
+        let ui_ok =
+            wakes_without_poll < DEAD_WAKES || now.saturating_sub(last_wake) < WAKE_RETRY_SECS;
         // 하트비트가 뜻하는 건 "프로세스가 살아 있다"가 아니라 **"여기서 사람이 승인까지 할 수
         // 있다"**이다. 지갑이 아직 없으면(첫 실행·평문 마이그레이션 대기) 프론트는 SetupScreen 을
         // 그리고 WalletScreen 은 아예 안 뜬다 → 승인 창을 띄울 경로가 없다. 그 상태에서 살아
@@ -720,71 +892,58 @@ pub(crate) async fn approve_payment(id: String, password: String) -> Result<Paym
 async fn approve_pinned(req: PaymentRequest, password: String) -> Result<PaymentResult, String> {
     // 여기서부터는 돈이 나갈 수 있는 구간 — 감시 스레드가 이 요청을 실패로 끝내면 안 된다.
     // (감시 스레드가 이미 끝낸 뒤면 여기서 거절된다 — 그 경우 상대는 재시도했을 수 있다.)
-    let _in_flight = begin_approval(&req.id)?;
+    let _in_flight = begin_approval(&req)?;
+    let outcome = approve_kind(&req, password).await;
+    finish_approval(&req, outcome)
+}
 
-    // kind 에 따라 처리 경로가 다르다. 둘 다 잠금·한도·내역을 자동 적용한다(같은 하부 함수 재사용).
-    // 실패하면 ?로 즉시 반환(요청 파일 유지) → 팝업에서 재시도/거부 가능.
-    let result = match req.kind.as_str() {
+/// kind 에 따라 처리한다. 둘 다 잠금·한도·내역을 자동 적용한다(같은 하부 함수 재사용).
+/// `Err` = 확실히 안 나감(요청 유지 → 팝업에서 재시도/거부 가능). 불명은 `Ok(status: "unknown")`.
+async fn approve_kind(req: &PaymentRequest, password: String) -> Result<PaymentResult, String> {
+    match req.kind.as_str() {
         // x402: 온체인 전송이 아니라 EIP-3009 인가를 서명만 한다(페이실리테이터가 정산).
         "x402" => {
             let payment =
                 sign_x402_payment(password, req.to.clone(), req.amount.clone(), None).await?;
-            PaymentResult {
-                id: req.id,
+            Ok(PaymentResult {
+                id: req.id.clone(),
                 status: "approved".into(),
                 tx_hash: String::new(),
                 detail: String::new(),
                 x402: Some(payment),
-            }
+            })
         }
         // x402-direct: 서명 + **우리가 직접 전송**(개발 64). 송금과 같은 규칙(한도·잠금·내역 "sent").
-        "x402-direct" => {
-            let hash = crate::x402::x402_direct_payment(
+        "x402-direct" => result_from_send(
+            &req.id,
+            crate::x402::x402_direct_payment(
                 password,
                 req.to.clone(),
                 req.amount.clone(),
                 req.nonce.clone(),
             )
-            .await?;
-            PaymentResult {
-                id: req.id,
-                status: "approved".into(),
-                tx_hash: hash,
-                detail: String::new(),
-                x402: None,
-            }
-        }
+            .await,
+        ),
         // transfer(기본): 실제 온체인 송금 — 기존 경로 재사용.
         // 🔴 **모르는 kind 는 여기로 오면 안 된다**(개발 64). 예전엔 `_` 가 전부 송금으로 떨어져서,
         // 새 kind 를 아는 MCP + 옛 앱 조합이면 「서버가 알아볼 수 없는 평범한 송금」이 나갔다 —
         // 돈은 나가고 결제는 성립하지 않는 최악의 조합이다. 모르면 거절하고 이유를 말한다.
         "transfer" => {
-            let hash = match req.token.as_str() {
-                "USDC" => send_usdc(password, req.to.clone(), req.amount.clone()).await,
-                "ETH" => send_eth(password, req.to.clone(), req.amount.clone()).await,
-                other => Err(tf!(
+            let sent = match req.token.as_str() {
+                "USDC" => send_usdc_checked(password, req.to.clone(), req.amount.clone()).await,
+                "ETH" => send_eth_checked(password, req.to.clone(), req.amount.clone()).await,
+                other => Err(crate::transfer::SendError::Failed(tf!(
                     "지원하지 않는 토큰: {other}",
                     "Unsupported token: {other}"
-                )),
-            }?;
-            PaymentResult {
-                id: req.id,
-                status: "approved".into(),
-                tx_hash: hash,
-                detail: String::new(),
-                x402: None,
-            }
+                ))),
+            };
+            result_from_send(&req.id, sent)
         }
-        other => {
-            let msg = tf!(
-                "이 앱이 모르는 결제 방식이에요({other}). 지갑 앱을 최신 버전으로 업데이트해 주세요.",
-                "This app doesn't know that payment kind ({other}). Please update the wallet app."
-            );
-            return Err(msg);
-        }
-    };
-    resolve_request(&result)?;
-    Ok(result)
+        other => Err(tf!(
+            "이 앱이 모르는 결제 방식이에요({other}). 지갑 앱을 최신 버전으로 업데이트해 주세요.",
+            "This app doesn't know that payment kind ({other}). Please update the wallet app."
+        )),
+    }
 }
 
 /// 결제 요청을 거부한다 — MCP에 "거부됨"을 알리고 대기 요청을 치운다.
@@ -934,6 +1093,41 @@ mod tests {
 
     /// 승인 처리 중에는 감시 스레드가 요청을 실패로 끝내면 안 된다 — 가드가 그 구간을 표시한다.
     /// Drop 으로 되돌아가야 `?` 로 중간에 빠져나가도 카운터가 새지 않는다.
+    /// 🔴 **불명은 오류가 아니라 결과다** (개발 66). 오류로 두면 요청 파일이 살아남아 승인 창이 그대로
+    /// 남고, 사람이 다시 누르면 **새 nonce 로 한 번 더** 나간다. 결과로 바꾸면 요청이 소비되고 MCP 는
+    /// tx 해시와 함께 「unknown」 을 받는다. 확실한 실패만 오류(요청 유지 → 다시 승인·거부 가능).
+    #[test]
+    fn send_outcomes_map_to_results() {
+        use crate::transfer::SendError;
+        let ok = result_from_send("1", Ok("0xA".into())).unwrap();
+        assert_eq!(
+            (ok.status.as_str(), ok.tx_hash.as_str()),
+            ("approved", "0xA")
+        );
+        let unk = result_from_send(
+            "1",
+            Err(SendError::Unknown {
+                hash: "0xB".into(),
+                msg: "m".into(),
+            }),
+        )
+        .expect("불명은 Ok(결과)여야 요청이 소비된다");
+        assert_eq!(
+            (
+                unk.status.as_str(),
+                unk.tx_hash.as_str(),
+                unk.detail.as_str()
+            ),
+            ("unknown", "0xB", "m")
+        );
+        assert_eq!(
+            result_from_send("1", Err(SendError::Failed("no".into())))
+                .err()
+                .as_deref(),
+            Some("no")
+        );
+    }
+
     #[test]
     fn approval_guard_marks_in_flight() {
         assert!(!approval_in_flight());

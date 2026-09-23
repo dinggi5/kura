@@ -84,6 +84,8 @@ const HISTORY_META: Record<string, { icon: React.ReactNode; ring: string; label:
   blocked: { icon: <Ban size={15} />, ring: "bg-amber-500/10 text-amber-600 dark:text-amber-500", label: t("차단됨", "Blocked"), labelColor: "text-amber-600 dark:text-amber-500" },
   failed: { icon: <AlertTriangle size={15} />, ring: "bg-red-500/10 text-red-600 dark:text-red-500", label: t("실패", "Failed"), labelColor: "text-red-500/80" },
   settle_failed: { icon: <AlertTriangle size={15} />, ring: "bg-red-500/10 text-red-600 dark:text-red-500", label: t("정산 실패", "Settlement failed"), labelColor: "text-red-500/80" },
+  // 서명한 tx 를 냈는데 체인이 받았는지 모름(개발 66) — 나갔을 수 있다. 실패(빨강)가 아니라 확인이 필요한 상태.
+  unknown: { icon: <AlertTriangle size={15} />, ring: "bg-amber-500/10 text-amber-600 dark:text-amber-500", label: t("확인 필요", "Unconfirmed"), labelColor: "text-amber-600 dark:text-amber-500" },
 };
 
 function HistoryRow({ entry }: { entry: HistoryEntry }) {
@@ -91,7 +93,13 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
   const meta = HISTORY_META[entry.status] ?? HISTORY_META.failed;
 
   // BaseScan 링크 대상 tx: 송금="sent"의 detail, x402 정산="settled"의 settle_tx.
-  const linkTx = entry.status === "sent" ? entry.detail : entry.status === "settled" ? entry.settle_tx ?? "" : "";
+  // 확인 필요("unknown")도 detail 이 tx 해시다 — 익스플로러에서 들어갔는지 볼 수 있어야 한다.
+  const linkTx =
+    entry.status === "sent" || entry.status === "unknown"
+      ? entry.detail
+      : entry.status === "settled"
+        ? entry.settle_tx ?? ""
+        : "";
   const hasLink = linkTx.length > 0;
   // 사유는 사람이 읽을 차단/실패에만 표시(signed/settled의 detail은 nonce라 숨김).
   const showReason = (entry.status === "blocked" || entry.status === "failed") && !!entry.detail;

@@ -21,7 +21,7 @@ use crate::limits::{parse_usdc_nonneg, refund_spend, reserve_spend};
 use crate::lock::read_lock;
 use crate::settings::read_settings;
 use crate::store::now_secs;
-use crate::transfer::parse_to_addr;
+use crate::transfer::{parse_to_addr, SendError};
 use crate::trusted::record_trusted;
 use crate::wallet::{active_account_index, unlock_signer, with_pinned_account};
 
@@ -254,7 +254,7 @@ pub(crate) async fn do_x402_direct(
     to: String,
     amount_usdc: String,
     nonce_hex: String,
-) -> Result<String, String> {
+) -> Result<String, SendError> {
     with_pinned_chain(
         active_chain().chain_id,
         with_pinned_account(
@@ -270,10 +270,12 @@ async fn do_x402_direct_inner(
     to: String,
     amount_usdc: String,
     nonce_hex: String,
-) -> Result<String, String> {
+) -> Result<String, SendError> {
     use crate::chain::IEIP3009;
-    use crate::settings::redact_urls;
-    use crate::transfer::{humanize_chain_error, signing_provider};
+    use crate::transfer::{broadcast, settle_broadcast};
+    use alloy::network::TransactionBuilder;
+    use alloy::rpc::types::TransactionRequest;
+    use alloy::sol_types::SolCall;
 
     let chain = active_chain();
     // 가스가 곧 결제자산인 체인에서만 성립한다 — MCP 도 같은 것을 보고 거르지만, **돈의 경계는
@@ -328,7 +330,7 @@ async fn do_x402_direct_inner(
         Ok(d) => d,
         Err(e) => {
             log_attempt("USDC", to, amt, "blocked", &e);
-            return Err(e);
+            return Err(e.into());
         }
     };
 
@@ -339,7 +341,7 @@ async fn do_x402_direct_inner(
         Err(e) => {
             refund_spend("USDC", value, reserved_day).await;
             log_attempt("USDC", to, amt, "failed", &e);
-            return Err(e);
+            return Err(e.into());
         }
     };
     // 서명 문자열 → (v,r,s). 우리가 방금 만든 값이라 실패할 일이 없지만, 실패하면 **예약한
@@ -350,53 +352,41 @@ async fn do_x402_direct_inner(
             refund_spend("USDC", value, reserved_day).await;
             let msg = tf!("서명 형식 오류: {e}", "The signature is malformed: {e}");
             log_attempt("USDC", to, amt, "failed", &msg);
-            return Err(msg);
+            return Err(msg.into());
         }
     };
 
-    let provider = match signing_provider(signer.clone()).await {
-        Ok(p) => p,
-        Err(e) => {
-            refund_spend("USDC", value, reserved_day).await;
-            log_attempt("USDC", to, amt, "failed", &e);
-            return Err(e);
-        }
-    };
-    let usdc = IEIP3009::new(chain.usdc_address, &provider);
     let valid_before: U256 = payment
         .authorization
         .valid_before
         .parse()
         .unwrap_or(U256::from(now_secs().saturating_add(600)));
-    let pending = usdc
-        .transferWithAuthorization(
-            signer.address(),
-            to_addr,
-            value,
-            U256::ZERO,
-            valid_before,
-            nonce,
-            27 + sig.v() as u8,
-            B256::from(sig.r().to_be_bytes::<32>()),
-            B256::from(sig.s().to_be_bytes::<32>()),
-        )
-        .send()
-        .await;
-    let pending = match pending {
-        Ok(p) => p,
-        Err(e) => {
-            refund_spend("USDC", value, reserved_day).await;
-            let msg = humanize_chain_error(&redact_urls(&e.to_string()), "USDC");
-            log_attempt("USDC", to, amt, "failed", &msg);
-            return Err(msg);
-        }
+    let call = IEIP3009::transferWithAuthorizationCall {
+        from: signer.address(),
+        to: to_addr,
+        value,
+        validAfter: U256::ZERO,
+        validBefore: valid_before,
+        nonce,
+        v: 27 + sig.v() as u8,
+        r: B256::from(sig.r().to_be_bytes::<32>()),
+        s: B256::from(sig.s().to_be_bytes::<32>()),
     };
-
+    let tx = TransactionRequest::default()
+        .with_to(chain.usdc_address)
+        .with_input(call.abi_encode());
     // 송금과 같은 모양으로 남긴다 — 사용자는 내역에서 «나간 돈»을 한 줄로 본다(서명만 한 x402 의
-    // "signed" 와 다르다. 이건 이미 나간 전송이다).
-    let hash = pending.tx_hash().to_string();
-    log_attempt("USDC", to, amt, "sent", &hash);
-    Ok(hash)
+    // "signed" 와 다르다. 이건 이미 나간 전송이다). 받힘·실패·불명의 내역·한도 반영은 송금과
+    // **같은 함수**가 한다(개발 66).
+    settle_broadcast(
+        Box::pin(broadcast(signer, tx, "USDC")).await,
+        "USDC",
+        to,
+        amt,
+        value,
+        reserved_day,
+    )
+    .await
 }
 
 /// 비번으로 키를 열어 x402 직접 제출을 수행한다(사람 승인 경로). tx 해시를 돌려준다.
@@ -408,7 +398,7 @@ pub(crate) async fn x402_direct_payment(
     to: String,
     amount_usdc: String,
     nonce: String,
-) -> Result<String, String> {
+) -> Result<String, SendError> {
     let password = Zeroizing::new(password);
     with_pinned_account(
         active_account_index(),
@@ -422,12 +412,12 @@ async fn x402_direct_pinned(
     to: String,
     amount_usdc: String,
     nonce: String,
-) -> Result<String, String> {
+) -> Result<String, SendError> {
     let signer = match unlock_signer(&password) {
         Ok(s) => s,
         Err(e) => {
             log_attempt("USDC", to.trim(), amount_usdc.trim(), "failed", &e);
-            return Err(e);
+            return Err(e.into());
         }
     };
     let to_addr = to.clone();

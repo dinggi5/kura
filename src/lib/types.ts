@@ -78,7 +78,7 @@ export type HistoryEntry = {
   token: string;
   to: string;
   amount: string;
-  status: string; // "sent"|"blocked"|"failed"|"signed"(x402 정산 대기)|"settled"(x402 정산됨)|"settle_failed"
+  status: string; // "sent"|"blocked"|"failed"|"signed"(x402 정산 대기)|"settled"(x402 정산됨)|"settle_failed"|"unknown"(전송 확인 필요, 개발 66)
   detail: string;
   /** x402 정산 tx 해시. 정산 전엔 빈 값. */
   settle_tx?: string;

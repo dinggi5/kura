@@ -20,6 +20,13 @@ const ALIVE_SECS: u64 = 10;
 /// 사용자 승인 대기 최대 시간(초). GUI 팝업 카운트다운과 일치(5분).
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// 🔴 **승인 대기가 끝났는데 GUI 가 아직 전송 중일 때 더 기다리는 상한** (개발 66).
+///
+/// GUI 의 전송은 개발 66 부터 단계마다 상한이 있다(채우기 30 + 제출 30 + 되묻기 10 + 재제출 30 ≈ 100초,
+/// 여기에 비번 복호화·자율 경로의 잔액 조회 몇 초). 그 합을 덮는 값이다. 이걸 넘기면 「모른다」로 답한다 —
+/// 「응답 없음」이 아니다(사람은 이미 승인했고 돈이 나가는 중일 수 있다).
+pub const LATE_SEND_WAIT: Duration = Duration::from_secs(150);
+
 /// 에이전트가 보내는 결제 요청. 비밀은 없다(비번은 GUI에서만).
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PaymentRequest {
@@ -73,6 +80,34 @@ pub struct PaymentResult {
     /// x402 승인일 때 GUI가 서명해 돌려준 결제 인가. transfer면 None.
     #[serde(default)]
     pub x402: Option<crate::x402::X402Payment>,
+}
+
+impl PaymentResult {
+    /// GUI 의 결제 시도 기록(개발 66)에서 결과를 되살린다 — 요청을 거둔 뒤라 결과 파일이 안 온 경우.
+    fn from_record(r: crate::policy::AttemptRecord) -> Self {
+        PaymentResult {
+            id: r.id,
+            status: r.status,
+            tx_hash: r.tx_hash,
+            detail: r.detail,
+            x402: r.x402.and_then(|v| serde_json::from_value(v).ok()),
+        }
+    }
+
+    /// 승인 대기도, 늦은 전송 대기도 끝났는데 GUI 가 아직 처리 중일 때의 결과 — **불명**.
+    fn still_sending(id: &str, rec: Option<crate::policy::AttemptRecord>) -> Self {
+        PaymentResult {
+            id: id.to_string(),
+            status: "unknown".into(),
+            tx_hash: rec.map(|r| r.tx_hash).unwrap_or_default(),
+            detail: ts!(
+                "사용자가 승인해서 지갑이 결제를 처리하는 중이었는데, 끝나는 걸 기다리지 못했어요. 나갔을 수 있으니 다시 요청하기 전에 사용자에게 알리고 지갑 내역을 확인하세요.",
+                "The user approved and the wallet was still processing the payment when this call stopped waiting. It may have gone through — tell the user and check the wallet history before asking again."
+            )
+            .into(),
+            x402: None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -398,23 +433,7 @@ fn claim_request_file(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// 내 id와 일치하는 결과를 읽는다.
-fn read_result(id: &str) -> Option<PaymentResult> {
-    result_path()
-        .ok()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<PaymentResult>(&s).ok())
-        .filter(|r| r.id == id)
-}
-
-/// 타임아웃 시 내 요청 파일을 치운다 (다른 요청이 덮어쓴 경우는 건드리지 않음).
-pub fn cancel_request(id: &str) {
-    if let Ok(p) = request_path() {
-        cancel_request_at(&p, id);
-    }
-}
-
-/// `cancel_request` 의 속알맹이 — 경로를 받는다. **경로를 안에서 구하면 테스트가 실지갑
+/// 내 요청 파일을 거둔다(파일 안의 id 가 내 것일 때만) — 경로를 받는다. **경로를 안에서 구하면 테스트가 실지갑
 /// (`~/.jigap`)을 건드리게 되므로** 여기를 갈라 두고 테스트는 임시 폴더를 넘긴다
 /// (`claim_request_file` 과 같은 이음매). 파일 안의 id 가 내 것일 때만 지운다.
 fn cancel_request_at(path: &Path, id: &str) {
@@ -437,7 +456,7 @@ fn cancel_request_at(path: &Path, id: &str) {
 /// → 이중 결제(개발 51 과 같은 모양). 요청을 거두면 승인 창이 곧바로 닫히고(GUI 의 `live_request()`
 /// 가 파일에서 파생된다) 아무 일도 안 난다.
 ///
-/// 시간 초과 때 호출자가 하던 것과 **같은 함수**를 부른다 — `cancel_request` 는 파일 안의 id 가
+/// 시간 초과 때 `await_result` 가 하는 것과 **같은 함수**를 부른다 — `cancel_request_at` 은 파일 안의 id 가
 /// 내 것일 때만 지우므로 남의 요청은 건드리지 않는다.
 ///
 /// **거두기가 못 하는 일과, 그래도 안전한 이유** (개발 59 코덱스 2차 P1 → 개발 63 에서 닫음):
@@ -474,13 +493,34 @@ impl Drop for CancelOnDrop<'_> {
     }
 }
 
-/// 결과를 timeout까지 폴링한다. 오면 Some(소비 후 파일 정리), 타임아웃이면 None.
+/// 결과를 timeout까지 폴링한다. 오면 Some(소비 후 파일 정리), 끝내 아무것도 안 나갔으면 None.
+///
+/// 🔴 **시간 초과 = 「응답 없음」이 아니다** (개발 66, 개발 65 코덱스 #1). 사람이 5분이 끝나 갈 무렵
+/// 비번을 넣으면 GUI 는 전송 중인데, 예전엔 여기서 요청을 거두고 None 을 돌려 「사용자가 응답하지
+/// 않았어요」가 나갔다 — 돈은 나가고 AI 는 재시도한다. 이제 시간이 다 되면:
+///   ① 요청을 **먼저** 거두고(더는 새 승인이 시작되지 않는다) ② GUI 의 결제 시도 기록을 읽는다.
+/// 순서가 중요하다 — GUI 는 기록을 먼저 쓰고 요청을 보므로(shared/policy.rs 규약), 전송을 시작한 승인은
+/// 반드시 기록으로 보인다. 기록이 「처리 중」이면 `LATE_SEND_WAIT` 까지 더 기다리고, 그래도 안 끝나면
+/// status "unknown" 으로 돌려준다. None 은 **아무것도 안 나갔을 때만** 이다(시작된 적 없음·확실한 실패).
 ///
 /// 이 함수의 future 가 **완료되기 전에 버려지면**(= 클라이언트가 죽어 런타임이 내려가면)
 /// 대기 중이던 요청을 거둔다 — 위 `CancelOnDrop` 참고.
 pub async fn await_result(id: &str, timeout: Duration) -> Option<PaymentResult> {
     // 경로를 못 구하는 상황(홈 디렉터리 없음)은 애초에 요청도 못 썼다는 뜻이라, 거둘 것도 없다.
-    let req_path = request_path().unwrap_or_default();
+    let dir = jigap_dir().unwrap_or_default();
+    await_result_in(&dir, id, timeout, LATE_SEND_WAIT).await
+}
+
+/// `await_result` 의 속알맹이 — 데이터 디렉터리와 늦은 전송 대기를 받는다. **경로를 안에서 구하면 테스트가
+/// 실지갑(`~/.jigap`)을 건드리게 되므로** 갈라 둔다(`cancel_request_at` 과 같은 이음매).
+async fn await_result_in(
+    dir: &Path,
+    id: &str,
+    timeout: Duration,
+    late_wait: Duration,
+) -> Option<PaymentResult> {
+    let req_path = dir.join("payment_request.json");
+    let res_path = dir.join("payment_result.json");
     let mut guard = CancelOnDrop {
         id,
         path: &req_path,
@@ -488,22 +528,108 @@ pub async fn await_result(id: &str, timeout: Duration) -> Option<PaymentResult> 
     };
     let start = SystemTime::now();
     loop {
-        if let Some(r) = read_result(id) {
-            if let Ok(p) = result_path() {
-                let _ = fs::remove_file(p);
-            }
+        if let Some(r) = take_result(&res_path, id) {
             guard.armed = false;
             return Some(r);
         }
         let elapsed = SystemTime::now().duration_since(start).unwrap_or(timeout);
         if elapsed >= timeout {
-            // 시간 초과의 뒷정리는 호출자가 한다(안내 문구와 한 자리에 있다).
-            guard.armed = false;
-            return None;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+    // ① 거두기 — 여기서부터 GUI 는 이 요청의 새 승인을 시작하지 못한다.
+    cancel_request_at(&req_path, id);
+    guard.armed = false;
+    // ② 기록 읽기. 거두기 직전에 결과가 들어왔을 수도 있으니 결과 파일도 같이 본다.
+    let late_start = SystemTime::now();
+    loop {
+        if let Some(r) = take_result(&res_path, id) {
+            return Some(r);
+        }
+        let rec = read_attempt(dir, id);
+        match crate::policy::after_timeout(rec.as_ref()) {
+            crate::policy::AfterTimeout::NothingSent => return None,
+            crate::policy::AfterTimeout::Finished => {
+                return rec.map(PaymentResult::from_record);
+            }
+            crate::policy::AfterTimeout::StillSending => {
+                let waited = SystemTime::now()
+                    .duration_since(late_start)
+                    .unwrap_or(late_wait);
+                if waited >= late_wait {
+                    return Some(PaymentResult::still_sending(id, rec));
+                }
+            }
         }
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
 }
+
+/// 내 결과가 와 있으면 가져가고 결과 파일을 치운다.
+fn take_result(path: &Path, id: &str) -> Option<PaymentResult> {
+    let r = fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<PaymentResult>(&s).ok())
+        .filter(|r| r.id == id)?;
+    let _ = fs::remove_file(path);
+    Some(r)
+}
+
+/// GUI 가 쓴 결제 시도 기록(개발 66). 없거나 못 읽으면 None.
+fn read_attempt(dir: &Path, id: &str) -> Option<crate::policy::AttemptRecord> {
+    let path = crate::policy::attempt_path(dir, id)?;
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+/// x402 직접 제출의 **증거 재료**를 남긴다 (개발 66 — 형식만, 읽는 쪽은 다음 세션의 재제출 경로).
+///
+/// 영수증이 늦거나 MCP 가 중간에 죽으면 그 결제의 증거 재료(clientNonce·seed·챌린지)가 이 호출의
+/// 메모리와 함께 사라졌다 — tx 해시만으로는 서버가 nonce 를 다시 만들 수 없어 **나중에 채굴이 끝나도
+/// 콘텐츠를 받을 길이 없었다**(개발 64 코덱스 P1). 요청 id 로 묶어 GUI 의 결제 시도 기록 옆에 둔다 —
+/// 그쪽이 tx 해시를, 이쪽이 증거 재료를 갖고 있어 둘을 합치면 제출물을 다시 만들 수 있다.
+///
+/// 비밀은 없다(모두 서버와 체인에 공개되는 값이다). 실패해도 결제는 막지 않는다 — 부가 기록이다.
+pub fn write_proof(id: &str, proof: &ProofRecord) {
+    let Some(path) = jigap_dir()
+        .ok()
+        .and_then(|d| crate::policy::proof_path(&d, id))
+    else {
+        return;
+    };
+    if let Ok(json) = serde_json::to_string_pretty(proof) {
+        let _ = write_atomic(&path, json.as_bytes());
+    }
+}
+
+/// `<id>.proof.json` 의 내용 — 402 챌린지 원문 + 우리가 정한 신선도 값. 재제출은 이걸 `x402::parse_required`
+/// → `pick_requirement` → `build_direct_submission` 에 그대로 다시 먹이면 된다(flow.rs 가 쓰는 그 함수들).
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct ProofRecord {
+    pub v: u32,
+    pub id: String,
+    pub created: u64,
+    pub chain_id: u64,
+    /// 결제 헤더를 보낼 곳 — 402 를 실제로 낸 최종 URL.
+    pub url: String,
+    /// `payment-required` 헤더(V2, base64) 원문. 없으면 None.
+    #[serde(default)]
+    pub challenge_header: Option<String>,
+    /// 402 본문 원문(V1). 너무 크면(`PROOF_BODY_CAP`) 비운다 — 그땐 `body_dropped`.
+    #[serde(default)]
+    pub challenge_body: String,
+    #[serde(default)]
+    pub body_dropped: bool,
+    #[serde(default)]
+    pub client_nonce: Option<String>,
+    #[serde(default)]
+    pub seed: Option<String>,
+    pub nonce: String,
+}
+
+/// 증거 기록에 싣는 402 본문 상한. V2 서버는 챌린지를 헤더로 주므로 본문이 커도 잃는 게 없고,
+/// V1 챌린지는 수 KB 다. 4 MiB 본문을 기록마다 복사하지 않으려는 선.
+pub const PROOF_BODY_CAP: usize = 64 * 1024;
 
 #[cfg(test)]
 mod tests {
@@ -745,5 +871,165 @@ mod tests {
         }
         assert!(path.exists(), "정상 반환이면 거두지 않는다");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── 개발 66: 시간 초과 뒤의 결말 ─────────────────────────────────────────────────────────
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("kura-mcp-late-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// GUI 가 쓰는 결제 시도 기록을 흉내 낸다(같은 경로 규칙 — shared/policy.rs).
+    fn write_attempt(dir: &Path, id: &str, state: &str, status: &str, tx: &str) {
+        let rec = crate::policy::AttemptRecord {
+            v: 1,
+            id: id.into(),
+            state: state.into(),
+            kind: "transfer".into(),
+            chain_id: 5_042_002,
+            started: 1,
+            updated: 1,
+            status: status.into(),
+            tx_hash: tx.into(),
+            detail: String::new(),
+            x402: None,
+        };
+        let path = crate::policy::attempt_path(dir, id).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_string(&rec).unwrap()).unwrap();
+    }
+
+    /// 승인이 시작된 적 없으면 예전과 같다 — None(= 「응답 없음」)이고, 요청은 거둔다.
+    #[tokio::test]
+    async fn timeout_with_nothing_started_is_none_and_withdraws() {
+        let dir = tmp_dir("none");
+        let req = dir.join("payment_request.json");
+        write_req(&req, "A");
+        let r = await_result_in(&dir, "A", Duration::ZERO, Duration::from_secs(5)).await;
+        assert!(r.is_none());
+        assert!(!req.exists(), "시간 초과면 요청을 거둔다");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 확실한 실패(비번 오류 뒤 사람이 떠난 경우 등)도 「아무것도 안 나감」이다.
+    #[tokio::test]
+    async fn failed_record_means_nothing_left() {
+        let dir = tmp_dir("failed");
+        write_req(&dir.join("payment_request.json"), "A");
+        write_attempt(&dir, "A", crate::policy::ATTEMPT_FAILED, "failed", "");
+        let r = await_result_in(&dir, "A", Duration::ZERO, Duration::from_secs(5)).await;
+        assert!(r.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 🔴 **개발 65 코덱스 #1** — 5분이 끝날 무렵 사람이 승인해 GUI 가 전송 중이면, 「응답 없음」이
+    /// 아니라 **전송이 끝나기를 기다렸다가 그 결말**을 돌려준다. 요청을 거둔 뒤라 GUI 는 결과 파일을
+    /// 안 쓴다(남의 결과를 덮지 않으려고) — 결말은 기록에서 온다.
+    #[tokio::test]
+    async fn timeout_while_gui_is_sending_returns_its_outcome() {
+        let dir = tmp_dir("sending");
+        let req = dir.join("payment_request.json");
+        write_req(&req, "A");
+        write_attempt(&dir, "A", crate::policy::ATTEMPT_SENDING, "", "");
+        let d2 = dir.clone();
+        let gui = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            write_attempt(&d2, "A", crate::policy::ATTEMPT_DONE, "approved", "0xT");
+        });
+        let r = await_result_in(&dir, "A", Duration::ZERO, Duration::from_secs(10))
+            .await
+            .expect("전송 중이던 승인은 None(응답 없음)이 아니다");
+        assert_eq!((r.status.as_str(), r.tx_hash.as_str()), ("approved", "0xT"));
+        assert!(
+            !req.exists(),
+            "요청은 먼저 거둔다 — 새 승인이 시작되지 않게"
+        );
+        gui.await.unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 늦은 대기까지 넘겨도 GUI 가 끝내지 못했으면 **불명**이다 — 사람은 승인했고 돈이 나가는 중일 수 있다.
+    #[tokio::test]
+    async fn still_sending_after_the_late_wait_is_unknown() {
+        let dir = tmp_dir("stuck");
+        write_req(&dir.join("payment_request.json"), "A");
+        write_attempt(&dir, "A", crate::policy::ATTEMPT_SENDING, "", "");
+        let r = await_result_in(&dir, "A", Duration::ZERO, Duration::from_millis(800))
+            .await
+            .expect("불명은 None 이 아니다");
+        assert_eq!(r.status, "unknown");
+        assert!(!r.detail.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// GUI 가 이미 「불명」으로 끝냈으면 그 tx 해시가 그대로 넘어온다(MCP 가 영수증을 물어볼 수 있게).
+    #[tokio::test]
+    async fn unknown_record_carries_its_tx() {
+        let dir = tmp_dir("unknown");
+        write_req(&dir.join("payment_request.json"), "A");
+        write_attempt(&dir, "A", crate::policy::ATTEMPT_UNKNOWN, "unknown", "0xU");
+        let r = await_result_in(&dir, "A", Duration::ZERO, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!((r.status.as_str(), r.tx_hash.as_str()), ("unknown", "0xU"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 거두기 직전에 결과 파일이 들어왔으면 그걸 쓴다(기록보다 먼저 본다). 남의 id 결과는 안 가져간다.
+    #[tokio::test]
+    async fn result_that_raced_the_timeout_is_kept() {
+        let dir = tmp_dir("raced");
+        write_req(&dir.join("payment_request.json"), "A");
+        let res = dir.join("payment_result.json");
+        fs::write(
+            &res,
+            r#"{"id":"B","status":"approved","tx_hash":"0xB","detail":""}"#,
+        )
+        .unwrap();
+        assert!(
+            await_result_in(&dir, "A", Duration::ZERO, Duration::from_secs(1))
+                .await
+                .is_none(),
+            "남의 결과는 내 것이 아니다"
+        );
+        assert!(res.exists(), "남의 결과 파일은 건드리지 않는다");
+        fs::write(
+            &res,
+            r#"{"id":"A","status":"approved","tx_hash":"0xA","detail":""}"#,
+        )
+        .unwrap();
+        let r = await_result_in(&dir, "A", Duration::ZERO, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(r.tx_hash, "0xA");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 증거 재료 기록 형식 — 옛 판(필드 일부 없음)도 읽히고, 왕복이 같다.
+    #[test]
+    fn proof_record_roundtrips() {
+        let p = ProofRecord {
+            v: 1,
+            id: "7".into(),
+            created: 10,
+            chain_id: 5042,
+            url: "https://ex.com/a".into(),
+            challenge_header: Some("eyJ4".into()),
+            challenge_body: String::new(),
+            body_dropped: false,
+            client_nonce: Some("ab".into()),
+            seed: None,
+            nonce: "0x01".into(),
+        };
+        let back: ProofRecord = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+        let min: ProofRecord = serde_json::from_str(
+            r#"{"v":1,"id":"7","created":1,"chain_id":1,"url":"u","nonce":"0x"}"#,
+        )
+        .unwrap();
+        assert!(min.challenge_header.is_none() && !min.body_dropped);
     }
 }

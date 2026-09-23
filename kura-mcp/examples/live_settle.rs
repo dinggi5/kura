@@ -77,7 +77,7 @@ async fn main() {
     let result = match payment::await_result(&id, payment::APPROVAL_TIMEOUT).await {
         Some(r) => r,
         None => {
-            payment::cancel_request(&id);
+            // 요청은 await_result 가 거뒀다(개발 66).
             eprintln!("✗ 승인 시간 초과(5분).");
             std::process::exit(1);
         }

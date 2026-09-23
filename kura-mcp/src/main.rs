@@ -14,7 +14,7 @@
 // 핵심 보안: 비번은 절대 MCP/채팅에 노출되지 않는다. MCP는 결제를 "요청"만 하고, 서명·전송은
 // GUI 앱이 사람 승인을 받아 수행한다(파일 기반 IPC). 한도·긴급잠금도 GUI가 강제한다.
 
-use kura_mcp::flow::{self, X402Outcome, X402Result};
+use kura_mcp::flow::{self, X402Result};
 use kura_mcp::{erc8004, payment, wallet};
 
 use rmcp::{
@@ -198,7 +198,9 @@ impl WalletServer {
     #[tool(
         description = "Returns the active account's recent transaction attempts, newest first. status is one of sent, blocked, failed, \
         signed (x402 signed, awaiting settlement), settled (x402 settled, settle_tx is the settlement tx), \
-        or settle_failed. Use limit to cap how many come back (default 20)."
+        settle_failed, or unknown (a signed transaction was submitted but the wallet couldn't confirm the \
+        chain received it — detail is its tx hash; it may have gone through, so never resend on the strength \
+        of this entry alone). Use limit to cap how many come back (default 20)."
     )]
     async fn get_history(
         &self,
@@ -220,7 +222,11 @@ impl WalletServer {
         agent_id (the recipient's ERC-8004 number, if a service told you one — the wallet then shows the \
         user whether the address matches that agent's registered wallet). Per-payment and daily \
         limits and the emergency lock are enforced by the app. Never send a password as an argument — the \
-        user types it in the app. Returns: status (approved/rejected/failed), tx_hash, and an explorer link."
+        user types it in the app. Returns: status, tx_hash, detail, and an explorer link. status is approved \
+        (the chain accepted the transfer), rejected or failed (nothing was sent — safe to ask again), or \
+        unknown: the user approved but the wallet couldn't confirm whether the transfer reached the chain \
+        (tx_hash is set when known). unknown means it MAY have been sent — never ask again on your own; \
+        tell the user and have them check the history or the tx."
     )]
     async fn request_payment(
         &self,
@@ -265,16 +271,17 @@ impl WalletServer {
         this balance. Approval works exactly as in request_payment (password by default; automatic only when \
         the user has turned autopay on), and the app enforces per-payment and daily limits and the emergency \
         lock. Never send a password as an argument. Arguments: url (required), memo (what the payment is for \
-        — the user reads it to decide). Returns: paid, status, http_status, body, and amount/pay_to/settlement \
-        when paid; on a chain where the wallet broadcasts the payment itself, `tx` and `explorer` point at \
-        that transaction (both are empty on the facilitator-settled path). IMPORTANT — read `notice` when it \
-        is present, and never retry on the strength of an HTTP status alone. Only \"reverted\" (paid:false) \
-        means nothing was paid: the chain rejected the transfer, only gas was spent, and trying again is \
-        safe. \"pending\" and \"undelivered\" (both paid:true) mean the money ALREADY left the wallet and the \
-        server did not credit it — asking again pays a second time, so stop and tell the user, showing the \
-        tx. The same holds when the wallet broadcast the payment and the reply carries a non-empty `tx` with \
-        status \"settlement_failed\": the server refused the proof AFTER the money moved, and it may answer \
-        with a fresh 402 challenge that reads as if the payment never happened."
+        — the user reads it to decide). Returns: payment, paid, status, http_status, body, and \
+        amount/pay_to/settlement when paid; on a chain where the wallet broadcasts the payment itself, `tx` and \
+        `explorer` point at that transaction (both are empty on the facilitator-settled path). IMPORTANT — \
+        decide on `payment`, which says where the money is: \"none\" = nothing was paid, trying again is safe \
+        (declined, no 402, or \"reverted\": the chain rejected the transfer and only gas was spent); \
+        \"confirmed\" = the money left the wallet; \"unknown\" = it MAY have left (status pending/unknown, or \
+        settlement_failed on the facilitator path, where the server's refusal doesn't prove the facilitator \
+        didn't settle). For confirmed and unknown without content, asking again can pay a second time — stop \
+        and tell the user, showing the tx. `paid` is kept for older callers and is simply payment != \"none\". \
+        Read `notice` when present, and never retry on an HTTP status alone: after the money moved the server \
+        may answer with a fresh 402 challenge that reads as if the payment never happened."
     )]
     async fn x402_fetch(
         &self,
@@ -288,64 +295,8 @@ impl WalletServer {
             agent,
             agent_note,
         } = out;
-        let mut body = match outcome {
-            X402Outcome::NotPaid { http_status, body } => serde_json::json!({
-                "paid": false,
-                "status": "ok",
-                "http_status": http_status,
-                "body": body,
-            }),
-            X402Outcome::Declined { status, detail } => serde_json::json!({
-                "paid": false,
-                "status": status,   // rejected | failed
-                "detail": detail,
-            }),
-            // 🔴 **돈은 나갔는데 콘텐츠가 없다**(개발 64, 직접 제출). `paid: true` 로 내보내는 것이
-            // 핵심이다 — 「결제 안 됨」으로 읽히면 AI 가 같은 URL 을 다시 불러 **두 번 결제한다**.
-            X402Outcome::PaidNoContent {
-                tx,
-                explorer,
-                reason,
-                notice,
-            } => serde_json::json!({
-                // 🔴 **revert 는 결제가 안 된 것**이다 — 체인이 거절해 결제액은 그대로 있고 가스만
-                // 나갔다. 그걸 `paid: true` 로 내보내면 이번엔 반대 거짓말이 된다(못 받은 콘텐츠를
-                // 다시 사면 되는데 사지 말라고 하는 꼴). 「나갔는데 콘텐츠를 못 받았다」는 pending·undelivered.
-                "paid": kura_mcp::arc_direct::paid_without_content(&reason),
-                "status": reason,       // pending | undelivered | reverted
-                "tx": tx,
-                "explorer": explorer,
-                "notice": notice,
-            }),
-            X402Outcome::Paid {
-                notice,
-                tx,
-                explorer,
-                http_status,
-                ok,
-                amount,
-                pay_to,
-                resource,
-                settlement,
-                body,
-            } => serde_json::json!({
-                "paid": true,
-                "status": if ok { "ok" } else { "settlement_failed" },
-                "http_status": http_status,
-                "amount": amount,
-                "asset": "USDC",
-                "pay_to": pay_to,
-                "resource": resource,
-                // 직접 제출이면 **우리가 올린 트랜잭션**. `settlement_failed` 일 때 이게 없으면
-                // 돈은 나갔는데 행방을 알 길이 없다(코드 리뷰 P2).
-                "tx": tx,
-                "explorer": explorer,
-                "settlement": settlement,   // X-PAYMENT-RESPONSE (base64) — 정산 증빙
-                // 빈 값이 아니면 **돈은 나갔는데 서버가 증거를 안 받은 것**이다 — 재시도 금지.
-                "notice": notice,
-                "body": body,
-            }),
-        };
+        // 모양은 flow 가 한 곳에서 만든다 — CLI(`kura x402 --json`)와 같은 JSON 이다(개발 66).
+        let mut body = outcome.to_json();
         // 대조 결과는 사람(승인 창)과 AI 가 같이 본다 — 여기선 사실만, 판정은 없다.
         if let Some(a) = agent {
             body["agent"] = serde_json::to_value(a).unwrap_or(serde_json::Value::Null);

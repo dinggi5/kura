@@ -427,6 +427,25 @@ async fn cmd_pay(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                 "{}",
                 ts!("✗ 사용자가 거부했어요.", "✗ The user rejected it.")
             ),
+            // 🔴 나갔는지 모른다(개발 66) — 「실패」로 찍으면 사람이 다시 보낸다. tx 를 먼저 보여 준다.
+            "unknown" => {
+                eprintln!(
+                    "{}",
+                    ts!(
+                        "△ 전송 결과를 확인하지 못했어요 — 나갔을 수 있어요. 다시 보내기 전에 내역을 확인하세요.",
+                        "△ The transfer's outcome couldn't be confirmed — it may have gone through. Check the history before sending again."
+                    )
+                );
+                if !out.tx_hash.is_empty() {
+                    eprintln!("  tx    {}", out.tx_hash);
+                }
+                if !out.explorer.is_empty() {
+                    eprintln!("{}", tf!("  보기  {}", "  view  {}", out.explorer));
+                }
+                if !out.detail.is_empty() {
+                    eprintln!("{}", out.detail);
+                }
+            }
             _ => eprintln!(
                 "{}",
                 tf!(
@@ -540,6 +559,11 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                             "△ 결제는 끝났는데 그 증거를 서버에 보내지 못했어요.",
                             "△ The payment completed, but its proof never reached the server."
                         )
+                    } else if reason == "unknown" {
+                        ts!(
+                            "△ 결제가 나갔는지 확인하지 못했어요 — 나갔을 수 있어요.",
+                            "△ Couldn't confirm whether the payment went out — it may have."
+                        )
                     } else {
                         ts!(
                             "△ 결제는 나갔는데 확인이 늦어 콘텐츠를 못 받았어요.",
@@ -547,7 +571,9 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                         )
                     }
                 );
-                eprintln!("{}", tf!("  tx  {tx}", "  tx  {tx}"));
+                if !tx.is_empty() {
+                    eprintln!("{}", tf!("  tx  {tx}", "  tx  {tx}"));
+                }
                 if !explorer.is_empty() {
                     eprintln!("{}", tf!("  링크  {explorer}", "  link  {explorer}"));
                 }
@@ -661,11 +687,7 @@ fn agent_opt(cli: &Cli) -> Result<Option<u64>, String> {
     }
 }
 
-fn x402_json(
-    out: &X402Outcome,
-    agent: Option<&AgentTrust>,
-    agent_note: &str,
-) -> serde_json::Value {
+fn x402_json(out: &X402Outcome, agent: Option<&AgentTrust>, agent_note: &str) -> serde_json::Value {
     let mut v = x402_outcome_json(out);
     if let Some(a) = agent {
         v["agent"] = serde_json::to_value(a).unwrap_or(serde_json::Value::Null);
@@ -677,52 +699,7 @@ fn x402_json(
 }
 
 fn x402_outcome_json(out: &X402Outcome) -> serde_json::Value {
-    match out {
-        X402Outcome::NotPaid { http_status, body } => serde_json::json!({
-            "paid": false, "status": "ok", "http_status": http_status, "body": body,
-        }),
-        X402Outcome::Declined { status, detail } => serde_json::json!({
-            "paid": false, "status": status, "detail": detail,
-        }),
-        // 돈이 나갔다는 사실을 `paid: true` 로 정직하게 싣는다 — 자동화가 «안 냈다»로 읽고
-        // 다시 부르면 두 번 결제된다.
-        X402Outcome::PaidNoContent {
-            tx,
-            explorer,
-            reason,
-            notice,
-        } => serde_json::json!({
-            // 🔴 revert 는 **결제액이 안 나간 것**이다(가스만 나갔다) → paid=false.
-            // pending·undelivered 는 「나갔는데 콘텐츠를 못 받았다」다. 뭉치면 한쪽이 거짓말이 된다.
-            "paid": kura_mcp::arc_direct::paid_without_content(reason),
-            "status": reason, "tx": tx, "explorer": explorer, "notice": notice,
-        }),
-        X402Outcome::Paid {
-            notice,
-            tx,
-            explorer,
-            http_status,
-            ok,
-            amount,
-            pay_to,
-            resource,
-            settlement,
-            body,
-        } => serde_json::json!({
-            "paid": true,
-            "status": if *ok { "ok" } else { "settlement_failed" },
-            "http_status": http_status,
-            "amount": amount,
-            "asset": "USDC",
-            "pay_to": pay_to,
-            "resource": resource,
-            "tx": tx,
-            "explorer": explorer,
-            "notice": notice,
-            "settlement": settlement,
-            "body": body,
-        }),
-    }
+    out.to_json() // MCP 와 같은 모양 — 한 곳(flow)에서 만든다(개발 66).
 }
 
 // ── 표시 헬퍼 (순수 함수 — 테스트됨) ────────────────────────────────────────
@@ -764,6 +741,7 @@ fn status_label(status: &str, lang: Lang) -> &str {
         "signed" => ("서명됨(정산대기)", "signed (awaiting settlement)"),
         "settled" => ("정산됨", "settled"),
         "settle_failed" => ("정산실패", "settlement failed"),
+        "unknown" => ("확인 필요", "unconfirmed"),
         // 모르는 코드는 그대로 — 새 status 가 생겨도 원문이 보이는 편이 낫다(옛 status_ko 와 같다).
         other => return other,
     };

@@ -315,9 +315,10 @@ pub struct HistoryEntry {
     pub to: String,
     /// 금액 (십진수 문자열).
     pub amount: String,
-    /// "sent" | "blocked" | "failed" | "signed"(x402 서명·정산 대기) | "settled"(x402 정산됨) | "settle_failed".
+    /// "sent" | "blocked" | "failed" | "signed"(x402 서명·정산 대기) | "settled"(x402 정산됨) | "settle_failed"
+    /// | "unknown"(개발 66 — 서명한 tx 를 냈는데 체인이 받았는지 모름. 한도는 환불하지 않았다).
     pub status: String,
-    /// sent=tx 해시, blocked/failed=사유, signed=인가 nonce(정산 매칭용).
+    /// sent·unknown=tx 해시, blocked/failed=사유, signed=인가 nonce(정산 매칭용).
     pub detail: String,
     /// x402 정산 tx 해시(페이실리테이터가 온체인 제출). 정산 전엔 빈 문자열. (Session 14)
     #[serde(default)]
@@ -378,6 +379,126 @@ fn scheme_start(s: &str, min: usize, sep: usize) -> Option<usize> {
     } else {
         None
     }
+}
+
+// ── 결제 시도 기록 `~/.jigap/approvals/` (개발 66) ─────────────────────────────────────────────
+//
+// 🔴 **「결과 불명」을 프로세스 밖에 남기는 자리.** 개발 65 까지 GUI 의 「승인 진행 중」은 메모리
+// (`APPROVALS_IN_FLIGHT`)에만 있었다. 그래서 MCP 가 승인 대기 5분을 채우면 — 사람이 막 비번을 넣어
+// GUI 가 **전송 중**이어도 — 요청을 거두고 「사용자가 응답하지 않았어요」라고 답했다. 돈은 나가고,
+// GUI 의 결과는 요청이 사라졌다고 버려지고, AI 는 재시도한다 = 이중 결제(개발 65 코덱스 #1).
+//
+// 요청 id 하나에 파일 둘. **파일마다 쓰는 쪽은 하나뿐이다**(두 프로세스가 같은 파일을 고치지 않는다):
+//   - `<id>.json`       — GUI 가 쓴다. 승인 처리의 상태(sending → done | failed | unknown)와 결과.
+//   - `<id>.proof.json` — MCP 가 쓴다. x402 직접 제출의 증거 재료(뒤늦게 서버에 낼 수 있게 — 개발 65
+//                          「다음」 2번의 형식. 읽는 쪽(재제출 경로)은 다음 세션이다).
+//
+// 순서 규약(경합을 닫는 것은 이 순서다 — 두 프로세스 사이엔 잠금이 없다):
+//   GUI  : 기록을 `sending` 으로 **먼저 쓰고** → 그다음 요청 파일이 아직 있는지 본다 → 있으면 진행.
+//   MCP  : 시간 초과면 요청 파일을 **먼저 지우고** → 그다음 기록을 읽는다.
+// 그러면 GUI 가 요청을 보고 진행했다면 그 기록은 MCP 가 지우기 전에 쓰였으므로 MCP 가 반드시 본다.
+// GUI 가 요청을 못 봤다면 진행하지 않고 기록을 되돌린다(MCP 가 그 사이 `sending` 을 봤다면 곧 사라진다).
+
+/// 결제 시도 기록 디렉터리 이름.
+pub const APPROVALS_DIR: &str = "approvals";
+
+/// 기록을 남겨 두는 기간(초). 뒤늦은 증거 제출 창(상대 서버 600초)과 사람이 내역을 보고 따져 볼 시간을
+/// 넉넉히 덮는다. 파일은 수백 바이트라 7일치여도 작다.
+pub const APPROVAL_KEEP_SECS: u64 = 7 * 24 * 3600;
+
+/// 승인 처리를 시작했다(GUI). 아직 체인으로 나갔는지 모른다 — **이 상태로 멈춰 있으면 「불명」이다**
+/// (앱이 전송 중에 죽은 경우).
+pub const ATTEMPT_SENDING: &str = "sending";
+/// 끝났다 — 송금은 체인이 받았고, 서명은 만들어졌다. 결과(`status == "approved"`)가 함께 있다.
+pub const ATTEMPT_DONE: &str = "done";
+/// 확실히 아무것도 안 나갔다(비번 오류·한도·잠금·체인이 거절). 요청은 살아 있어 다시 승인할 수 있다.
+pub const ATTEMPT_FAILED: &str = "failed";
+/// 서명한 트랜잭션을 냈는데 **받혔는지 모른다**(응답 유실·시간 초과). tx 해시는 안다.
+pub const ATTEMPT_UNKNOWN: &str = "unknown";
+
+/// 요청 id 가 파일 이름으로 써도 되는 모양인가. id 는 MCP 가 만든 나노초 숫자지만 요청 파일은 로컬의
+/// 다른 프로세스가 쓴 입력이다 — `../` 같은 값으로 디렉터리 밖을 쓰게 두지 않는다.
+pub fn attempt_id_ok(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// GUI 가 쓰는 기록 경로. id 가 이상하면 None(기록을 안 남긴다 — 그 요청은 GUI 도 처리하지 않는다).
+pub fn attempt_path(dir: &Path, id: &str) -> Option<PathBuf> {
+    attempt_id_ok(id).then(|| dir.join(APPROVALS_DIR).join(format!("{id}.json")))
+}
+
+/// MCP 가 쓰는 증거 재료 경로. (GUI 는 안 쓴다 — 디렉터리째 청소만 한다.)
+#[allow(dead_code)]
+pub fn proof_path(dir: &Path, id: &str) -> Option<PathBuf> {
+    attempt_id_ok(id).then(|| dir.join(APPROVALS_DIR).join(format!("{id}.proof.json")))
+}
+
+/// GUI 의 승인 처리 기록 1건 — `PaymentResult`(결과 파일)와 같은 필드를 싣는다. 결과 파일은 **한 칸뿐**이라
+/// 요청이 사라지면 GUI 가 결과를 안 쓴다(남의 결과를 덮지 않으려고, 개발 51). 이 기록은 id 마다 따로라
+/// 그 제약이 없다 — MCP 는 시간 초과 뒤에도 여기서 결말을 읽는다.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AttemptRecord {
+    /// 형식 판. 필드를 더할 땐 `#[serde(default)]` 로 — 판을 올리는 건 뜻이 바뀔 때만.
+    pub v: u32,
+    pub id: String,
+    /// `ATTEMPT_*` 중 하나.
+    pub state: String,
+    /// 요청의 kind(transfer | x402 | x402-direct) — 읽는 쪽이 「서명만 했나, 전송했나」를 가른다.
+    pub kind: String,
+    pub chain_id: u64,
+    pub started: u64,
+    pub updated: u64,
+    /// 끝난 뒤의 결과 — `PaymentResult` 와 같은 뜻(approved | unknown | failed).
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub tx_hash: String,
+    #[serde(default)]
+    pub detail: String,
+    /// x402 서명 결과(서명 갈래에서만). 크레이트마다 타입이 달라 값 그대로 싣는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x402: Option<serde_json::Value>,
+}
+
+/// 이 기록이 있는 id 로 **승인을 다시 시작해도 되는가**(GUI `begin_approval`).
+///
+/// `failed` 와 기록 없음만 된다. `done`·`unknown` 은 돈이 나갔거나 나갔을 수 있다 — 같은 요청을 한 번 더
+/// 승인하면 두 번째 결제다. `sending` 이 남아 있는데 진행 중인 승인이 없다면 **앱이 전송 중에 죽은 것**이라
+/// 그것도 「불명」이다.
+pub fn attempt_allows_retry(prev: Option<&AttemptRecord>) -> bool {
+    match prev {
+        None => true,
+        Some(r) => r.state == ATTEMPT_FAILED,
+    }
+}
+
+/// MCP 가 승인 대기 시간을 넘긴 뒤(요청 파일을 거둔 **뒤**) 기록을 보고 할 일. (MCP 만 쓴다.)
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+pub enum AfterTimeout {
+    /// 승인이 시작된 적 없거나 확실히 실패했다 — 아무것도 안 나갔다. 예전의 「시간 초과」 그대로.
+    NothingSent,
+    /// GUI 가 아직 처리 중이다 — 조금 더 기다린다.
+    StillSending,
+    /// 끝났다(done | unknown) — 이 기록의 결과를 결과 파일 대신 쓴다.
+    Finished,
+}
+
+#[allow(dead_code)]
+pub fn after_timeout(rec: Option<&AttemptRecord>) -> AfterTimeout {
+    match rec.map(|r| r.state.as_str()) {
+        Some(ATTEMPT_SENDING) => AfterTimeout::StillSending,
+        Some(ATTEMPT_DONE) | Some(ATTEMPT_UNKNOWN) => AfterTimeout::Finished,
+        // failed(비번 오류 뒤 사람이 떠난 경우 등)·모르는 상태·기록 없음 → 나간 것이 없다.
+        // 모르는 상태를 여기로 접는 게 위험하지 않은가: 모르는 값은 새 앱이 새 상태를 만든 경우인데,
+        // 그 앱은 하트비트 kinds 로 이미 걸러진다. 그래도 한 줄 남긴다 — 새 상태를 만들면 여기부터 고칠 것.
+        _ => AfterTimeout::NothingSent,
+    }
+}
+
+/// 이 기록 파일을 지워도 되는가(GUI 감시 스레드의 청소). 수정 시각 기준.
+pub fn attempt_prunable(age_secs: u64) -> bool {
+    age_secs > APPROVAL_KEEP_SECS
 }
 
 #[cfg(test)]
@@ -758,5 +879,74 @@ mod tests {
         assert_eq!(list[2].address, "0xTwo"); // 중복은 먼저 온 것(안정 정렬)
         assert_eq!(pick_active(&list, 2).address, "0xTwo");
         assert_eq!(pick_active(&list, 9).index, 0);
+    }
+
+    // 🔴 결제 시도 기록 (개발 66) — 다시 승인해도 되는 건 「기록 없음」과 「확실한 실패」뿐.
+    #[test]
+    fn attempt_retry_and_timeout_rules() {
+        let mk = |state: &str| AttemptRecord {
+            v: 1,
+            id: "1".into(),
+            state: state.into(),
+            kind: "transfer".into(),
+            chain_id: 5042,
+            started: 1,
+            updated: 1,
+            status: String::new(),
+            tx_hash: String::new(),
+            detail: String::new(),
+            x402: None,
+        };
+        assert!(attempt_allows_retry(None));
+        assert!(attempt_allows_retry(Some(&mk(ATTEMPT_FAILED))));
+        for s in [ATTEMPT_SENDING, ATTEMPT_DONE, ATTEMPT_UNKNOWN, "weird"] {
+            assert!(
+                !attempt_allows_retry(Some(&mk(s))),
+                "{s} 는 다시 승인하면 안 된다"
+            );
+        }
+        assert_eq!(after_timeout(None), AfterTimeout::NothingSent);
+        assert_eq!(
+            after_timeout(Some(&mk(ATTEMPT_FAILED))),
+            AfterTimeout::NothingSent
+        );
+        assert_eq!(
+            after_timeout(Some(&mk(ATTEMPT_SENDING))),
+            AfterTimeout::StillSending
+        );
+        assert_eq!(
+            after_timeout(Some(&mk(ATTEMPT_DONE))),
+            AfterTimeout::Finished
+        );
+        assert_eq!(
+            after_timeout(Some(&mk(ATTEMPT_UNKNOWN))),
+            AfterTimeout::Finished
+        );
+        // 옛 필드만 있는 기록도 읽힌다(결과 필드는 기본값).
+        let r: AttemptRecord = serde_json::from_str(
+            r#"{"v":1,"id":"9","state":"sending","kind":"x402","chain_id":1,"started":1,"updated":1}"#,
+        )
+        .unwrap();
+        assert_eq!(r.status, "");
+        assert!(r.x402.is_none());
+    }
+
+    // id 가 경로를 벗어나지 못한다.
+    #[test]
+    fn attempt_paths_refuse_odd_ids() {
+        let d = Path::new("/h/.jigap");
+        assert_eq!(
+            attempt_path(d, "1789").unwrap(),
+            PathBuf::from("/h/.jigap/approvals/1789.json")
+        );
+        assert_eq!(
+            proof_path(d, "1789").unwrap(),
+            PathBuf::from("/h/.jigap/approvals/1789.proof.json")
+        );
+        for bad in ["", "../x", "a/b", "1.json", &"9".repeat(65)] {
+            assert!(attempt_path(d, bad).is_none(), "{bad}");
+        }
+        assert!(!attempt_prunable(APPROVAL_KEEP_SECS));
+        assert!(attempt_prunable(APPROVAL_KEEP_SECS + 1));
     }
 }

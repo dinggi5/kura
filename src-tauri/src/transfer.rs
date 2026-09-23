@@ -21,6 +21,7 @@ use crate::lock::read_lock;
 use crate::settings::{effective_rpc, read_settings, redact_urls};
 use crate::trusted::record_trusted;
 use crate::wallet::{active_account_index, unlock_signer, with_pinned_account};
+use alloy::sol_types::SolCall;
 
 /// 잔액 — 보기 좋게 다듬기 전의 십진수 문자열.
 ///
@@ -51,8 +52,17 @@ pub(crate) fn humanize_chain_error(raw: &str, token: &str) -> String {
         )
         .into();
     }
-    // 가스(또는 ETH 송금액) 부족 — 트랜잭션을 낼 ETH가 모자람(가스는 항상 ETH라 토큰 무관).
+    // 가스(또는 ETH 송금액) 부족 — 트랜잭션을 낼 가스 토큰이 모자람(토큰 인자와 무관 — 가스 토큰의 문제다).
+    // 🔴 가스가 곧 USDC 인 체인(Arc)에선 「ETH가 부족해요」가 틀린 말이다(개발 66, 실물 RPC 하네스에서 발견) —
+    // 사용자는 가진 적도 없는 ETH 를 사러 간다.
     if low.contains("insufficient funds") {
+        if active_chain().native_is_usdc {
+            return ts!(
+                "USDC가 부족해요(가스 포함). 이 체인은 가스도 USDC로 내요 — 조금 충전한 뒤 다시 시도하세요.",
+                "Not enough USDC (gas included). Gas on this chain is paid in USDC — add a little and try again."
+            )
+            .into();
+        }
         return ts!(
             "ETH가 부족해요(가스 포함). ETH를 조금 충전한 뒤 다시 시도하세요.",
             "Not enough ETH (gas included). Add a little ETH and try again."
@@ -194,21 +204,219 @@ pub(crate) fn parse_to_addr(to: &str) -> Result<Address, String> {
     })
 }
 
-/// 서명 가능한(지갑 붙은) provider 를 만든다. x402 직접 제출(개발 64)도 같은 것을 쓴다 —
-/// 그 갈래는 서명이 아니라 **온체인 전송**이라 송금과 같은 배관을 타야 한다.
-pub(crate) async fn signing_provider(signer: PrivateKeySigner) -> Result<impl Provider, String> {
-    let wallet = EthereumWallet::from(signer);
-    ProviderBuilder::new()
-        .wallet(wallet)
-        .connect(&effective_rpc())
+// ---------- 전송: 「확실히 안 나감」과 「나갔는지 모름」을 가른다 (개발 66) ----------
+//
+// 개발 65 까지 송금 세 갈래(ETH·USDC·x402 직접 제출)는 `.send()` 하나로 채우기·서명·제출을 한꺼번에
+// 했고, 오류가 나면 전부 「안 나갔다」로 보고 한도를 환불하고 "failed" 로 적었다. 그런데 오류가
+// **제출 뒤**에 났다면 — RPC 가 tx 를 받아 퍼뜨린 뒤 응답만 유실됐다면 — 돈은 나갔다. 그걸 실패라고
+// 말하면 사람은 다시 누르고 AI 는 다시 요청한다. 새 nonce 로 **한 번 더** 나간다(개발 64 코덱스 P1).
+//
+// 그래서 둘로 나눈다. ① 채우기·서명(여기까지의 실패는 확실히 안 나감) ② 제출. 서명이 끝난 순간
+// **tx 해시를 이미 안다** — 제출 결과를 모르면 그 해시를 들고 「불명」으로 돌려준다.
+// 그리고 같은 서명 바이트를 다시 내는 건 **멱등**이다(같은 nonce·같은 해시 — 두 번 나갈 수 없다).
+// 그래서 불명이면 한 번 되묻고(해시 조회) 한 번 다시 낸다 — 대부분의 「응답만 유실」은 여기서 풀린다.
+
+/// 채우기(nonce·가스·수수료 조회 + 서명) 상한. 여기서 멈추면 아무것도 안 나갔다 → 확실한 실패.
+const FILL_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// 제출(eth_sendRawTransaction) 상한. 🔴 이걸 넘기면 「실패」가 아니라 「불명」이다 — 개발 51 이 이 자리에
+/// 상한을 **못** 걸었던 이유(상한 = 실패로 둔갑)가 불명 상태가 생기면서 사라졌다.
+const SEND_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// 불명일 때 해시 되묻기 상한.
+const LOOKUP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 송금 코어의 실패. 둘을 한 문자열로 뭉치면 호출자가 한도를 환불하고 요청을 되살려 **다시 보낼 수 있게** 된다.
+#[derive(Debug)]
+pub(crate) enum SendError {
+    /// 확실히 아무것도 안 나갔다 — 한도는 환불됐고, 다시 시도해도 된다.
+    Failed(String),
+    /// 서명한 tx 를 냈는데 받혔는지 모른다. 한도는 **환불하지 않았고**, 다시 보내면 두 번 나갈 수 있다.
+    Unknown { hash: String, msg: String },
+}
+
+impl From<String> for SendError {
+    fn from(e: String) -> Self {
+        SendError::Failed(e)
+    }
+}
+
+impl From<&str> for SendError {
+    fn from(e: &str) -> Self {
+        SendError::Failed(e.to_string())
+    }
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendError::Failed(m) => f.write_str(m),
+            SendError::Unknown { msg, .. } => f.write_str(msg),
+        }
+    }
+}
+
+impl SendError {
+    /// 사람이 읽을 한 문장 — 화면에서 직접 보낸 송금(`send_usdc` 커맨드)처럼 문자열 오류만 나갈 수
+    /// 있는 자리용. 불명이면 「다시 보내지 말라」가 문장에 들어가야 한다.
+    pub(crate) fn into_message(self) -> String {
+        match self {
+            SendError::Failed(m) => m,
+            SendError::Unknown { msg, .. } => msg,
+        }
+    }
+
+    /// 사람이 읽을 문장(빌림) — 테스트·로그용.
+    #[cfg(test)]
+    pub(crate) fn contains(&self, pat: &str) -> bool {
+        self.to_string().contains(pat)
+    }
+}
+
+/// 제출 오류의 판정.
+#[derive(Debug, PartialEq)]
+enum SendFault {
+    /// 노드가 받아서 거절했다(JSON-RPC 오류 응답·HTTP 4xx) 또는 보내기 전에 로컬에서 실패 — 안 나갔다.
+    Rejected,
+    /// 노드가 「이미 가지고 있다」고 답했다 — 같은 tx 가 이미 들어가 있다 = 나갔다.
+    AlreadyKnown,
+    /// 요청이 노드에 닿았는지·처리됐는지 모른다(연결 끊김·5xx·응답 해석 실패·빈 응답).
+    Unknown,
+}
+
+/// alloy 의 전송 오류를 셋으로 가른다 (순수 — 테스트용).
+///
+/// 기준은 「노드가 이 요청을 처리했다는 증거가 있는가」다. JSON-RPC 오류 응답은 노드가 읽고 거절한 것이고,
+/// 4xx 는 요청을 처리하기 전에 막은 것이다(요율 제한·인증). 5xx 는 앞단(게이트웨이)이 뒤로 넘긴 뒤 났을 수
+/// 있어 모른다. 연결 수준 오류(`Custom`)는 연결 전 실패일 수도 있지만 우리가 가를 수 없다 — 모르는 쪽으로
+/// 접는다. 불명은 되묻기·재제출로 대부분 풀리므로 이 보수가 비싸지 않다.
+fn classify_send_error(e: &alloy::providers::transport::TransportError) -> SendFault {
+    use alloy::providers::transport::{RpcError, TransportErrorKind};
+    match e {
+        RpcError::ErrorResp(p) => {
+            let m = p.message.to_lowercase();
+            // geth/reth/erigon "already known", nethermind "AlreadyKnown", besu "Known transaction".
+            if m.contains("already known")
+                || m.contains("alreadyknown")
+                || m.contains("known transaction")
+            {
+                SendFault::AlreadyKnown
+            } else {
+                SendFault::Rejected
+            }
+        }
+        RpcError::SerError(_) | RpcError::LocalUsageError(_) | RpcError::UnsupportedFeature(_) => {
+            SendFault::Rejected
+        }
+        RpcError::Transport(TransportErrorKind::HttpError(h)) if (400..500).contains(&h.status) => {
+            SendFault::Rejected
+        }
+        _ => SendFault::Unknown,
+    }
+}
+
+/// 트랜잭션을 채워 서명하고 제출한다. 반환: 확실히 받혔으면 해시, 아니면 `SendError`.
+///
+/// 호출자는 `Box::pin` 으로 부른다 — alloy 제공자의 채우기 future 가 깊어서, 승인 경로(체인·계정 고정이
+/// 몇 겹 둘러싼)에 그대로 넣으면 컴파일러의 타입 깊이 한도를 넘는다(개발 66 실측).
+///
+/// 한도 환불·내역 기록은 **호출자**가 한다(갈래마다 내역 문구가 다르다) — 이 함수는 판정만 정확히 돌려준다.
+/// `token` = 오류 문구 문맥(`humanize_chain_error`).
+pub(crate) async fn broadcast(
+    signer: &PrivateKeySigner,
+    tx: TransactionRequest,
+    token: &str,
+) -> Result<String, SendError> {
+    broadcast_via(&effective_rpc(), signer, tx, token).await
+}
+
+/// `broadcast` 의 속알맹이 — RPC 주소를 받는다. 테스트가 **가짜 RPC**(응답을 일부러 끊는)로 불명 갈래를
+/// 밟으려고 갈라 뒀다 — 실제 노드로는 「받았는데 응답만 유실」을 만들 수 없다.
+async fn broadcast_via(
+    rpc: &str,
+    signer: &PrivateKeySigner,
+    tx: TransactionRequest,
+    token: &str,
+) -> Result<String, SendError> {
+    use alloy::network::eip2718::Encodable2718;
+
+    // 제공자를 여기서 만든다 — 구체 타입이어야 채우기(`fill`)를 따로 부를 수 있다. (예전의
+    // `signing_provider` 는 `impl Provider` 를 돌려줘 `.send()` 한 방밖에 못 했다 — 개발 66 에 지웠다.)
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer.clone()))
+        .connect(rpc)
         .await
         .map_err(|e| {
-            tf!(
+            SendError::Failed(tf!(
                 "RPC 연결 실패: {}",
                 "Couldn't reach the RPC server: {}",
                 redact_urls(&e.to_string())
+            ))
+        })?;
+    let humanize =
+        |e: &dyn std::fmt::Display| humanize_chain_error(&redact_urls(&e.to_string()), token);
+
+    // ① 채우기 + 서명. 가스 추정이 revert(잔액 부족 등)를 여기서 잡는다 — 전부 「안 나감」.
+    let filled = match tokio::time::timeout(FILL_WAIT, provider.fill(tx)).await {
+        Ok(Ok(f)) => f,
+        Ok(Err(e)) => return Err(SendError::Failed(humanize(&e))),
+        Err(_) => {
+            return Err(SendError::Failed(
+                ts!(
+                "RPC 가 응답하지 않아 전송을 준비하지 못했어요. 아무것도 보내지 않았습니다.",
+                "The RPC server didn't answer, so the transfer wasn't prepared. Nothing was sent."
             )
-        })
+                .into(),
+            ))
+        }
+    };
+    let envelope = filled.try_into_envelope().map_err(|_| {
+        SendError::Failed(
+            ts!(
+                "트랜잭션에 서명하지 못했어요. 아무것도 보내지 않았습니다.",
+                "Couldn't sign the transaction. Nothing was sent."
+            )
+            .into(),
+        )
+    })?;
+    let hash = envelope.tx_hash().to_string();
+    let raw = envelope.encoded_2718();
+
+    // ② 제출.
+    let why = match tokio::time::timeout(SEND_WAIT, provider.send_raw_transaction(&raw)).await {
+        Ok(Ok(_)) => return Ok(hash),
+        Ok(Err(e)) => match classify_send_error(&e) {
+            SendFault::AlreadyKnown => return Ok(hash),
+            SendFault::Rejected => return Err(SendError::Failed(humanize(&e))),
+            SendFault::Unknown => redact_urls(&e.to_string()),
+        },
+        Err(_) => ts!("제출 응답 시간 초과", "no reply to the submission").to_string(),
+    };
+
+    // ③ 불명 — 되묻고, 한 번 다시 낸다(같은 바이트라 두 번 나갈 수 없다).
+    if let Ok(Ok(Some(_))) = tokio::time::timeout(
+        LOOKUP_WAIT,
+        provider.get_transaction_by_hash(envelope.tx_hash().to_owned()),
+    )
+    .await
+    {
+        return Ok(hash);
+    }
+    match tokio::time::timeout(SEND_WAIT, provider.send_raw_transaction(&raw)).await {
+        Ok(Ok(_)) => return Ok(hash),
+        Ok(Err(e)) if classify_send_error(&e) == SendFault::AlreadyKnown => return Ok(hash),
+        _ => {}
+    }
+    Err(SendError::Unknown {
+        msg: unknown_send_message(&hash, &why),
+        hash,
+    })
+}
+
+/// 불명일 때 사람·AI 에게 나가는 문장 — **다시 보내지 말라**가 핵심이다.
+pub(crate) fn unknown_send_message(hash: &str, why: &str) -> String {
+    tf!(
+        "전송이 체인에 들어갔는지 확인하지 못했어요({why}). tx {hash} — 나갔을 수 있으니 **다시 보내기 전에** 익스플로러나 내역에서 먼저 확인하세요.",
+        "Couldn't confirm whether the transfer reached the chain ({why}). tx {hash} — it may have gone through, so check the explorer or history **before sending again**."
+    )
 }
 
 /// 비번으로 키를 복호화해 활성 체인에서 ETH(가스 토큰)를 송금한다. tx 해시를 돌려준다.
@@ -226,19 +434,35 @@ pub(crate) async fn send_eth(
         send_eth_pinned(password, to, amount_eth),
     )
     .await
+    .map_err(SendError::into_message)
+}
+
+/// `send_eth` 와 같되 **실패의 종류를 보존한다**(개발 66) — 결제 승인(`approve_payment`)이 쓴다.
+/// 화면의 보내기 버튼은 문자열 오류만 받지만, 승인 흐름은 「불명」을 결과로 MCP 에 넘겨야 한다.
+pub(crate) async fn send_eth_checked(
+    password: String,
+    to: String,
+    amount_eth: String,
+) -> Result<String, SendError> {
+    let password = Zeroizing::new(password);
+    with_pinned_account(
+        active_account_index(),
+        send_eth_pinned(password, to, amount_eth),
+    )
+    .await
 }
 
 async fn send_eth_pinned(
     password: Zeroizing<String>,
     to: String,
     amount_eth: String,
-) -> Result<String, String> {
+) -> Result<String, SendError> {
     // 비번 → 서명자. 실패하면(비번 오류 등) 시도로 기록하고 거부.
     let signer = match unlock_signer(&password) {
         Ok(s) => s,
         Err(e) => {
             log_attempt("ETH", to.trim(), amount_eth.trim(), "failed", &e);
-            return Err(e);
+            return Err(e.into());
         }
     };
     let to_addr = to.clone();
@@ -253,7 +477,7 @@ pub(crate) async fn do_send_eth(
     signer: &PrivateKeySigner,
     to: String,
     amount_eth: String,
-) -> Result<String, String> {
+) -> Result<String, SendError> {
     // 작업 진입 시 체인·계정을 한 번 고정 — 이 송금의 한도·장부·RPC·내역이 모두 같은 체인·계정을 본다.
     with_pinned_chain(
         active_chain().chain_id,
@@ -269,7 +493,7 @@ async fn do_send_eth_inner(
     signer: &PrivateKeySigner,
     to: String,
     amount_eth: String,
-) -> Result<String, String> {
+) -> Result<String, SendError> {
     let amt = amount_eth.trim();
     // 🔴 네이티브가 곧 USDC 인 체인(Arc)에선 네이티브 송금 경로를 닫는다 (개발 50).
     // 여기서 보내는 "1"은 1 ETH 가 아니라 **1 USDC 를 18dp 로** 옮기는 것이라, 6dp 로 세는 한도·
@@ -282,7 +506,7 @@ async fn do_send_eth_inner(
         )
         .to_string();
         log_attempt("ETH", to.trim(), amt, "failed", &msg);
-        return Err(msg);
+        return Err(msg.into());
     }
     let value = parse_eth_nonneg(amt)?;
     if value.is_zero() {
@@ -320,37 +544,62 @@ async fn do_send_eth_inner(
         Ok(d) => d,
         Err(e) => {
             log_attempt("ETH", to, amt, "blocked", &e);
-            return Err(e);
+            return Err(e.into());
         }
     };
 
     // 네트워크 전송은 락 밖에서 — 실패하면 예약한 사용액을 환불한다(예약한 날에만).
-    let provider = match signing_provider(signer.clone()).await {
-        Ok(p) => p,
-        Err(e) => {
-            refund_spend("ETH", value, reserved_day).await;
-            log_attempt("ETH", to, amt, "failed", &e);
-            return Err(e);
-        }
-    };
     let tx = TransactionRequest::default()
         .with_to(to_addr)
         .with_value(value);
-    let pending = match provider.send_transaction(tx).await {
-        Ok(p) => p,
-        Err(e) => {
-            refund_spend("ETH", value, reserved_day).await;
-            let msg = humanize_chain_error(&redact_urls(&e.to_string()), "ETH");
-            log_attempt("ETH", to, amt, "failed", &msg);
-            return Err(msg);
-        }
-    };
-
-    // 전송 성공 → 내역 로그 (누적 사용액은 예약 단계에서 이미 기록됨).
-    let hash = pending.tx_hash().to_string();
-    log_attempt("ETH", to, amt, "sent", &hash);
-
+    let hash = settle_broadcast(
+        Box::pin(broadcast(signer, tx, "ETH")).await,
+        "ETH",
+        to,
+        amt,
+        value,
+        reserved_day,
+    )
+    .await?;
     Ok(hash)
+}
+
+/// 제출 결과를 내역·한도에 반영한다 — 송금 세 갈래(ETH·USDC·x402 직접 제출)가 **이 함수 하나**를 쓴다
+/// (개발 64·65 의 교훈: 같은 규칙을 갈래마다 두면 한쪽이 뒤처진다).
+///   받힘 → 내역 "sent" + 해시(누적 사용액은 예약 단계에서 이미 기록됨)
+///   확실한 실패 → 한도 환불 + 내역 "failed"
+///   불명 → 🔴 **환불하지 않는다**(나갔을 수 있다 — 한도를 되돌리면 한도 밖으로 한 번 더 나갈 길이 된다)
+///          + 내역 "unknown" + 해시 + 사람에게 알림(창이 없는 자율 경로도 있어서 알림이 유일한 통로다).
+pub(crate) async fn settle_broadcast(
+    sent: Result<String, SendError>,
+    token: &str,
+    to: &str,
+    amt: &str,
+    value: U256,
+    reserved_day: u64,
+) -> Result<String, SendError> {
+    match sent {
+        Ok(hash) => {
+            log_attempt(token, to, amt, "sent", &hash);
+            Ok(hash)
+        }
+        Err(SendError::Failed(msg)) => {
+            refund_spend(token, value, reserved_day).await;
+            log_attempt(token, to, amt, "failed", &msg);
+            Err(SendError::Failed(msg))
+        }
+        Err(SendError::Unknown { hash, msg }) => {
+            log_attempt(token, to, amt, "unknown", &hash);
+            crate::notify::show_notification(
+                ts!("전송 확인 필요", "Transfer needs checking"),
+                ts!(
+                    "보낸 결제가 체인에 들어갔는지 확인하지 못했어요. 다시 보내기 전에 내역을 먼저 확인하세요.",
+                    "A payment's arrival on-chain couldn't be confirmed. Check the history before sending again."
+                ),
+            );
+            Err(SendError::Unknown { hash, msg })
+        }
+    }
 }
 
 /// 비번으로 키를 복호화해 활성 체인에서 USDC(ERC20)를 송금한다. tx 해시를 돌려준다.
@@ -368,18 +617,34 @@ pub(crate) async fn send_usdc(
         send_usdc_pinned(password, to, amount_usdc),
     )
     .await
+    .map_err(SendError::into_message)
+}
+
+/// `send_usdc` 와 같되 **실패의 종류를 보존한다**(개발 66) — 결제 승인(`approve_payment`)이 쓴다.
+/// 화면의 보내기 버튼은 문자열 오류만 받지만, 승인 흐름은 「불명」을 결과로 MCP 에 넘겨야 한다.
+pub(crate) async fn send_usdc_checked(
+    password: String,
+    to: String,
+    amount_usdc: String,
+) -> Result<String, SendError> {
+    let password = Zeroizing::new(password);
+    with_pinned_account(
+        active_account_index(),
+        send_usdc_pinned(password, to, amount_usdc),
+    )
+    .await
 }
 
 async fn send_usdc_pinned(
     password: Zeroizing<String>,
     to: String,
     amount_usdc: String,
-) -> Result<String, String> {
+) -> Result<String, SendError> {
     let signer = match unlock_signer(&password) {
         Ok(s) => s,
         Err(e) => {
             log_attempt("USDC", to.trim(), amount_usdc.trim(), "failed", &e);
-            return Err(e);
+            return Err(e.into());
         }
     };
     let to_addr = to.clone();
@@ -393,7 +658,7 @@ pub(crate) async fn do_send_usdc(
     signer: &PrivateKeySigner,
     to: String,
     amount_usdc: String,
-) -> Result<String, String> {
+) -> Result<String, SendError> {
     // 작업 진입 시 체인·계정 고정 — decimals·USDC 컨트랙트·RPC·한도·장부·내역이 모두 같은 체인·계정.
     with_pinned_chain(
         active_chain().chain_id,
@@ -409,7 +674,7 @@ async fn do_send_usdc_inner(
     signer: &PrivateKeySigner,
     to: String,
     amount_usdc: String,
-) -> Result<String, String> {
+) -> Result<String, SendError> {
     let dec = active_chain().usdc_decimals;
     let amt = amount_usdc.trim();
     let value: U256 = parse_usdc_nonneg(amt, dec)?;
@@ -447,35 +712,29 @@ async fn do_send_usdc_inner(
         Ok(d) => d,
         Err(e) => {
             log_attempt("USDC", to, amt, "blocked", &e);
-            return Err(e);
+            return Err(e.into());
         }
     };
 
-    // 네트워크 전송은 락 밖에서 — 실패하면 예약한 사용액을 환불한다(예약한 날에만).
-    let provider = match signing_provider(signer.clone()).await {
-        Ok(p) => p,
-        Err(e) => {
-            refund_spend("USDC", value, reserved_day).await;
-            log_attempt("USDC", to, amt, "failed", &e);
-            return Err(e);
-        }
-    };
-    let usdc = IERC20::new(active_chain().usdc_address, &provider);
-    let pending = match usdc.transfer(to_addr, value).send().await {
-        Ok(p) => p,
-        Err(e) => {
-            refund_spend("USDC", value, reserved_day).await;
-            let msg = humanize_chain_error(&redact_urls(&e.to_string()), "USDC");
-            log_attempt("USDC", to, amt, "failed", &msg);
-            return Err(msg);
-        }
-    };
-
-    // 전송 성공 → 내역 로그 (누적 사용액은 예약 단계에서 이미 기록됨).
-    let hash = pending.tx_hash().to_string();
-    log_attempt("USDC", to, amt, "sent", &hash);
-
-    Ok(hash)
+    // 네트워크 전송은 락 밖에서 — 실패하면 예약한 사용액을 환불한다(예약한 날에만, settle_broadcast).
+    let tx = TransactionRequest::default()
+        .with_to(active_chain().usdc_address)
+        .with_input(
+            IERC20::transferCall {
+                to: to_addr,
+                amount: value,
+            }
+            .abi_encode(),
+        );
+    settle_broadcast(
+        Box::pin(broadcast(signer, tx, "USDC")).await,
+        "USDC",
+        to,
+        amt,
+        value,
+        reserved_day,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -498,6 +757,298 @@ mod tests {
         assert_eq!(&data[..4], &[0xa9, 0x05, 0x9c, 0xbb]);
         // 인자 2개(주소+금액) = 64바이트 → 셀렉터 포함 68바이트
         assert_eq!(data.len(), 68);
+    }
+
+    /// 🔴 **제출 오류의 판정** (개발 66, 개발 64 「다음」 3번) — 노드가 읽고 거절한 것만 「안 나감」이다.
+    /// 연결·5xx·해석 실패는 「모름」 — 예전엔 이것도 전부 「안 나감」이라 한도를 환불하고 다시 보낼 수 있었다.
+    #[test]
+    fn send_errors_split_rejected_from_unknown() {
+        use alloy::providers::transport::{RpcError, TransportError, TransportErrorKind};
+        let resp = |msg: &str| -> TransportError {
+            RpcError::ErrorResp(
+                serde_json::from_str(&format!(r#"{{"code":-32000,"message":"{msg}"}}"#)).unwrap(),
+            )
+        };
+        // 노드가 받아서 거절 — 안 나갔다.
+        assert_eq!(
+            classify_send_error(&resp("nonce too low")),
+            SendFault::Rejected
+        );
+        assert_eq!(
+            classify_send_error(&resp("insufficient funds for gas * price + value")),
+            SendFault::Rejected
+        );
+        // 이미 가지고 있다 — 같은 tx 가 들어가 있다 = 나갔다(클라이언트마다 문구가 다르다).
+        for m in ["already known", "AlreadyKnown", "Known transaction: 0xabc"] {
+            assert_eq!(
+                classify_send_error(&resp(m)),
+                SendFault::AlreadyKnown,
+                "{m}"
+            );
+        }
+        // HTTP 4xx = 처리 전에 막힘(요율 제한·인증) / 5xx = 앞단 뒤에서 났을 수 있어 모름.
+        assert_eq!(
+            classify_send_error(&TransportErrorKind::http_error(429, String::new())),
+            SendFault::Rejected
+        );
+        assert_eq!(
+            classify_send_error(&TransportErrorKind::http_error(502, String::new())),
+            SendFault::Unknown
+        );
+        // 연결 끊김·빈 응답·해석 실패 — 모른다.
+        assert_eq!(
+            classify_send_error(&TransportErrorKind::custom_str("connection reset")),
+            SendFault::Unknown
+        );
+        assert_eq!(classify_send_error(&RpcError::NullResp), SendFault::Unknown);
+    }
+
+    // ── 가짜 RPC: 「받았는데 응답만 유실」을 만든다 (개발 66) ─────────────────────────────────
+    //
+    // 실제 노드로는 불명 갈래를 못 밟는다. std 스레드 하나로 JSON-RPC 를 흉내 내고, 제출
+    // (eth_sendRawTransaction)에만 대본대로 반응한다: 연결을 그냥 끊기 / HTTP 오류 / JSON-RPC 오류 / 성공.
+    // 채우기에 필요한 조회(체인 id·nonce·가스)는 그럴듯한 값으로 답한다.
+
+    #[derive(Clone, Copy)]
+    enum Act {
+        /// 요청을 다 읽고 **응답 없이** 연결을 닫는다 = 노드가 받았는지 모르는 상태.
+        Drop,
+        Http(u16),
+        RpcErr(&'static str),
+        Ok,
+    }
+
+    struct FakeRpc {
+        url: String,
+        /// 받은 제출들의 raw tx(hex) — 재제출이 **같은 바이트**인지 본다.
+        raws: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    fn fake_rpc(script: Vec<Act>) -> FakeRpc {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let raws = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let raws2 = raws.clone();
+        let mut script: std::collections::VecDeque<Act> = script.into();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut st) = stream else { continue };
+                // 헤더 → Content-Length → 본문.
+                let mut buf = Vec::new();
+                let mut byte = [0u8; 1];
+                while !buf.ends_with(b"\r\n\r\n") {
+                    if st.read(&mut byte).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    buf.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&buf).to_lowercase();
+                let len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0u8; len];
+                let _ = st.read_exact(&mut body);
+                let req: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let id = req["id"].clone();
+                let method = req["method"].as_str().unwrap_or("").to_string();
+                let ok = |result: serde_json::Value| serde_json::json!({"jsonrpc":"2.0","id":id,"result":result});
+                let reply: Option<(u16, serde_json::Value)> = match method.as_str() {
+                    "eth_chainId" => Some((200, ok("0x4cf2c2".into()))),
+                    "eth_getTransactionCount" => Some((200, ok("0x7".into()))),
+                    "eth_estimateGas" => Some((200, ok("0x5208".into()))),
+                    "eth_gasPrice" | "eth_maxPriorityFeePerGas" => {
+                        Some((200, ok("0x3b9aca00".into())))
+                    }
+                    "eth_feeHistory" => Some((
+                        200,
+                        ok(serde_json::json!({
+                            "oldestBlock":"0x1","baseFeePerGas":["0x3b9aca00","0x3b9aca00"],
+                            "gasUsedRatio":[0.5],"reward":[["0x3b9aca00"]]
+                        })),
+                    )),
+                    "eth_getBlockByNumber" => Some((200, ok(serde_json::Value::Null))),
+                    // 되묻기 — 항상 「모른다」. 재제출이 풀어 주는지 보려고.
+                    "eth_getTransactionByHash" => Some((200, ok(serde_json::Value::Null))),
+                    "eth_sendRawTransaction" => {
+                        let raw = req["params"][0].as_str().unwrap_or("").to_string();
+                        raws2.lock().unwrap().push(raw.clone());
+                        match script.pop_front().unwrap_or(Act::Drop) {
+                            Act::Drop => None,
+                            Act::Http(code) => Some((code, serde_json::json!({}))),
+                            Act::RpcErr(m) => Some((
+                                200,
+                                serde_json::json!({"jsonrpc":"2.0","id":id,
+                                    "error":{"code":-32000,"message":m}}),
+                            )),
+                            Act::Ok => {
+                                let bytes = alloy::hex::decode(&raw).unwrap();
+                                let h = alloy::primitives::keccak256(bytes).to_string();
+                                Some((200, ok(h.into())))
+                            }
+                        }
+                    }
+                    other => Some((
+                        200,
+                        serde_json::json!({"jsonrpc":"2.0","id":id,
+                            "error":{"code":-32601,"message":format!("fake: {other}")}}),
+                    )),
+                };
+                if let Some((code, v)) = reply {
+                    let b = v.to_string();
+                    let _ = write!(
+                        st,
+                        "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
+                        b.len()
+                    );
+                }
+                // Drop 이면 아무것도 안 쓰고 닫는다.
+            }
+        });
+        FakeRpc { url, raws }
+    }
+
+    fn native_tx() -> TransactionRequest {
+        TransactionRequest::default()
+            .with_to(Address::from([0x22u8; 20]))
+            .with_value(U256::from(1u64))
+    }
+
+    /// 제출 두 번이 **같은 바이트**였고, 돌려준 해시가 그 바이트의 keccak 인가 — 「재제출은 멱등」의 증거.
+    fn assert_same_raw(f: &FakeRpc, hash: &str, sends: usize) {
+        let raws = f.raws.lock().unwrap().clone();
+        assert_eq!(raws.len(), sends, "제출 횟수");
+        assert!(
+            raws.windows(2).all(|w| w[0] == w[1]),
+            "재제출은 같은 서명 바이트여야 한다"
+        );
+        let h = alloy::primitives::keccak256(alloy::hex::decode(&raws[0]).unwrap()).to_string();
+        assert_eq!(h, hash, "해시는 제출한 바이트의 것이어야 한다");
+    }
+
+    /// 🔴 응답만 유실 → 다시 냈더니 「already known」 = **나갔다**(Sent). 예전엔 첫 오류에서 「실패」라
+    /// 적고 한도를 환불했다 — 사람이 다시 누르면 새 nonce 로 두 번째가 나갔다.
+    #[tokio::test]
+    async fn lost_reply_then_already_known_is_sent() {
+        let f = fake_rpc(vec![Act::Drop, Act::RpcErr("already known")]);
+        let signer = PrivateKeySigner::random();
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC")
+            .await
+            .expect("already known 은 받힌 것이다");
+        assert_same_raw(&f, &hash, 2);
+    }
+
+    /// 응답이 두 번 다 유실 → **불명**(해시는 안다). 확실한 실패가 아니다.
+    #[tokio::test]
+    async fn lost_twice_is_unknown_with_the_hash() {
+        let f = fake_rpc(vec![Act::Drop, Act::Drop]);
+        let signer = PrivateKeySigner::random();
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC").await {
+            Err(SendError::Unknown { hash, msg }) => {
+                assert!(msg.contains(&hash), "{msg}");
+                assert_same_raw(&f, &hash, 2);
+            }
+            other => panic!("불명이어야 한다: {other:?}"),
+        }
+    }
+
+    /// 앞단 5xx 는 모름 → 재제출이 성공하면 나간 것.
+    #[tokio::test]
+    async fn gateway_error_then_ok_is_sent() {
+        let f = fake_rpc(vec![Act::Http(502), Act::Ok]);
+        let signer = PrivateKeySigner::random();
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC")
+            .await
+            .unwrap();
+        assert_same_raw(&f, &hash, 2);
+    }
+
+    /// 노드가 읽고 거절 → 확실한 실패, **다시 내지 않는다**(제출 1회).
+    #[tokio::test]
+    async fn node_rejection_is_final_and_not_resent() {
+        let f = fake_rpc(vec![Act::RpcErr("nonce too low")]);
+        let signer = PrivateKeySigner::random();
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC").await {
+            Err(SendError::Failed(_)) => {}
+            other => panic!("확실한 실패여야 한다: {other:?}"),
+        }
+        assert_eq!(f.raws.lock().unwrap().len(), 1);
+    }
+
+    /// 한 번에 받히면 그대로 — 제출 1회.
+    #[tokio::test]
+    async fn plain_success_sends_once() {
+        let f = fake_rpc(vec![Act::Ok]);
+        let signer = PrivateKeySigner::random();
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC")
+            .await
+            .unwrap();
+        assert_same_raw(&f, &hash, 1);
+    }
+
+    /// 🔴 **실물 RPC 로 새 전송 함수를 밟는다 — 돈 0원** (개발 66). 잔액 0인 새 키라 체인은 반드시 거절한다.
+    /// 판정이 「확실한 실패」로 나와야 한다: ① USDC 송금은 **채우기(가스 추정)** 에서 revert 로 막히고
+    /// ② 0원 네이티브 전송은 채우기·서명을 **통과해** 해시까지 만든 뒤 **제출**에서 「가스 부족」으로 막힌다
+    /// — 즉 ②는 fill → 서명 → 해시 → eth_sendRawTransaction → JSON-RPC 오류 판정까지 한 줄을 다 지난다.
+    /// 어느 쪽도 불명으로 나오면 안 된다(그러면 사람에게 「나갔을 수 있다」는 거짓 경고가 뜬다).
+    /// ⚠️ `effective_rpc` 가 실제 ~/.jigap/settings.json 의 사용자 RPC 를 읽는다(읽기만 한다).
+    #[tokio::test]
+    #[ignore = "네트워크 필요 — Arc 테스트넷 RPC (잔액 0 키, 돈 안 듦)"]
+    async fn broadcast_from_an_empty_key_is_a_definite_failure() {
+        use crate::chain::ARC_TESTNET;
+        let signer = PrivateKeySigner::random();
+        let to = Address::from([0x11u8; 20]);
+        with_pinned_chain(ARC_TESTNET.chain_id, async {
+            // ① USDC 0.01 — 가스 추정이 revert.
+            let tx = TransactionRequest::default()
+                .with_to(ARC_TESTNET.usdc_address)
+                .with_input(
+                    IERC20::transferCall {
+                        to,
+                        amount: U256::from(10_000u64),
+                    }
+                    .abi_encode(),
+                );
+            match broadcast(&signer, tx, "USDC").await {
+                Err(SendError::Failed(m)) => println!("① Failed: {m}"),
+                other => panic!("① 확실한 실패여야 한다: {other:?}"),
+            }
+            // ② 0원 네이티브 — 서명·해시까지 가고 제출에서 거절.
+            let tx = TransactionRequest::default()
+                .with_to(to)
+                .with_value(U256::ZERO);
+            match broadcast(&signer, tx, "USDC").await {
+                Err(SendError::Failed(m)) => println!("② Failed: {m}"),
+                other => panic!("② 확실한 실패여야 한다: {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    /// 가스 부족 문구는 **가스 토큰**을 말한다 — Arc 에선 USDC(개발 66).
+    #[tokio::test]
+    async fn insufficient_gas_names_the_gas_token() {
+        let raw = "insufficient funds for gas * price + value: have 0 want 1";
+        assert!(humanize_chain_error(raw, "USDC").contains("ETH")); // 테스트 기본 체인 = Base Sepolia
+        let arc = with_pinned_chain(crate::chain::ARC_TESTNET.chain_id, async {
+            humanize_chain_error(raw, "USDC")
+        })
+        .await;
+        assert!(arc.contains("USDC") && !arc.contains("ETH"), "{arc}");
+    }
+
+    /// 불명 문구는 tx 해시와 「다시 보내기 전에 확인」을 싣는다 — 화면 송금은 이 문장만 보여 줄 수 있다.
+    #[test]
+    fn unknown_message_carries_hash_and_warning() {
+        let m = unknown_send_message("0xabc", "제출 응답 시간 초과");
+        assert!(m.contains("0xabc") && m.contains("다시 보내기 전에"), "{m}");
+        let e = SendError::Unknown {
+            hash: "0xabc".into(),
+            msg: m.clone(),
+        };
+        assert_eq!(e.into_message(), m);
     }
 
     // USDC 금액 파싱: 6 decimals 로 정확히 변환돼야 한다 (음수 거부 헬퍼 경유).
