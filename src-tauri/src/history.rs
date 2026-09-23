@@ -142,7 +142,9 @@ fn claim_settlements(path: &std::path::Path) -> (Vec<Settlement>, Vec<PathBuf>) 
         // 이름은 가져올 때마다 다르다(초 단위로 지으면 같은 초의 두 번째가 첫 번째를 덮었다 — 2차 P1).
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let _ = fs::rename(path, dir.join(format!("{claim_prefix}{}.{n}", now_secs())));
+        // 프로세스 id 도 싣는다 — 순번은 프로세스마다 0 부터라, 같은 초에 앱이 재시작하면 남겨 둔 묶음을 덮는다(3차 P1).
+        let name = format!("{claim_prefix}{}.{}.{n}", now_secs(), std::process::id());
+        let _ = fs::rename(path, dir.join(name));
     }
     // 가져온 묶음 전부 — 방금 것과, 전에 **읽다 실패해 남겨 둔** 것(2차 P2: 못 읽었다고 지우면 영영 잃는다).
     let mut settlements: Vec<Settlement> = Vec::new();
