@@ -699,9 +699,21 @@ pub(crate) async fn approve_payment(id: String, password: String) -> Result<Paym
     // 🔴 **여기서부터 계정을 못박는다** (개발 54). 위 검사는 *그 순간*만 본다 — 아래 비번 검증·
     // RPC 왕복 사이에 사용자가 계정을 바꾸면 `unlock_signer` 가 **그때 활성인 계정의 키**로
     // 서명하고 내역도 그 계정 파일에 적힌다. 요청의 계정으로 작업 전체를 묶으면 그 창이 사라진다.
-    // (체인은 안쪽 do_* 가 진입 시 고정한다 — 개발 20·51.)
+    // 🔴 **체인도 여기서 못박는다** (개발 65, 코덱스). 예전엔 「안쪽 do_* 가 진입 시 고정한다」에 맡겼는데,
+    // 위 검사와 그 고정 사이에 비번 복호화가 끼어 있어 그 틈에 설정에서 체인을 바꾸면 do_* 가 **바뀐**
+    // 체인을 고정했다 — Arc 두 체인은 USDC 주소까지 같아 테스트넷 요청이 메인넷에서 조용히 나간다.
+    // 자율 경로(session.rs)와 같은 모양: 요청의 체인으로 작업 전체를 묶는다(0 = 옛 미각인 요청 → 지금 체인).
+    let chain = if req.chain_id != 0 {
+        req.chain_id
+    } else {
+        crate::chain::active_chain().chain_id
+    };
     let pinned = request_account_index(&req);
-    crate::wallet::with_pinned_account(pinned, approve_pinned(req, password)).await
+    crate::chain::with_pinned_chain(
+        chain,
+        crate::wallet::with_pinned_account(pinned, approve_pinned(req, password)),
+    )
+    .await
 }
 
 /// 계정이 고정된 채로 도는 승인 본체 — 서명 키·내역 파일이 모두 요청의 계정을 본다.

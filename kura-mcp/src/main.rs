@@ -310,9 +310,9 @@ impl WalletServer {
             } => serde_json::json!({
                 // 🔴 **revert 는 결제가 안 된 것**이다 — 체인이 거절해 결제액은 그대로 있고 가스만
                 // 나갔다. 그걸 `paid: true` 로 내보내면 이번엔 반대 거짓말이 된다(못 받은 콘텐츠를
-                // 다시 사면 되는데 사지 말라고 하는 꼴). 「나갔는데 확인을 못 했다」는 pending 뿐이다.
-                "paid": reason == "pending",
-                "status": reason,       // pending | reverted
+                // 다시 사면 되는데 사지 말라고 하는 꼴). 「나갔는데 콘텐츠를 못 받았다」는 pending·undelivered.
+                "paid": kura_mcp::arc_direct::paid_without_content(&reason),
+                "status": reason,       // pending | undelivered | reverted
                 "tx": tx,
                 "explorer": explorer,
                 "notice": notice,

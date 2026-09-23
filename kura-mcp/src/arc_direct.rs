@@ -256,6 +256,14 @@ pub fn pending_notice(tx: &str, explorer: &str) -> String {
     )
 }
 
+/// 콘텐츠 없이 끝난 직접 제출(`PaidNoContent`)의 `paid` 판정 — **MCP 와 CLI 가 이 함수 하나를 쓴다**.
+/// revert 만 「결제액이 안 나갔다」(가스만)이고, pending·undelivered 는 「나갔는데 콘텐츠를 못 받았다」다.
+/// 개발 64 코덱스 반영에서 CLI 만 고치고 MCP 는 `reason == "pending"` 으로 남아 `undelivered` 를
+/// `paid:false` 로 내보냈다(개발 65 코덱스 P1) — 같은 규칙을 두 벌로 두면 한쪽이 뒤처진다.
+pub fn paid_without_content(reason: &str) -> bool {
+    reason != "reverted"
+}
+
 /// 🔴 **결제는 채굴됐는데 증거를 서버에 보내지도 못했다** — 재요청의 HTTP 가 실패한 경우
 /// (개발 64 코덱스 P1). 「응답을 받았는데 거절당했다」와 다르다: 그쪽은 서버가 알기라도 한다.
 /// 여기선 서버가 이 결제를 **모른 채로** 돈만 나갔다.
@@ -294,6 +302,14 @@ pub fn reverted_notice(tx: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 세 갈래를 전부 박는다 — MCP(main.rs)와 CLI 가 이 판정 하나를 쓴다(개발 65).
+    #[test]
+    fn only_revert_means_the_payment_did_not_leave() {
+        assert!(paid_without_content("pending"));
+        assert!(paid_without_content("undelivered"));
+        assert!(!paid_without_content("reverted"));
+    }
 
     fn stockwaves() -> NonceBinding {
         NonceBinding {

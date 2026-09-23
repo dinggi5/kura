@@ -694,7 +694,7 @@ fn x402_outcome_json(out: &X402Outcome) -> serde_json::Value {
         } => serde_json::json!({
             // 🔴 revert 는 **결제액이 안 나간 것**이다(가스만 나갔다) → paid=false.
             // pending·undelivered 는 「나갔는데 콘텐츠를 못 받았다」다. 뭉치면 한쪽이 거짓말이 된다.
-            "paid": reason != "reverted",
+            "paid": kura_mcp::arc_direct::paid_without_content(reason),
             "status": reason, "tx": tx, "explorer": explorer, "notice": notice,
         }),
         X402Outcome::Paid {

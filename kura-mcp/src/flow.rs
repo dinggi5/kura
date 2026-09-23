@@ -497,6 +497,16 @@ pub async fn run_x402(
         payment::APPROVAL_TIMEOUT.as_secs(),
         RECEIPT_WAIT.as_secs() + PROOF_TAIL_SECS,
     );
+    // 🔴 **이미 늦었으면 요청 파일을 쓰기 전에 멈춘다** (개발 65, 코덱스). 예전엔 이 검사가 파일을
+    // 쓴 **뒤**에 있어서, 「아무것도 결제하지 않았다」고 답한 뒤에도 승인 창에 요청이 남았다 —
+    // 사람이 그걸 승인하면 돈은 나가고 증거를 낼 호출은 이미 끝나 있다.
+    if budget == Some(0) {
+        return Err(ts!(
+            "결제 요청의 유효시간이 이미 거의 끝났어요. 아무것도 결제하지 않았습니다 — 다시 시도하면 새 요청을 받습니다.",
+            "This payment challenge is about to expire. Nothing was paid — try again to get a fresh one."
+        )
+        .into());
+    }
     // 🔴 **옛 앱에는 새 방식을 보내지 않는다** (개발 64). 옛 앱은 모르는 kind 를 평범한 송금으로
     // 처리했다 — 돈은 나가고 서버는 그 전송을 결제로 알아보지 못한다. 앱이 하트비트에 적어 둔
     // 「내가 아는 방식」에 없으면 여기서 멈춘다(요청 파일을 쓰기 전).
@@ -533,14 +543,7 @@ pub async fn run_x402(
     // 요청 파일이 사라지고, 그 뒤 사람이 승인 버튼을 눌러도 `begin_approval` 이 막는다(개발 63).
     // 기본 모드(clientNonce)엔 수명이 없어 `None` — 예전 그대로 5분이다.
     let approval_wait = match budget {
-        Some(0) => {
-            return Err(ts!(
-                "결제 요청의 유효시간이 이미 거의 끝났어요. 아무것도 결제하지 않았습니다 — 다시 시도하면 새 요청을 받습니다.",
-                "This payment challenge is about to expire. Nothing was paid — try again to get a fresh one."
-            )
-            .into())
-        }
-        Some(secs) => std::time::Duration::from_secs(secs),
+        Some(secs) => std::time::Duration::from_secs(secs), // 0 은 위에서 요청을 쓰기 전에 걸렀다
         None => payment::APPROVAL_TIMEOUT,
     };
     let result = match payment::await_result(&id, approval_wait).await {
