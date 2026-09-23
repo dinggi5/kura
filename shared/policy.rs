@@ -496,6 +496,26 @@ pub fn after_timeout(rec: Option<&AttemptRecord>) -> AfterTimeout {
     }
 }
 
+// ── 요청 임대 (개발 66, 코덱스 P0) ──────────────────────────────────────────────────────────
+//
+// MCP 가 승인을 기다리다 **SIGKILL 로 죽으면** `CancelOnDrop` 이 못 돌아 요청 파일이 남고, GUI 는 그걸
+// 5분+유예 동안 「살아 있는 요청」으로 보여줬다. 사람이 승인하면 돈은 나가는데 결과를 받을 상대가 없고,
+// 다시 켠 AI 는 「아까 실패했다」고 알고 또 요청한다. 이제 기다리는 쪽이 요청 파일의 수정 시각을 주기적으로
+// 갱신하고(임대), GUI 는 임대가 끊긴 요청을 보여주지도 승인하지도 않는다. 파일은 지우지 않는다 — 노트북이
+// 잠들었다 깨어난 직후처럼 **잠깐** 끊긴 임대는 MCP 가 다시 갱신하면 되살아나야 한다.
+
+/// 기다리는 쪽(MCP)이 요청 파일 수정 시각을 갱신하는 주기(초). (MCP 만 쓴다.)
+#[allow(dead_code)]
+pub const LEASE_TOUCH_SECS: u64 = 3;
+/// 이만큼 갱신이 없으면 기다리는 쪽이 없다고 본다(초). 갱신 주기의 열 배 — 한두 번 밀린 것과 가른다.
+pub const REQUEST_LEASE_SECS: u64 = 30;
+
+/// 이 요청의 임대가 끊겼나. `leased` = 요청이 임대를 약속했나(옛 MCP 는 false → 늘 false),
+/// `age` = 요청 파일 수정 시각으로부터 지난 초(못 읽으면 None → 끊겼다고 단정하지 않는다).
+pub fn lease_lapsed(leased: bool, age: Option<u64>) -> bool {
+    leased && age.is_some_and(|a| a > REQUEST_LEASE_SECS)
+}
+
 /// 이 기록 파일을 지워도 되는가(GUI 감시 스레드의 청소). 수정 시각 기준.
 pub fn attempt_prunable(age_secs: u64) -> bool {
     age_secs > APPROVAL_KEEP_SECS
@@ -946,6 +966,16 @@ mod tests {
         for bad in ["", "../x", "a/b", "1.json", &"9".repeat(65)] {
             assert!(attempt_path(d, bad).is_none(), "{bad}");
         }
+        assert!(
+            !lease_lapsed(false, Some(10_000)),
+            "옛 MCP 요청엔 임대 규칙이 없다"
+        );
+        assert!(
+            !lease_lapsed(true, None),
+            "수정 시각을 못 읽으면 끊겼다고 단정하지 않는다"
+        );
+        assert!(!lease_lapsed(true, Some(REQUEST_LEASE_SECS)));
+        assert!(lease_lapsed(true, Some(REQUEST_LEASE_SECS + 1)));
         assert!(!attempt_prunable(APPROVAL_KEEP_SECS));
         assert!(attempt_prunable(APPROVAL_KEEP_SECS + 1));
     }

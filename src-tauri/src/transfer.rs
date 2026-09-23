@@ -354,6 +354,13 @@ async fn broadcast_via(
     let humanize =
         |e: &dyn std::fmt::Display| humanize_chain_error(&redact_urls(&e.to_string()), token);
 
+    // 🔴 **체인 ID 는 우리가 정한다** (개발 66, 코덱스 P0). 비워 두면 alloy 가 **RPC 에 물어** 채우고 그 값으로
+    // 서명한다 — 설정은 테스트넷인데 사용자 RPC 주소가 메인넷이면 **메인넷용 서명**이 나가 진짜 돈이 움직인다.
+    // 선택한 체인으로 못박으면(EIP-155) 엉뚱한 체인의 노드는 이 tx 를 받지 않는다(확실한 실패로 끝난다).
+    let mut tx = tx;
+    if tx.chain_id.is_none() {
+        tx.set_chain_id(active_chain().chain_id);
+    }
     // ① 채우기 + 서명. 가스 추정이 revert(잔액 부족 등)를 여기서 잡는다 — 전부 「안 나감」.
     let filled = match tokio::time::timeout(FILL_WAIT, provider.fill(tx)).await {
         Ok(Ok(f)) => f,
@@ -977,6 +984,23 @@ mod tests {
         assert_eq!(f.raws.lock().unwrap().len(), 1);
     }
 
+    /// 🔴 RPC 가 다른 체인을 말해도 서명은 **선택한 체인**으로 한다(개발 66, 코덱스 P0). 가짜 RPC 는 Arc 테스트넷
+    /// (0x4cf2c2)이라고 답하고, 활성 체인은 Base Sepolia 로 고정한다 → 서명된 tx 의 체인 ID 는 84532 여야 한다.
+    #[tokio::test]
+    async fn signs_for_the_selected_chain_not_the_rpcs() {
+        use alloy::consensus::{Transaction, TxEnvelope};
+        use alloy::network::eip2718::Decodable2718;
+        let f = fake_rpc(vec![Act::Ok]);
+        let signer = PrivateKeySigner::random();
+        let base = crate::chain::BASE_SEPOLIA.chain_id;
+        with_pinned_chain(base, broadcast_via(&f.url, &signer, native_tx(), "USDC"))
+            .await
+            .unwrap();
+        let raw = alloy::hex::decode(&f.raws.lock().unwrap()[0]).unwrap();
+        let env = TxEnvelope::decode_2718(&mut raw.as_slice()).unwrap();
+        assert_eq!(env.chain_id(), Some(base));
+    }
+
     /// 한 번에 받히면 그대로 — 제출 1회.
     #[tokio::test]
     async fn plain_success_sends_once() {
@@ -1031,7 +1055,12 @@ mod tests {
     #[tokio::test]
     async fn insufficient_gas_names_the_gas_token() {
         let raw = "insufficient funds for gas * price + value: have 0 want 1";
-        assert!(humanize_chain_error(raw, "USDC").contains("ETH")); // 테스트 기본 체인 = Base Sepolia
+        // 체인은 명시적으로 고정한다 — 고정하지 않은 테스트의 활성 체인은 **실제 settings.json** 을 따라간다.
+        let base = with_pinned_chain(crate::chain::BASE_SEPOLIA.chain_id, async {
+            humanize_chain_error(raw, "USDC")
+        })
+        .await;
+        assert!(base.contains("ETH"), "{base}");
         let arc = with_pinned_chain(crate::chain::ARC_TESTNET.chain_id, async {
             humanize_chain_error(raw, "USDC")
         })

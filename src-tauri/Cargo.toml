@@ -47,6 +47,8 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
+# 서명된 tx 를 풀어 체인 ID 를 확인하는 테스트용(개발 66). 앱 빌드엔 안 들어간다.
+alloy = { version = "2.0.5", features = ["consensus"] }
 
 # 인앱 자동 업데이트 (개발 31). 데스크톱 전용 — 모바일 타깃엔 안 들어간다.
 #

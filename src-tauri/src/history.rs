@@ -14,6 +14,16 @@ use crate::settings::redact_urls;
 use crate::store::{jigap_dir, now_secs, write_json};
 use crate::wallet::{account_file, account_file_name};
 
+/// 🔴 **내역 파일의 읽기-수정-쓰기를 한 줄로 세운다** (개발 66, 코덱스 P1). 내역은 통째로 읽어 한 줄 넣고
+/// 통째로 쓴다 — 두 송금이 거의 같이 끝나면 둘 다 같은 목록을 읽고, 나중에 쓴 쪽이 먼저 쓴 기록을 지운다.
+/// 정산 반영(`apply_x402_settlements`)도 같은 파일을 고친다. 내역을 쓰는 건 이 프로세스(GUI)뿐이라
+/// 프로세스 안 잠금이면 된다. 독살(poison)돼도 계속 쓴다 — 기록을 멈추는 편이 더 나쁘다.
+static HISTORY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn history_guard() -> std::sync::MutexGuard<'static, ()> {
+    HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 송금 시도 1건의 기록 — 형식의 정본은 `policy::HistoryEntry`(MCP·CLI 가 같은 타입으로 읽는다, 개발 57).
 pub(crate) use crate::policy::HistoryEntry;
 
@@ -63,6 +73,7 @@ pub(crate) fn log_attempt(token: &str, to: &str, amount: &str, status: &str, det
         detail: detail.into(),
         settle_tx: String::new(),
     };
+    let _g = history_guard();
     let list = with_entry(read_history(), entry, HISTORY_CAP);
     let _ = history_path().and_then(|p| write_json(p, &list));
 }
@@ -129,9 +140,27 @@ pub(crate) fn apply_x402_settlements() -> u32 {
         Ok(p) => p,
         Err(_) => return 0,
     };
-    let Ok(raw) = fs::read_to_string(&path) else {
+    // 🔴 **읽기 전에 파일을 통째로 가져온다(rename)** (개발 66, 코덱스 P1). 예전엔 읽고 → 반영하고 → 지웠다.
+    // 그 사이 MCP 가 새 정산을 덧붙이면 **읽지 않은 그 건까지 지웠고**, 그 내역은 영영 「정산 대기」로 남았다.
+    // rename 은 원자적이다 — 가져간 뒤 MCP 가 쓰는 건 새 파일로 가서 다음 폴링에 반영된다.
+    // (MCP 가 가져가기 전 목록을 읽고 가져간 뒤에 쓰면 옛 건이 새 파일에 한 번 더 실리는데, 이미 「signed」가
+    // 아니라서 다시 매칭되지 않는다 — 두 번 반영되지 않는다.)
+    if fs::metadata(&path).is_err() {
         return 0; // 파일 없음 = 처리할 정산 없음 (대부분의 폴링)
-    };
+    }
+    let claimed = path.with_file_name(format!(
+        ".{}.claimed.{}",
+        path.file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        now_secs()
+    ));
+    if fs::rename(&path, &claimed).is_err() {
+        return 0;
+    }
+    let raw = fs::read_to_string(&claimed).unwrap_or_default();
+    let _ = fs::remove_file(&claimed);
+    let _g = history_guard();
     let settlements: Vec<Settlement> = serde_json::from_str(&raw).unwrap_or_default();
     // 활성 계정 먼저, 그다음 나머지 — 대부분은 첫 파일에서 끝난다.
     let active = crate::wallet::active_account_index();
@@ -165,7 +194,7 @@ pub(crate) fn apply_x402_settlements() -> u32 {
             let _ = write_json(hp, &list);
         }
     }
-    let _ = fs::remove_file(&path); // 읽었으면 비운다(매칭 실패분 포함)
+    // 매칭 실패분은 버린다(예전과 같다) — 가져온 파일은 위에서 이미 지웠다.
     applied
 }
 

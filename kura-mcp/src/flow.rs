@@ -815,6 +815,22 @@ pub async fn run_x402(
         Ok(r) => r,
         Err(e) => {
             let msg = tf!("결제 재요청 실패: {e}", "The paid re-request failed: {e}");
+            // 🔴 **서명 갈래도 연결이 한 번 붙었으면 「안 냈다」가 아니다** (개발 66, 코덱스 P0).
+            // 서명된 인가는 헤더에 실려 **이미 서버에 닿았을 수 있고**, 서버·페이실리테이터는 응답을 보내기 전에
+            // 정산할 수 있다. 여기서 평범한 `Err` 를 돌리면 AI 는 다시 부르고 **새 nonce 로 두 번째 인가**를
+            // 받는다 — 둘 다 정산될 수 있다. 연결 자체가 안 됐을 때(`is_connect`)만 확실히 아무것도 안 갔다.
+            if signed.is_some() && !e.is_connect() {
+                return Ok(X402Result {
+                    outcome: X402Outcome::PaidNoContent {
+                        notice: x402::signed_unknown_notice(&msg),
+                        tx: String::new(),
+                        explorer: String::new(),
+                        reason: "unknown".into(),
+                    },
+                    agent,
+                    agent_note,
+                });
+            }
             // 🔴 **직접 제출이면 이 오류는 «결제 실패»가 아니다** (개발 64 코덱스 P1). 돈은 이미
             // 체인에서 나갔고 서버만 그걸 모른다. 평범한 `Err` 로 돌리면 tx 가 응답에서 사라지고,
             // AI 는 「HTTP 가 실패했구나」로 읽어 같은 URL 을 다시 부른다 = **두 번째 결제**.

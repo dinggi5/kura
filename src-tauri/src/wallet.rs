@@ -1062,6 +1062,7 @@ mod tests {
             account: 1,
             from: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8".into(),
             agent: None,
+            lease: false,
         };
         assert!(crate::ipc::ensure_request_account(&req).is_err());
         switch_account(1).unwrap();

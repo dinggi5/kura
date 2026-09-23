@@ -62,6 +62,12 @@ pub(crate) struct PaymentRequest {
     /// 없으면 승인 창은 예전 그대로다(**말할 사실이 있을 때만 한 줄이 붙는다**).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) agent: Option<AgentTrust>,
+    /// **임대를 갱신하는 요청인가** (개발 66, 코덱스 P0). 새 MCP 는 기다리는 동안 요청 파일의 수정 시각을
+    /// 주기적으로 갱신한다 — 멈추면(프로세스가 SIGKILL 로 죽어 `CancelOnDrop` 도 못 돈 경우) GUI 는
+    /// `REQUEST_LEASE_SECS` 뒤부터 그 요청을 보여주지도 승인하지도 않는다. 옛 MCP 의 요청엔 이 필드가
+    /// 없다(false) → 예전 규칙(5분+유예) 그대로다.
+    #[serde(default)]
+    pub(crate) lease: bool,
 }
 
 /// MCP 가 온체인에서 읽어 **대조까지 마친 사실**. GUI 는 판정하지 않고 그대로 보여준다.
@@ -266,7 +272,20 @@ pub(crate) fn secs_left(req: &PaymentRequest, now: u64) -> u64 {
 /// 팝오버 자동 숨김·항상 위 고정(tray)과 프론트 승인 모달이 **같은 이 값**에서 나와야
 /// "모달은 떠 있는데 게이트는 꺼진" 불일치가 생기지 않는다.
 pub(crate) fn live_request() -> Option<PaymentRequest> {
-    read_request().filter(|r| !is_stale(r))
+    read_request().filter(|r| !is_stale(r) && !lease_lapsed(r))
+}
+
+/// 기다리는 쪽(MCP)이 임대 갱신을 멈췄나 (개발 66) — 멈췄으면 그 요청은 보여주지도 승인하지도 않는다.
+/// 파일은 지우지 않는다: 잠깐 끊겼다(노트북 잠자기) 다시 갱신되면 되살아나야 한다. 정말 죽었으면
+/// 감시 스레드가 5분+유예 뒤 늘 하던 대로 치운다.
+fn lease_lapsed(req: &PaymentRequest) -> bool {
+    let age = request_path()
+        .ok()
+        .and_then(|p| fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|d| d.as_secs());
+    crate::policy::lease_lapsed(req.lease, age)
 }
 
 /// 승인 대기 중인 결제 요청이 있는가 (single-flight 라 파일 하나가 진실 원천).
@@ -394,7 +413,9 @@ pub(crate) fn begin_approval(req: &PaymentRequest) -> Result<ApprovalGuard, Stri
         detail: String::new(),
         x402: None,
     })?; // 기록을 못 남기면 시작하지 않는다 — MCP 가 시간 초과 뒤 이 승인을 못 보게 된다.
-    if let Err(e) = admit_approval(read_request().map(|r| r.id).as_deref(), &req.id, false) {
+         // 임대가 끊긴 요청은 「없는 요청」과 같다 — 기다리는 AI 가 없다(개발 66). 파일에서 다시 읽은 값으로 본다.
+    let pending = read_request().filter(|r| !lease_lapsed(r)).map(|r| r.id);
+    if let Err(e) = admit_approval(pending.as_deref(), &req.id, false) {
         // 요청이 그새 사라졌다(상대가 거둬감) — 우리가 쓴 기록을 되돌린다. MCP 가 그 사이 `sending` 을
         // 봤다면 곧 사라지는 걸 보고 「아무것도 안 나감」으로 끝낸다.
         restore_attempt(&req.id, prev.as_ref());
@@ -1075,6 +1096,7 @@ mod tests {
             account: 0,
             from: String::new(),
             agent: None,
+            lease: false,
         }
     }
 
@@ -1328,6 +1350,7 @@ mod tests {
             account: 2,
             from: "0xF39f".into(),
             agent: None,
+            lease: false,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: PaymentRequest = serde_json::from_str(&json).unwrap();

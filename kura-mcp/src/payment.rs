@@ -64,6 +64,12 @@ pub struct PaymentRequest {
     /// 없으면 승인 창은 예전 그대로다(**말할 사실이 있을 때만 한 줄이 붙는다**).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentTrust>,
+    /// **임대를 갱신하는 요청인가** (개발 66, 코덱스 P0). 새 MCP 는 기다리는 동안 요청 파일의 수정 시각을
+    /// 주기적으로 갱신한다 — 멈추면(프로세스가 SIGKILL 로 죽어 `CancelOnDrop` 도 못 돈 경우) GUI 는
+    /// `REQUEST_LEASE_SECS` 뒤부터 그 요청을 보여주지도 승인하지도 않는다. 옛 MCP 의 요청엔 이 필드가
+    /// 없다(false) → 예전 규칙(5분+유예) 그대로다.
+    #[serde(default)]
+    pub lease: bool,
 }
 
 fn default_kind() -> String {
@@ -162,6 +168,23 @@ struct Settlement {
     success: bool,
 }
 
+/// 원자 쓰기의 임시 파일 경로 — **작성자마다 다르다** (개발 66, 코덱스 P0).
+///
+/// 예전엔 `path.with_extension("tmp")` 하나를 모두가 같이 썼다. 같은 파일을 두 작성자가 동시에 쓰면
+/// (예: 세션 잠금 해제의 KDF 업그레이드와 계정 이름 바꾸기가 둘 다 wallet.enc 를) 그 한 임시 파일을 번갈아
+/// truncate·쓰기 하다 **섞인 내용을 rename** 했다 — 재현 테스트로 확인(256KB·64KB 두 스레드, 40회 중 발생).
+/// 프로세스 id + 프로세스 안 순번이면 두 프로세스(GUI·MCP) 사이에서도 겹치지 않는다. 결과는 「마지막
+/// 작성자가 이긴다」 — 내용이 섞이는 일은 없다.
+fn unique_tmp(path: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()))
+}
+
 /// 임시 파일에 쓴 뒤 rename 으로 원자 교체 — GUI(별도 프로세스)가 폴링으로 읽는 파일들이라,
 /// 쓰는 도중의 절반 써진 내용을 GUI가 읽는 일이 없게 한다.
 /// 권한은 src-tauri 의 store::write_atomic 과 동일하게 디렉터리 0700 / 파일 0600 으로 맞춘다
@@ -176,7 +199,7 @@ fn write_atomic(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
             let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
         }
     }
-    let tmp = path.with_extension("tmp");
+    let tmp = unique_tmp(path);
     write_file_private(&tmp, bytes)?;
     fs::rename(&tmp, path).map_err(|e| tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}"))
 }
@@ -382,6 +405,7 @@ fn write_request_kind(
         account: account.index, // 요청 시점 활성 계정 각인(승인 시 GUI가 대조, 개발 54)
         from: account.address,
         agent: agent.clone(),
+        lease: true,
     };
     let json = serde_json::to_string_pretty(&req)
         .map_err(|e| tf!("직렬화 실패: {e}", "Couldn't serialize the request: {e}"))?;
@@ -527,6 +551,7 @@ async fn await_result_in(
         armed: true,
     };
     let start = SystemTime::now();
+    let mut last_touch = start;
     loop {
         if let Some(r) = take_result(&res_path, id) {
             guard.armed = false;
@@ -535,6 +560,15 @@ async fn await_result_in(
         let elapsed = SystemTime::now().duration_since(start).unwrap_or(timeout);
         if elapsed >= timeout {
             break;
+        }
+        // 임대 갱신(개발 66) — 「아직 기다리고 있다」를 GUI 에 알린다. 이 프로세스가 SIGKILL 로 죽으면 갱신이
+        // 멎고, GUI 는 곧 그 요청을 승인하지 못하게 된다(`policy::lease_lapsed`).
+        let since_touch = SystemTime::now()
+            .duration_since(last_touch)
+            .unwrap_or_default();
+        if since_touch >= Duration::from_secs(crate::policy::LEASE_TOUCH_SECS) {
+            last_touch = SystemTime::now();
+            touch_if_mine(&req_path, id);
         }
         tokio::time::sleep(Duration::from_millis(700)).await;
     }
@@ -563,6 +597,21 @@ async fn await_result_in(
             }
         }
         tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+}
+
+/// 요청 파일이 **내 것일 때만** 수정 시각을 지금으로 바꾼다. 없는 파일은 만들지 않는다 — 결과가 나와 GUI 가
+/// 지운 요청을 되살리면 single-flight 가 막힌다. (읽기와 갱신 사이에 남의 요청으로 바뀌면 그 요청의 임대를
+/// 한 번 늘려 줄 뿐이다 — 그쪽도 살아 있는 요청이라 해가 없다.)
+fn touch_if_mine(path: &Path, id: &str) {
+    let mine = fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<PaymentRequest>(&s).ok())
+        .is_some_and(|r| r.id == id);
+    if mine {
+        if let Ok(f) = fs::OpenOptions::new().write(true).open(path) {
+            let _ = f.set_modified(SystemTime::now());
+        }
     }
 }
 
@@ -668,6 +717,7 @@ mod tests {
             account: 1,
             from: "0xOne".into(),
             agent: None,
+            lease: false,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: PaymentRequest = serde_json::from_str(&json).unwrap();
@@ -717,6 +767,7 @@ mod tests {
             account: 0,
             from: String::new(),
             agent: None,
+            lease: false,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("agent"), "{json}");
@@ -816,6 +867,7 @@ mod tests {
             account: 0,
             from: String::new(),
             agent: None,
+            lease: false,
         };
         fs::write(path, serde_json::to_string(&r).unwrap()).unwrap();
     }
@@ -1005,6 +1057,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.tx_hash, "0xA");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 임대 갱신은 내 요청의 수정 시각만 바꾸고, 없는 파일은 만들지 않는다.
+    #[test]
+    fn touch_only_refreshes_my_existing_request() {
+        let dir = tmp_dir("touch");
+        let path = dir.join("payment_request.json");
+        touch_if_mine(&path, "A");
+        assert!(!path.exists(), "없는 요청을 되살리면 안 된다");
+        write_req(&path, "A");
+        let old = SystemTime::now() - Duration::from_secs(600);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        touch_if_mine(&path, "B");
+        let m = |p: &Path| fs::metadata(p).unwrap().modified().unwrap();
+        assert!(
+            m(&path) <= old + Duration::from_secs(1),
+            "남의 id 로는 안 바뀐다"
+        );
+        touch_if_mine(&path, "A");
+        assert!(m(&path) > old + Duration::from_secs(500));
         let _ = fs::remove_dir_all(&dir);
     }
 

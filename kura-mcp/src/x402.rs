@@ -469,6 +469,17 @@ pub fn parse_settlement(b64: &str) -> Option<(String, bool)> {
     Some((tx, success))
 }
 
+/// 서명한 인가를 실은 재요청이 **응답 없이** 끝났을 때의 안내 (개발 66). 서버에 닿았는지 모른다 —
+/// 닿았다면 페이실리테이터가 정산했을 수 있다. 「다시 부르면 새 인가가 하나 더 나간다」가 핵심이다.
+pub fn signed_unknown_notice(err: &str) -> String {
+    tf!(
+        "서명한 결제 인가를 보냈는데 응답을 받지 못했어요({err}). 서버가 이미 정산했을 수 있습니다 — \
+         **다시 요청하면 두 번 결제될 수 있어요.** 다시 시도하기 전에 사용자에게 알리고 지갑 내역(정산 여부)을 확인하세요.",
+        "The signed payment authorization was sent but no reply came back ({err}). The server may already have \
+         settled it — **asking again may pay twice.** Tell the user and check the wallet history (settlement) before retrying."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
