@@ -230,6 +230,27 @@ fn write_file_private(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
 /// nonce = 서명 인가의 nonce(GUI 내역 detail 과 매칭). 비밀 아님(공개 결제 증빙).
 pub fn record_settlement(nonce: &str, tx: &str, success: bool) -> Result<(), String> {
     let path = settlements_path()?;
+    // 🔴 **읽기-덧붙이기-쓰기를 프로세스 사이에서 한 줄로** (개발 66, 코덱스 2차 P1). AI 클라이언트마다 MCP
+    // 프로세스가 따로 떠서 두 결제가 거의 같이 정산되면, 둘 다 같은 목록을 읽고 나중에 쓴 쪽이 먼저 쓴 정산을
+    // 지운다 — 그 내역은 영영 「정산 대기」다. 잠금 파일에 OS 배타 잠금(flock)을 건다; 프로세스가 죽으면 풀린다.
+    let lock_path = path.with_extension("lock");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| {
+            tf!(
+                "정산 기록 잠금 실패: {e}",
+                "Couldn't lock the settlement record: {e}"
+            )
+        })?;
+    lock.lock().map_err(|e| {
+        tf!(
+            "정산 기록 잠금 실패: {e}",
+            "Couldn't lock the settlement record: {e}"
+        )
+    })?;
     let mut list: Vec<Settlement> = fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())

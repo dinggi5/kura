@@ -127,6 +127,39 @@ fn apply_settlement(list: &mut [HistoryEntry], s: &Settlement) -> bool {
     false
 }
 
+/// 정산 파일을 고유한 이름으로 가져와(rename) 가져온 묶음 전부를 읽는다 — 전에 읽다 실패해 남겨 둔 묶음 포함.
+/// 반환 = (정산들, 다 읽어서 지워도 되는 파일들). **경로를 받는다** — 테스트가 실지갑을 안 건드리게.
+fn claim_settlements(path: &std::path::Path) -> (Vec<Settlement>, Vec<PathBuf>) {
+    let Some(dir) = path.parent().map(PathBuf::from) else {
+        return (Vec::new(), Vec::new());
+    };
+    let stem = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let claim_prefix = format!(".{stem}.claimed.");
+    if fs::metadata(path).is_ok() {
+        // 이름은 가져올 때마다 다르다(초 단위로 지으면 같은 초의 두 번째가 첫 번째를 덮었다 — 2차 P1).
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = fs::rename(path, dir.join(format!("{claim_prefix}{}.{n}", now_secs())));
+    }
+    // 가져온 묶음 전부 — 방금 것과, 전에 **읽다 실패해 남겨 둔** 것(2차 P2: 못 읽었다고 지우면 영영 잃는다).
+    let mut settlements: Vec<Settlement> = Vec::new();
+    let mut consumed: Vec<PathBuf> = Vec::new();
+    for e in fs::read_dir(&dir).into_iter().flatten().flatten() {
+        if !e.file_name().to_string_lossy().starts_with(&claim_prefix) {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(e.path()) else {
+            continue; // 다음 폴링에 다시
+        };
+        settlements.extend(serde_json::from_str::<Vec<Settlement>>(&raw).unwrap_or_default());
+        consumed.push(e.path());
+    }
+    (settlements, consumed)
+}
+
 /// MCP가 남긴 x402 정산 결과를 읽어 내역에 반영한다 (GUI 1초 폴링). 반영 건수를 돌려준다.
 /// 처리 후 정산 파일을 비운다(중복 적용 방지). 매칭 안 되는 건 그냥 버린다.
 ///
@@ -140,28 +173,17 @@ pub(crate) fn apply_x402_settlements() -> u32 {
         Ok(p) => p,
         Err(_) => return 0,
     };
-    // 🔴 **읽기 전에 파일을 통째로 가져온다(rename)** (개발 66, 코덱스 P1). 예전엔 읽고 → 반영하고 → 지웠다.
+    // 🔴 **읽기 전에 파일을 통째로 가져온다(rename)** (개발 66, 코덱스 1·2차). 예전엔 읽고 → 반영하고 → 지웠다.
     // 그 사이 MCP 가 새 정산을 덧붙이면 **읽지 않은 그 건까지 지웠고**, 그 내역은 영영 「정산 대기」로 남았다.
     // rename 은 원자적이다 — 가져간 뒤 MCP 가 쓰는 건 새 파일로 가서 다음 폴링에 반영된다.
     // (MCP 가 가져가기 전 목록을 읽고 가져간 뒤에 쓰면 옛 건이 새 파일에 한 번 더 실리는데, 이미 「signed」가
     // 아니라서 다시 매칭되지 않는다 — 두 번 반영되지 않는다.)
-    if fs::metadata(&path).is_err() {
-        return 0; // 파일 없음 = 처리할 정산 없음 (대부분의 폴링)
-    }
-    let claimed = path.with_file_name(format!(
-        ".{}.claimed.{}",
-        path.file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        now_secs()
-    ));
-    if fs::rename(&path, &claimed).is_err() {
-        return 0;
-    }
-    let raw = fs::read_to_string(&claimed).unwrap_or_default();
-    let _ = fs::remove_file(&claimed);
+    // 잠금은 **가져오기 전에** 잡는다 — 두 폴링이 겹쳐도 가져오기·읽기·반영이 한 줄로 선다(2차 P1).
     let _g = history_guard();
-    let settlements: Vec<Settlement> = serde_json::from_str(&raw).unwrap_or_default();
+    let (settlements, consumed) = claim_settlements(&path);
+    if consumed.is_empty() {
+        return 0; // 처리할 정산 없음 (대부분의 폴링)
+    }
     // 활성 계정 먼저, 그다음 나머지 — 대부분은 첫 파일에서 끝난다.
     let active = crate::wallet::active_account_index();
     let mut indices: Vec<u32> = vec![active];
@@ -194,13 +216,45 @@ pub(crate) fn apply_x402_settlements() -> u32 {
             let _ = write_json(hp, &list);
         }
     }
-    // 매칭 실패분은 버린다(예전과 같다) — 가져온 파일은 위에서 이미 지웠다.
+    // 읽은 묶음은 지운다 — 매칭 실패분은 버린다(예전과 같다).
+    for p in consumed {
+        let _ = fs::remove_file(p);
+    }
     applied
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 정산 가져오기 (개발 66, 코덱스 1·2차) — 가져간 뒤 새로 쓰인 정산은 다음 번에 잡히고, 같은 순간에
+    /// 두 번 가져가도 겹치지 않으며, 못 읽은 묶음은 지우지 않는다.
+    #[test]
+    fn settlements_are_claimed_without_loss() {
+        let dir = std::env::temp_dir().join(format!("kura-settle-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x402_settlements.json");
+        let one = |n: &str| format!(r#"[{{"nonce":"{n}","tx":"0x1","success":true}}]"#);
+
+        fs::write(&path, one("A")).unwrap();
+        let (s1, c1) = claim_settlements(&path);
+        assert_eq!(s1.len(), 1);
+        // 같은 초에 새 정산 B 가 쓰이고 또 가져간다 — A 의 묶음을 덮지 않는다(아직 안 지웠어도).
+        fs::write(&path, one("B")).unwrap();
+        let (s2, _) = claim_settlements(&path);
+        let nonces: Vec<_> = s2.iter().map(|s| s.nonce.as_str()).collect();
+        assert!(nonces.contains(&"A") && nonces.contains(&"B"), "{nonces:?}");
+        for p in c1 {
+            let _ = fs::remove_file(p);
+        }
+        // 못 읽는 묶음(여기선 같은 접두어의 디렉터리)은 소비 목록에 안 들어간다 = 지우지 않는다.
+        let stuck = dir.join(".x402_settlements.json.claimed.0.stuck");
+        fs::create_dir_all(&stuck).unwrap();
+        let (_, c3) = claim_settlements(&path);
+        assert!(!c3.contains(&stuck));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     // 거래 내역: 최신 항목이 맨 앞에 오고 cap 개수로 잘린다.
     #[test]
