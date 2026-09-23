@@ -242,7 +242,7 @@ export function PaymentApprovalModal({
           {request.agent && <AgentTrustLines agent={request.agent} />}
           {/* 🔴 이 줄은 **이 결제가 어떻게 나가는가**를 말한다 — x402 라고 다 같지 않다(개발 64).
               서명 갈래는 우리 가스가 안 나가고, 직접 제출 갈래는 지갑이 그 자리에서 올린다.
-              한 승인 화면에 「가스 없음」과 「수수료도 이 잔액에서」가 같이 뜨면 사람이 무엇을
+              한 승인 화면에 「가스 없음」과 「수수료도 이 잔액에서 나가요」가 같이 뜨면 사람이 무엇을
               믿어야 할지 모른다 — 말은 한 자리에서 한 번만 한다. */}
           {isX402Sign && (
             <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--color-ink-300)]">
@@ -257,7 +257,7 @@ export function PaymentApprovalModal({
             <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--color-ink-300)]">
               <ArrowUpRight size={11} />
               {t(
-                "지갑이 직접 체인에 올려요 · 수수료도 이 잔액에서",
+                "지갑이 직접 체인에 올려요 · 수수료도 이 잔액에서 나가요",
                 "This wallet broadcasts it · the fee comes out of this balance",
               )}
             </p>
