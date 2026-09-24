@@ -1088,8 +1088,24 @@ mod tests {
     }
 
     // 날것 revert 에러를 사람이 읽을 수 있는 한국어로 매핑하고, hex data 노이즈를 떼어낸다.
-    #[test]
-    fn humanize_maps_common_chain_errors() {
+    // 체인을 고정한다(개발 68) — 가스 부족 문구가 활성 체인에 따라 갈려서(개발 66), 사장 설정이 Arc 면
+    // 이 테스트가 깨져 release.sh 를 멈췄다.
+    #[tokio::test]
+    async fn humanize_maps_common_chain_errors() {
+        crate::chain::with_pinned_chain(crate::chain::BASE_SEPOLIA.chain_id, async {
+            humanize_maps_common_chain_errors_on_base()
+        })
+        .await;
+        crate::chain::with_pinned_chain(crate::chain::ARC_TESTNET.chain_id, async {
+            assert!(
+                humanize_chain_error("insufficient funds for gas * price + value", "USDC")
+                    .starts_with("USDC가 부족해요")
+            );
+        })
+        .await;
+    }
+
+    fn humanize_maps_common_chain_errors_on_base() {
         let raw = "server returned an error response: error code 3: execution reverted: \
                    ERC20: transfer amount exceeds balance, data: \"0x08c379a0...\"";
         assert_eq!(

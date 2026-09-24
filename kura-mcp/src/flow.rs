@@ -26,6 +26,13 @@ const RECEIPT_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 /// 영수증이 45초 꽉 차서 나왔는데 제출 왕복 중에 만료되면 그것도 「돈만 나감」이다.
 const PROOF_TAIL_SECS: u64 = 20;
 
+/// 승인 **뒤** GUI 가 거래를 채우고(nonce·가스·서명) 올리는 데 남겨 둘 시간(초) — seed 수명에서 이것도 뺀다
+/// (개발 68, 코덱스 1차). 빼지 않으면 마감 직전 승인 + 느린 RPC 에서 전송은 성공하고 증거를 낼 땐 seed 가
+/// 만료된다 = 돈만 나감. 값은 GUI `transfer.rs` 의 채우기 상한(`FILL_WAIT` 30초)이다. 제출 오류 뒤
+/// 되묻기·재제출(최대 70초 더)까지는 덮지 않는다 — 그걸 다 빼면 seed 수명(기본 300초)의 3분의 1이 승인
+/// 대기에서 사라지고, 그 갈래는 어차피 「결과 불명」으로 끝나 증거를 내지 않는다.
+const BROADCAST_TAIL_SECS: u64 = 30;
+
 /// 표시용 본문 문자 상한 — 에이전트/터미널 컨텍스트 보호. 문자 단위라 UTF-8 안전.
 const MAX_BODY_CHARS: usize = 100_000;
 
@@ -582,12 +589,12 @@ pub async fn run_x402(
         )
         .into());
     }
-    // seed 수명에서 우리 창(영수증 대기 + 제출 왕복)을 뺀 승인 대기 예산. 기본 모드면 None.
+    // seed 수명에서 우리 창(전송 준비 + 영수증 대기 + 제출 왕복)을 뺀 승인 대기 예산. 기본 모드면 None.
     let budget = arc_direct::approval_budget_secs(
         seed.as_deref().and_then(arc_direct::seed_expiry),
         payment::now_secs(),
         payment::APPROVAL_TIMEOUT.as_secs(),
-        RECEIPT_WAIT.as_secs() + PROOF_TAIL_SECS,
+        BROADCAST_TAIL_SECS + RECEIPT_WAIT.as_secs() + PROOF_TAIL_SECS,
     );
     // 🔴 **이미 늦었으면 요청 파일을 쓰기 전에 멈춘다** (개발 65, 코덱스). 예전엔 이 검사가 파일을
     // 쓴 **뒤**에 있어서, 「아무것도 결제하지 않았다」고 답한 뒤에도 승인 창에 요청이 남았다 —

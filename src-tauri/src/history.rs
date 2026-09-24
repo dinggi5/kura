@@ -156,7 +156,12 @@ fn claim_settlements(path: &std::path::Path) -> (Vec<Settlement>, Vec<PathBuf>) 
         let Ok(raw) = fs::read_to_string(e.path()) else {
             continue; // 다음 폴링에 다시
         };
-        settlements.extend(serde_json::from_str::<Vec<Settlement>>(&raw).unwrap_or_default());
+        // 못 읽는 JSON 도 지우지 않는다(개발 68, 코덱스 1차) — MCP 가 가져가기 직전에 열어 둔 파일에 아직
+        // 쓰는 중이면 반쪽이 읽힌다. 남겨 두면 다 쓰인 뒤 다음 폴링에 읽힌다.
+        let Ok(batch) = serde_json::from_str::<Vec<Settlement>>(&raw) else {
+            continue;
+        };
+        settlements.extend(batch);
         consumed.push(e.path());
     }
     (settlements, consumed)
@@ -199,6 +204,9 @@ pub(crate) fn apply_x402_settlements() -> u32 {
     }
     let mut pending: Vec<&Settlement> = settlements.iter().collect();
     let mut applied = 0u32;
+    // 내역 저장이 하나라도 실패하면 묶음을 지우지 않는다(개발 68, 코덱스 1차) — 지우면 그 「signed」 는 영영
+    // 정산 대기로 남는다. 남긴 묶음은 다음 폴링에 다시 반영된다(저장된 건은 이미 signed 가 아니라 다시 안 맞는다).
+    let mut write_failed = false;
     for index in indices {
         if pending.is_empty() {
             break;
@@ -215,8 +223,13 @@ pub(crate) fn apply_x402_settlements() -> u32 {
         let hit = (before - pending.len()) as u32;
         if hit > 0 {
             applied += hit;
-            let _ = write_json(hp, &list);
+            if write_json(hp, &list).is_err() {
+                write_failed = true;
+            }
         }
+    }
+    if write_failed {
+        return applied;
     }
     // 읽은 묶음은 지운다 — 매칭 실패분은 버린다(예전과 같다).
     for p in consumed {
