@@ -455,6 +455,17 @@ export function SettingsScreen({
                   </p>
                 </div>
               )}
+              {/* Arc 직접 제출의 위험 (개발 68, 사장 결정 09-24) — 가스가 곧 USDC 인 체인에서만 지갑이 x402 를
+                  직접 올린다(x402.rs 가 native_is_usdc 로 거른다). 키 위험은 그대로라는 걸 먼저 말하고, 달라지는
+                  셋만 적는다. 경고가 아니라 사실이라 콜아웃 없이 흐린 글씨로. */}
+              {chain.nativeIsUsdc && (
+                <p className="mt-2.5 text-[11px] leading-relaxed text-[var(--color-ink-300)]">
+                  {t(
+                    "Arc의 x402 결제는 지갑이 직접 체인에 올려요. 열쇠는 그대로 이 맥 안에 있고, 달라지는 건 셋이에요. 돈이 먼저 나가서 상대가 콘텐츠를 안 줘도 돌려받기 어려워요. 수수료도 이 잔액의 USDC에서 나가요. 아직 표준이 아니라 이 방식을 받는 곳이 적어요.",
+                    "On Arc, the wallet submits x402 payments to the chain itself. Your key still never leaves this Mac; three things differ. The money goes first, so if the seller doesn't deliver it's hard to get back. The fee also comes out of this USDC balance. It isn't a standard yet, so few sellers accept it.",
+                  )}
+                </p>
+              )}
 
               {/* ERC-8004 신원 조회 (개발 47) — 레지스트리가 배포된 체인에서만 보여준다.
                   네트워크 섹션에 두는 이유: 하는 일이 "이 체인의 레지스트리를 읽는 것"이고,

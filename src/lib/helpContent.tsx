@@ -77,13 +77,13 @@ export const HELP_SECTIONS: HelpSection[] = [
           보내면 자금을 잃을 수 있어요.
         </p>
         <p>
-          기본 설정인 <b className={em}>테스트넷</b>에선 진짜 돈이 아니라서, 받기 화면의 Faucet
+          <b className={em}>테스트넷</b>에선 진짜 돈이 아니라서, 받기 화면의 Faucet
           버튼으로 공짜 테스트 코인을 받아 연습할 수 있어요.
         </p>
         <p>
-          <b className={em}>결제엔 가스가 없어도 돼요</b> — x402 결제의 가스비는 대신 내주는
-          구조예요. 보내기로 직접 송금할 때만 가스가 아주 조금 드는데, 무엇으로 내는지는 체인이
-          정해요 — Base는 ETH, Arc는 USDC예요.
+          <b className={em}>Base에선 결제에 가스가 없어도 돼요</b> — x402 결제의 가스비는 대신
+          내주는 구조예요. 보내기로 직접 송금할 때만 ETH가 아주 조금 들어요. Arc는 가스도
+          USDC라, 송금이든 x402 결제든 수수료가 USDC 잔액에서 나가요.
         </p>
       </div>,
       <div className="space-y-2.5">
@@ -101,9 +101,9 @@ export const HELP_SECTIONS: HelpSection[] = [
           free test coins from the Faucet buttons on the Receive screen.
         </p>
         <p>
-          <b className={em}>You don't need gas to pay</b> — with x402 the gas is covered for you.
-          Only a direct transfer from the Send screen needs a little gas, and the chain decides what
-          it's paid in — ETH on Base, USDC on Arc.
+          <b className={em}>On Base you don't need gas to pay</b> — with x402 the gas is covered
+          for you. Only a direct transfer from the Send screen needs a little ETH. On Arc gas is
+          USDC too, so transfers and x402 payments alike take their fee from the USDC balance.
         </p>
       </div>,
     ),
