@@ -461,8 +461,8 @@ export function SettingsScreen({
               {chain.nativeIsUsdc && (
                 <p className="mt-2.5 text-[11px] leading-relaxed text-[var(--color-ink-300)]">
                   {t(
-                    "Arc의 x402 결제는 지갑이 직접 거래를 체인에 올리는 구조예요. x402 수수료가 잔액의 USDC에서 나가요.",
-                    "On Arc, the wallet itself submits the x402 payment transaction to the chain. The x402 fee comes out of your USDC balance.",
+                    "Arc에선 지갑이 x402 결제를 직접 체인에 올려요. 수수료도 잔액의 USDC에서 나가요.",
+                    "On Arc, the wallet submits x402 payments to the chain itself. The fee also comes out of your USDC balance.",
                   )}
                 </p>
               )}
