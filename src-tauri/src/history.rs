@@ -156,9 +156,19 @@ fn claim_settlements(path: &std::path::Path) -> (Vec<Settlement>, Vec<PathBuf>) 
         let Ok(raw) = fs::read_to_string(e.path()) else {
             continue; // 다음 폴링에 다시
         };
-        // 못 읽는 JSON 도 지우지 않는다(개발 68, 코덱스 1차) — MCP 가 가져가기 직전에 열어 둔 파일에 아직
-        // 쓰는 중이면 반쪽이 읽힌다. 남겨 두면 다 쓰인 뒤 다음 폴링에 읽힌다.
+        // 못 읽는 JSON 도 바로 지우지 않는다(개발 68, 코덱스 1차) — MCP 가 가져가기 직전에 열어 둔 파일에 아직
+        // 쓰는 중이면 반쪽이 읽힌다. 남겨 두면 다 쓰인 뒤 다음 폴링에 읽힌다. 단 마지막 수정이 60초를 넘었는데도
+        // 못 읽으면 쓰기가 끝내 멈춘 것이라 지운다(코덱스 2차 P2 — 안 지우면 1초마다 다시 읽으며 쌓인다).
         let Ok(batch) = serde_json::from_str::<Vec<Settlement>>(&raw) else {
+            let stale = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > std::time::Duration::from_secs(60));
+            if stale {
+                let _ = fs::remove_file(e.path());
+            }
             continue;
         };
         settlements.extend(batch);
