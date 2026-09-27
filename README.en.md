@@ -188,9 +188,9 @@ Tools the AI gets: `get_wallet_status` · `get_balances` · `get_history` (read 
 - **Limits** — you set how much can go out per payment and per day (5 and 20 USDC by default). Anything over is blocked.
 - **Emergency lock** — the shield button in the header blocks every payment at once.
 - **Trusted addresses · autopay** — approving without a password needs all three: *an unlocked session, an amount under the small limit, and an address you've approved before*. Everything else asks.
-- **History** — every payment sent, attempt blocked, and signature made is recorded.
+- **History** — every payment received or sent, attempt blocked, and signature made is recorded. Incoming payments are found straight from the RPC (the first time, going back 90 days).
 - **Local first** — the key (`~/.jigap/`) lives outside the repo and is never committed.
-- **No analytics, no font CDN** — the app reaches the internet in exactly three places: ① the RPC server used to read balances and send payments, ② the x402 URL the AI asked for, and ③ the update check on GitHub. Nothing about your usage is sent anywhere, and the typeface ships inside the app, so the UI renders fine offline.
+- **No analytics, no font CDN** — the app reaches the internet in exactly three places: ① the RPC server used to read balances, find incoming payments, and send payments, ② the x402 URL the AI asked for, and ③ the update check on GitHub. Nothing about your usage is sent anywhere, and the typeface ships inside the app, so the UI renders fine offline.
 - **The update check can be turned off** — on launch the app asks GitHub whether a newer version exists (your IP and current version show up there). Turn off **Settings → About → Check at startup** and that request stops too. Either way, **installing is always your press** — nothing changes behind your back.
 
 ---

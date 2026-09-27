@@ -34,8 +34,9 @@
 
   <div class="card">
     <h3>1. 블록체인 RPC</h3>
-    <p>잔액을 읽고 거래를 보내려면 Base 네트워크의 RPC 서버와 통신해야 합니다. 기본값은 그
-    네트워크의 공개 RPC이고, 설정에서 다른 주소로 바꿀 수 있습니다.</p>
+    <p>잔액을 읽고, 들어온 돈을 찾고, 거래를 보내려면 선택한 네트워크의 RPC 서버와 통신해야 합니다.
+    기본값은 그 네트워크의 공개 RPC이고, 설정에서 다른 주소로 바꿀 수 있습니다. 들어온 돈은 앱이 켜져 있는
+    동안(창이 닫혀 있어도) 이 서버에 물어 찾고, 처음 한 번은 90일 전까지 거슬러 확인합니다.</p>
     <p>그 서버는 <strong>IP와 지갑 주소</strong>를 볼 수 있습니다. 전송된 거래는 공개 블록체인에
     영구히 남습니다. 키가 로컬에 있다는 것과 활동이 비공개라는 것은 다른 얘기입니다.</p>
   </div>
@@ -96,8 +97,8 @@
   crash reporting, no ads, no trackers. Wallet data — the encrypted key file, settings, and history —
   lives only in <code>~/.jigap</code> on your Mac. Your password and 12-word recovery phrase are
   entered in the app alone and are never stored elsewhere or transmitted.</p>
-  <p>Three connections leave your machine. <strong>(1) A Base RPC server</strong>, to read balances and
-  broadcast transactions — it can see your IP and wallet address, and transactions are permanently
+  <p>Three connections leave your machine. <strong>(1) An RPC server for the network you chose</strong>, to read balances, find incoming
+  payments (while the app runs, even with its window closed, and once back 90 days), and broadcast transactions — it can see your IP and wallet address, and transactions are permanently
   public on-chain. <strong>(2) x402 resources</strong>, only URLs you or your agent ask for; that
   server sees your IP, address, and payment signature. <strong>(3) An update check</strong> to GitHub
   at launch, which you can turn off in Settings → About. Payments require, by default, a human

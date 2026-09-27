@@ -25,6 +25,7 @@
 mod autostart;
 mod chain;
 mod connect;
+mod deposits;
 mod history;
 mod i18n;
 mod ipc;
@@ -118,6 +119,8 @@ pub fn run() {
             // 생존 감시(개발 49) — 하트비트를 러스트가 찍고, 프론트가 잠든 사이 온 결제 요청에
             // 창을 깨운다. 트레이가 만들어진 뒤여야 창을 트레이 아래로 배치할 수 있다.
             ipc::spawn_watchdog(app.handle());
+            // 입금 기록(개발 69) — 활성 체인·계정으로 들어온 돈을 계속 찾는다(처음엔 90일 전까지 채운다).
+            deposits::spawn(app.handle().clone());
             // 평소엔 트레이에만 조용히 상주한다(로그인 자동 시작 때 창이 튀어나오지 않게).
             // 단 첫 실행은 예외 — 메뉴바 아이콘만 뜨고 아무 일도 없으면 뭘 해야 할지 알 수 없다.
             if wallet::needs_setup() {

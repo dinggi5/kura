@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence } from "framer-motion";
 import {
   ArrowDownLeft,
@@ -248,6 +249,18 @@ export function WalletScreen({
       window.removeEventListener("focus", onReturn);
     };
   }, [refreshBalancesSilent, loadLimits]);
+
+  // 입금 기록(개발 69): 러스트가 새 입금을 적으면 알려 온다 — 내역과 잔액을 다시 읽는다.
+  // (입금 찾기는 창이 숨어 있어도 돈다. 숨은 동안 온 알림도 다시 보일 때 화면이 맞아 있게 여기서 받는다.)
+  useEffect(() => {
+    const off = listen<number>("deposits-changed", () => {
+      loadHistory();
+      void refreshBalancesSilent();
+    });
+    return () => {
+      void off.then((f) => f());
+    };
+  }, [loadHistory, refreshBalancesSilent]);
 
   // 1초 폴링: ① AI 연결 상태 ② 세션 상태 ③ 결제 요청(=앱 생존 하트비트 갱신, 자율 승인 우선 시도).
   // 새 결제 요청 1건당 자율 승인을 먼저 시도 → 자율 불가면(NEEDS_PASSWORD·차단) 사람 승인 모달.

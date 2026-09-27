@@ -1,9 +1,10 @@
-// 거래 내역 화면 — 모든 송금/서명 시도(성공·차단·실패·정산)를 최신순으로.
+// 거래 내역 화면 — 모든 송금/서명 시도(성공·차단·실패·정산)와 들어온 돈(개발 69)을 최신순으로.
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "framer-motion";
 import {
   AlertTriangle,
+  ArrowDownLeft,
   ArrowUpRight,
   Ban,
   Check,
@@ -58,8 +59,8 @@ export function HistoryScreen({
             </p>
             <p className="mt-1 text-[11px] text-[var(--color-ink-300)]">
               {t(
-                "보낸 송금과 차단된 시도가 여기에 쌓여요.",
-                "Payments you send and attempts that were blocked show up here.",
+                "받은 돈과 보낸 송금, 차단된 시도가 여기에 쌓여요.",
+                "Money you receive, payments you send, and blocked attempts show up here.",
               )}
             </p>
           </div>
@@ -78,6 +79,8 @@ export function HistoryScreen({
 }
 
 const HISTORY_META: Record<string, { icon: React.ReactNode; ring: string; label: string; labelColor: string }> = {
+  // 들어온 돈(개발 69) — 보낸 것과 방향만 다르다. 색은 같은 강조색, 화살표로 가른다.
+  received: { icon: <ArrowDownLeft size={15} />, ring: "bg-[var(--color-accent)]/10 text-[var(--color-accent)]", label: t("받음", "Received"), labelColor: "" },
   sent: { icon: <ArrowUpRight size={15} />, ring: "bg-[var(--color-accent)]/10 text-[var(--color-accent)]", label: t("보냄", "Sent"), labelColor: "" },
   settled: { icon: <Check size={15} />, ring: "bg-[var(--color-accent)]/10 text-[var(--color-accent)]", label: t("정산됨", "Settled"), labelColor: "" },
   signed: { icon: <FileSignature size={15} />, ring: "bg-[var(--color-ink-500)]/10 text-[var(--color-ink-500)] dark:text-[#B5AFA2]", label: t("정산 대기", "Awaiting settlement"), labelColor: "text-[var(--color-ink-300)]" },
@@ -94,8 +97,10 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
 
   // BaseScan 링크 대상 tx: 송금="sent"의 detail, x402 정산="settled"의 settle_tx.
   // 확인 필요("unknown")도 detail 이 tx 해시다 — 익스플로러에서 들어갔는지 볼 수 있어야 한다.
+  // 받음("received")도 detail 이 tx 해시다 — 컨트랙트가 보낸 ETH 는 해시를 몰라 빈 값(링크 없음).
+  const received = entry.status === "received";
   const linkTx =
-    entry.status === "sent" || entry.status === "unknown"
+    entry.status === "sent" || entry.status === "unknown" || received
       ? entry.detail
       : entry.status === "settled"
         ? entry.settle_tx ?? ""
@@ -118,8 +123,13 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
           <span className="text-[11px] text-[var(--color-ink-500)]">{entry.token}</span>
         </div>
         <p className="mt-0.5 flex items-center gap-1 text-[11px] text-[var(--color-ink-300)] font-mono truncate">
-          <ArrowUpRight size={10} className="shrink-0" />
-          {shortenAddress(entry.to)}
+          {received ? (
+            <ArrowDownLeft size={10} className="shrink-0" />
+          ) : (
+            <ArrowUpRight size={10} className="shrink-0" />
+          )}
+          {/* 받음의 상대는 보낸 주소 — 컨트랙트 내부 전송이라 모르면 비운다. */}
+          {entry.to ? shortenAddress(entry.to) : t("컨트랙트에서", "From a contract")}
         </p>
         {showReason && (
           <p className="mt-0.5 text-[11px] text-[var(--color-ink-300)] truncate">{entry.detail}</p>

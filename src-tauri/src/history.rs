@@ -87,10 +87,23 @@ fn redact_details(mut list: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
     list
 }
 
-/// 거래 내역을 최신순으로 돌려준다.
+/// 거래 내역을 최신순으로 돌려준다 — 보낸 기록에 **입금 기록**(개발 69)을 시각순으로 섞는다.
 #[tauri::command]
 pub(crate) fn get_history() -> Vec<HistoryEntry> {
-    redact_details(read_history())
+    merge_received(
+        redact_details(read_history()),
+        crate::deposits::read_deposits(),
+    )
+}
+
+/// 보낸 기록(최신순)과 입금 기록을 한 줄로 — 시각 최신순, 같은 시각이면 원래 순서(안정 정렬).
+fn merge_received(
+    mut list: Vec<HistoryEntry>,
+    deposits: Vec<crate::deposits::Deposit>,
+) -> Vec<HistoryEntry> {
+    list.extend(deposits.iter().map(crate::deposits::as_history));
+    list.sort_by_key(|e| std::cmp::Reverse(e.ts));
+    list
 }
 
 /// MCP가 기록한 정산 결과 1건. nonce 로 "signed" 내역과 매칭한다.
@@ -394,6 +407,44 @@ mod tests {
         };
         assert!(apply_settlement(&mut list2, &fail));
         assert_eq!(list2[0].status, "settle_failed");
+    }
+
+    // 입금이 보낸 기록 사이에 시각순으로 끼고, 보낸 기록끼리의 순서는 그대로다(개발 69).
+    #[test]
+    fn received_merges_by_time() {
+        let sent = |ts: u64, tag: &str| HistoryEntry {
+            ts,
+            token: "USDC".into(),
+            to: "0x0".into(),
+            amount: "1".into(),
+            status: "sent".into(),
+            detail: tag.into(),
+            settle_tx: String::new(),
+        };
+        let dep = crate::deposits::Deposit {
+            ts: 5,
+            token: "USDC".into(),
+            from: "0xFrom".into(),
+            amount: "2".into(),
+            tx: "0xtx".into(),
+            block: 1,
+            key: "k".into(),
+        };
+        let out = merge_received(vec![sent(9, "a"), sent(5, "b"), sent(1, "c")], vec![dep]);
+        let tags: Vec<_> = out
+            .iter()
+            .map(|e| (e.status.as_str(), e.detail.as_str()))
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                ("sent", "a"),
+                ("sent", "b"),
+                ("received", "0xtx"),
+                ("sent", "c")
+            ]
+        );
+        assert_eq!(out[2].to, "0xFrom");
     }
 
     // 과거에 기록된 비redact detail(RPC URL·키)은 출력 시점에 가려진다(코덱스 High).
