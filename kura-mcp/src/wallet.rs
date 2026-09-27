@@ -283,6 +283,9 @@ pub use crate::policy::HistoryEntry;
 /// 저장된 거래 내역을 읽는다 (최신순). 없거나 깨졌으면 빈 목록.
 /// detail 은 출력 시점에 redact — 이번 패치 이전(또는 다른 빌드)이 기록한 비redact 에러에
 /// RPC URL·키가 들어 있어도 get_history(→AI)·CLI 로 다시 새지 않게 한다(코덱스 High 반영).
+///
+/// 입금 기록(개발 69 — GUI 가 체인에서 찾아 적는다)도 시각순으로 섞는다. GUI 내역 화면과 **같은 함수**
+/// (`policy::merge_received`) — AI 가 「돈이 들어왔나」를 물을 때 화면과 다른 답을 하지 않게.
 pub fn read_history() -> Vec<HistoryEntry> {
     let mut entries: Vec<HistoryEntry> = history_path()
         .ok()
@@ -292,7 +295,17 @@ pub fn read_history() -> Vec<HistoryEntry> {
     for e in &mut entries {
         e.detail = redact_urls(&e.detail);
     }
-    entries
+    crate::policy::merge_received(entries, &read_deposits())
+}
+
+/// 활성 계정의 입금 기록 — 파일의 주인 주소가 활성 계정과 같을 때만(`policy::deposits_of`).
+/// 입금을 찾는 건 암호화 지갑(계정 목록)이 있는 GUI 뿐이라, wallet.enc 가 없으면 빈 목록.
+fn read_deposits() -> Vec<crate::policy::Deposit> {
+    let (Ok(account), Ok(dir)) = (active_account(), jigap_dir()) else {
+        return Vec::new();
+    };
+    let path = dir.join(account_file_name(&chain_file("deposits"), account.index));
+    crate::policy::deposits_of(&path, &account.address)
 }
 
 #[cfg(test)]

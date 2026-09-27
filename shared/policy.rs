@@ -316,13 +316,86 @@ pub struct HistoryEntry {
     /// 금액 (십진수 문자열).
     pub amount: String,
     /// "sent" | "blocked" | "failed" | "signed"(x402 서명·정산 대기) | "settled"(x402 정산됨) | "settle_failed"
-    /// | "unknown"(개발 66 — 서명한 tx 를 냈는데 체인이 받았는지 모름. 한도는 환불하지 않았다).
+    /// | "unknown"(개발 66 — 서명한 tx 를 냈는데 체인이 받았는지 모름. 한도는 환불하지 않았다)
+    /// | "received"(개발 69 — 들어온 돈. history 파일엔 없고 읽을 때 입금 기록에서 섞는다. `to` = 보낸 주소).
     pub status: String,
     /// sent·unknown=tx 해시, blocked/failed=사유, signed=인가 nonce(정산 매칭용).
     pub detail: String,
     /// x402 정산 tx 해시(페이실리테이터가 온체인 제출). 정산 전엔 빈 문자열. (Session 14)
     #[serde(default)]
     pub settle_tx: String,
+}
+
+// ── 입금 기록 (개발 69) ─────────────────────────────────────────────────────────────────────────
+
+/// 들어온 돈 1건 — GUI 의 입금 찾기(src-tauri/src/deposits.rs)가 쓰고, GUI 내역 화면·MCP·CLI 가 읽는다.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Deposit {
+    /// 블록 시각(유닉스 초) — 발견한 시각이 아니다(90일 전 입금은 90일 전 시각으로 남는다).
+    pub ts: u64,
+    /// "USDC" | "ETH".
+    pub token: String,
+    /// 보낸 주소. 컨트랙트 내부 전송이라 모르면 빈 값.
+    pub from: String,
+    /// 십진 금액(끝의 0 은 뗀다).
+    pub amount: String,
+    /// 거래 해시. 내부 전송이라 모르면 빈 값.
+    pub tx: String,
+    pub block: u64,
+    /// 중복 방지 키 — 로그는 `tx:로그번호`, 직접 ETH 는 `eth:tx`, 내부 ETH 는 `eth-int:블록`.
+    pub key: String,
+}
+
+/// 입금 기록 파일 — **주인 주소를 함께 싣는다**(코덱스 개발 69 1차 P1). 파일 이름은 체인·계정 번호로만
+/// 갈리므로, 지갑을 지우고 다른 시드를 가져오면 같은 이름의 옛 기록이 새 주소의 입금처럼 보인다.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct DepositLog {
+    pub address: String,
+    /// 최신순.
+    pub items: Vec<Deposit>,
+}
+
+/// 입금 기록 파일을 읽는다 — 없으면 `Ok(None)`, **있는데 못 읽거나 깨졌으면 `Err`**.
+/// 둘을 가르는 이유(코덱스 개발 69 1차): 깨진 파일을 빈 목록으로 읽고 새 입금을 합쳐 쓰면 옛 기록이 지워지는데,
+/// 커서는 이미 그 구간을 지나 있어서 다시 찾지도 않는다.
+pub fn read_deposit_log(path: &Path) -> Result<Option<DepositLog>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => serde_json::from_str(&s)
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// 이 주소가 받은 입금(최신순) — 화면·AI 용. 주인이 다르거나 못 읽으면 빈 목록(보여 줄 게 없을 뿐, 지우지 않는다).
+pub fn deposits_of(path: &Path, address: &str) -> Vec<Deposit> {
+    match read_deposit_log(path) {
+        Ok(Some(log)) if log.address.eq_ignore_ascii_case(address) => log.items,
+        _ => Vec::new(),
+    }
+}
+
+/// 입금 1건을 내역의 한 줄로 — `status = "received"`, 보낸 주소는 `to` 자리에, 해시는 `detail` 에.
+/// (history 파일에 섞어 쓰지 않는다: 그 파일은 보낸 기록이고 200건 상한이 있다.)
+pub fn deposit_as_history(d: &Deposit) -> HistoryEntry {
+    HistoryEntry {
+        ts: d.ts,
+        token: d.token.clone(),
+        to: d.from.clone(),
+        amount: d.amount.clone(),
+        status: "received".into(),
+        detail: d.tx.clone(),
+        settle_tx: String::new(),
+    }
+}
+
+/// 보낸 기록(최신순)과 입금을 한 줄로 — 시각 최신순, 같은 시각이면 원래 순서(안정 정렬).
+/// GUI 내역 화면과 MCP·CLI `get_history` 가 **같은 함수**로 섞는다.
+pub fn merge_received(mut list: Vec<HistoryEntry>, deposits: &[Deposit]) -> Vec<HistoryEntry> {
+    list.extend(deposits.iter().map(deposit_as_history));
+    list.sort_by_key(|e| std::cmp::Reverse(e.ts));
+    list
 }
 
 // ── URL 가리기 ──────────────────────────────────────────────────────────────────────────────
@@ -524,6 +597,71 @@ pub fn attempt_prunable(age_secs: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dep(key: &str, ts: u64) -> Deposit {
+        Deposit {
+            ts,
+            token: "USDC".into(),
+            from: "0xFrom".into(),
+            amount: "2".into(),
+            tx: format!("0x{key}"),
+            block: ts,
+            key: key.into(),
+        }
+    }
+
+    // 입금이 보낸 기록 사이에 시각순으로 끼고, 보낸 기록끼리의 순서는 그대로다(개발 69).
+    #[test]
+    fn received_merges_by_time() {
+        let sent = |ts: u64, tag: &str| HistoryEntry {
+            ts,
+            token: "USDC".into(),
+            to: "0x0".into(),
+            amount: "1".into(),
+            status: "sent".into(),
+            detail: tag.into(),
+            settle_tx: String::new(),
+        };
+        let out = merge_received(
+            vec![sent(9, "a"), sent(5, "b"), sent(1, "c")],
+            &[dep("tx", 5)],
+        );
+        let tags: Vec<_> = out
+            .iter()
+            .map(|e| (e.status.as_str(), e.detail.as_str()))
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                ("sent", "a"),
+                ("sent", "b"),
+                ("received", "0xtx"),
+                ("sent", "c")
+            ]
+        );
+        assert_eq!(out[2].to, "0xFrom");
+    }
+
+    // 🔴 입금 기록 읽기(코덱스 개발 69 1차): 없음 ≠ 깨짐, 주인이 다르면 안 보인다.
+    #[test]
+    fn deposit_log_missing_broken_and_foreign() {
+        let dir = std::env::temp_dir().join(format!("kura-deplog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("deposits-8453.json");
+        assert_eq!(read_deposit_log(&path), Ok(None));
+        std::fs::write(&path, "{ 반쪽").unwrap();
+        assert!(read_deposit_log(&path).is_err());
+        assert!(deposits_of(&path, "0xAbc").is_empty());
+        let log = DepositLog {
+            address: "0xAbC".into(),
+            items: vec![dep("k", 1)],
+        };
+        std::fs::write(&path, serde_json::to_string(&log).unwrap()).unwrap();
+        assert_eq!(deposits_of(&path, "0xabc").len(), 1); // 대소문자는 무시
+        assert!(deposits_of(&path, "0xOther").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // ~/.jigap 이름과 조회 스위치.
     #[test]

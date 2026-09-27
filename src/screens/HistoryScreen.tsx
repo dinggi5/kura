@@ -91,6 +91,13 @@ const HISTORY_META: Record<string, { icon: React.ReactNode; ring: string; label:
   unknown: { icon: <AlertTriangle size={15} />, ring: "bg-amber-500/10 text-amber-600 dark:text-amber-500", label: t("확인 필요", "Unconfirmed"), labelColor: "text-amber-600 dark:text-amber-500" },
 };
 
+/** 금액 — 보통은 USDC 2자리·ETH 5자리로 줄이되, 0 이 아닌 금액이 「0」으로 보이면 원래 값 그대로
+ *  (코덱스 개발 69 1차: 0.000001 USDC 입금이 「0 USDC」로 보였다). */
+function amountText(entry: HistoryEntry): string {
+  const short = fmtAmount(entry.amount, entry.token === "ETH" ? 5 : 2);
+  return short === "0" && Number(entry.amount) > 0 ? entry.amount : short;
+}
+
 function HistoryRow({ entry }: { entry: HistoryEntry }) {
   const chain = useChain();
   const meta = HISTORY_META[entry.status] ?? HISTORY_META.failed;
@@ -118,7 +125,7 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-baseline gap-1.5">
           <span className="num text-[14px] tracking-tight text-[var(--color-ink-900)] dark:text-[#E8E5DD]">
-            {fmtAmount(entry.amount, entry.token === "ETH" ? 5 : 2)}
+            {amountText(entry)}
           </span>
           <span className="text-[11px] text-[var(--color-ink-500)]">{entry.token}</span>
         </div>

@@ -331,13 +331,23 @@ async fn cmd_history(cli: &Cli) -> Result<(), String> {
         } else {
             &e.detail
         };
+        // 받음(개발 69)은 상대가 보낸 사람이라 화살표가 반대다. 컨트랙트 내부 전송이면 보낸 주소를 모른다.
+        let counterpart = if e.status == "received" {
+            if e.to.is_empty() {
+                format!("← {}", ts!("컨트랙트", "a contract"))
+            } else {
+                format!("← {}", shorten(&e.to))
+            }
+        } else {
+            format!("→ {}", shorten(&e.to))
+        };
         let mut line = format!(
-            "{}  ·  {} {}  ·  {}  ·  → {}",
+            "{}  ·  {} {}  ·  {}  ·  {}",
             status_label(&e.status, lang()),
             e.token,
             e.amount,
             rel_time(now, e.ts, lang()),
-            shorten(&e.to),
+            counterpart,
         );
         if hash.starts_with("0x") {
             line.push_str(&format!("  ·  tx {}", shorten(hash)));
@@ -742,6 +752,7 @@ fn status_label(status: &str, lang: Lang) -> &str {
         "settled" => ("정산됨", "settled"),
         "settle_failed" => ("정산실패", "settlement failed"),
         "unknown" => ("확인 필요", "unconfirmed"),
+        "received" => ("받음", "received"),
         // 모르는 코드는 그대로 — 새 status 가 생겨도 원문이 보이는 편이 낫다(옛 status_ko 와 같다).
         other => return other,
     };

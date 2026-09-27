@@ -198,9 +198,11 @@ impl WalletServer {
     #[tool(
         description = "Returns the active account's recent transaction attempts, newest first. status is one of sent, blocked, failed, \
         signed (x402 signed, awaiting settlement), settled (x402 settled, settle_tx is the settlement tx), \
-        settle_failed, or unknown (a signed transaction was submitted but the wallet couldn't confirm the \
+        settle_failed, unknown (a signed transaction was submitted but the wallet couldn't confirm the \
         chain received it — detail is its tx hash; it may have gone through, so never resend on the strength \
-        of this entry alone). Use limit to cap how many come back (default 20)."
+        of this entry alone), or received (money that came in — to is the sender, detail the tx hash; both are \
+        empty for ETH a contract sent; found on-chain by the wallet app while it runs, back to 90 days). \
+        Use limit to cap how many come back (default 20)."
     )]
     async fn get_history(
         &self,

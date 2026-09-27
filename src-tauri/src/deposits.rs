@@ -37,7 +37,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::chain::{chain_by_id, with_pinned_chain, ChainConfig};
-use crate::policy::{self, HistoryEntry};
+use crate::policy;
 use crate::settings::effective_rpc;
 use crate::store::{jigap_dir, write_json};
 
@@ -92,23 +92,8 @@ fn is_rate_limited(e: &str) -> bool {
 /// 입금 기록 보관 상한(최신순). 잡음 입금이 파일을 끝없이 키우지 않게.
 const DEPOSITS_CAP: usize = 5_000;
 
-/// 들어온 돈 1건.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub(crate) struct Deposit {
-    /// 블록 시각(유닉스 초) — 발견한 시각이 아니다(90일 전 입금은 90일 전 시각으로 남는다).
-    pub ts: u64,
-    /// "USDC" | "ETH".
-    pub token: String,
-    /// 보낸 주소. 컨트랙트 내부 전송이라 모르면 빈 값.
-    pub from: String,
-    /// 십진 금액(끝의 0 은 뗀다).
-    pub amount: String,
-    /// 거래 해시. 내부 전송이라 모르면 빈 값.
-    pub tx: String,
-    pub block: u64,
-    /// 중복 방지 키 — 로그는 `tx:로그번호`, 직접 ETH 는 `eth:tx`, 내부 ETH 는 `eth-int:블록`.
-    pub key: String,
-}
+/// 들어온 돈 1건 — 형식의 정본은 `policy::Deposit`(MCP·CLI 가 같은 타입으로 읽는다).
+pub(crate) use crate::policy::Deposit;
 
 /// 어디까지 훑었는지 — 구간 (low, high] 을 다 봤다는 뜻.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
@@ -150,12 +135,14 @@ fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &PathBuf) -> T {
         .unwrap_or_default()
 }
 
-/// 활성 체인·계정의 입금 기록(최신순).
+/// 활성 체인·계정의 입금 기록(최신순). 주인 주소가 활성 계정과 다르면 빈 목록(`policy::deposits_of`).
 pub(crate) fn read_deposits() -> Vec<Deposit> {
     let chain_id = crate::chain::active_chain().chain_id;
-    let index = crate::wallet::active_account_index();
-    deposits_path(chain_id, index)
-        .map(|p| read_json(&p))
+    let Ok(account) = crate::wallet::active_account() else {
+        return Vec::new();
+    };
+    deposits_path(chain_id, account.index)
+        .map(|p| policy::deposits_of(&p, &account.address))
         .unwrap_or_default()
 }
 
@@ -184,18 +171,32 @@ fn merge_deposits(
     (list, added)
 }
 
-/// 입금 1건을 내역 화면의 한 줄로 — `status = "received"`, 상대 주소는 `to` 자리에, 해시는 `detail` 에.
-/// (내역 파일에 섞어 쓰지 않는다: 그 파일은 MCP·CLI 가 읽는 송금 기록이고 200건 상한이 있다.)
-pub(crate) fn as_history(d: &Deposit) -> HistoryEntry {
-    HistoryEntry {
-        ts: d.ts,
-        token: d.token.clone(),
-        to: d.from.clone(),
-        amount: d.amount.clone(),
-        status: "received".into(),
-        detail: d.tx.clone(),
-        settle_tx: String::new(),
+/// 찾은 입금을 기록 파일에 합쳐 쓴다 — 새로 들어간 수를 돌려준다.
+/// 🔴 파일을 못 읽으면 **에러로 멈춘다** — 빈 목록으로 읽고 합쳐 쓰면 옛 기록이 지워지고, 커서는 그 구간을
+/// 이미 지나 다시 찾지도 않는다(코덱스 개발 69 1차). 다른 주소의 기록(지갑을 지우고 다른 시드를 가져왔다)은
+/// 지우지 않고 `…<그 주소>.json` 으로 옆에 치운다.
+fn store_found(dp: &PathBuf, address: &str, found: Vec<Deposit>) -> Result<usize, String> {
+    if found.is_empty() {
+        return Ok(0);
     }
+    let items = match policy::read_deposit_log(dp)? {
+        Some(log) if log.address.eq_ignore_ascii_case(address) => log.items,
+        Some(log) => {
+            let aside = dp.with_extension(format!("{}.json", log.address.to_ascii_lowercase()));
+            std::fs::rename(dp, &aside).map_err(|e| e.to_string())?;
+            Vec::new()
+        }
+        None => Vec::new(),
+    };
+    let (items, n) = merge_deposits(items, found, DEPOSITS_CAP);
+    if n > 0 {
+        let log = policy::DepositLog {
+            address: address.to_string(),
+            items,
+        };
+        write_json(dp.clone(), &log)?;
+    }
+    Ok(n)
 }
 
 /// 십진 금액 — 끝의 0 과 점을 뗀다("1.500000" → "1.5", "2.000000" → "2").
@@ -625,14 +626,9 @@ async fn scan_with(
     let mut added = 0usize;
 
     // 기록을 먼저 쓰고 커서를 옮긴다 — 그 사이에 죽으면 다음에 같은 구간을 다시 보고, 키가 중복을 막는다.
+    // 기록을 못 쓰거나 못 읽으면 `?` 로 멈춘다 = 커서가 안 옮겨진다(`store_found`).
     let mut commit = |found: Vec<Deposit>, st: &ScanState| -> Result<(), String> {
-        if !found.is_empty() {
-            let (list, n) = merge_deposits(read_json(&dp), found, DEPOSITS_CAP);
-            if n > 0 {
-                write_json(dp.clone(), &list)?;
-                added += n;
-            }
-        }
+        added += store_found(&dp, &address, found)?;
         write_json(sp.clone(), st)
     };
 
@@ -871,6 +867,36 @@ mod tests {
         assert_eq!(capped[1].key, "a"); // 가장 오래된 c 가 밀려났다
     }
 
+    // 🔴 기록 쓰기(코덱스 개발 69 1차): 깨진 파일은 덮지 않고 에러, 남의 주소 기록은 옆으로 치우고 새로 시작.
+    #[test]
+    fn store_found_refuses_broken_and_sets_aside_foreign() {
+        let dir = std::env::temp_dir().join(format!("kura-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dp = dir.join("deposits-8453.json");
+        assert_eq!(store_found(&dp, "0xMe", vec![dep("a", 1)]).unwrap(), 1);
+        assert_eq!(
+            store_found(&dp, "0xMe", vec![dep("a", 1), dep("b", 2)]).unwrap(),
+            1
+        );
+        assert_eq!(policy::deposits_of(&dp, "0xme").len(), 2);
+
+        std::fs::write(&dp, "{ 깨짐").unwrap();
+        assert!(store_found(&dp, "0xMe", vec![dep("c", 3)]).is_err());
+        assert_eq!(std::fs::read_to_string(&dp).unwrap(), "{ 깨짐"); // 안 덮었다
+
+        let foreign = policy::DepositLog {
+            address: "0xOld".into(),
+            items: vec![dep("old", 1)],
+        };
+        std::fs::write(&dp, serde_json::to_string(&foreign).unwrap()).unwrap();
+        assert_eq!(store_found(&dp, "0xMe", vec![dep("c", 3)]).unwrap(), 1);
+        assert_eq!(policy::deposits_of(&dp, "0xMe").len(), 1);
+        let aside = dir.join("deposits-8453.0xold.json");
+        assert_eq!(policy::deposits_of(&aside, "0xOld").len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn amounts_trim_trailing_zeros() {
         assert_eq!(fmt_amount(U256::from(2_000_000u64), 6), "2");
@@ -1085,7 +1111,7 @@ mod tests {
         for (chain, addr, tx, amount, token) in cases {
             let dp = deposits_path(chain.chain_id, 0).unwrap();
             let find = || -> Option<Deposit> {
-                read_json::<Vec<Deposit>>(&dp)
+                policy::deposits_of(&dp, addr)
                     .into_iter()
                     .find(|d| d.tx.starts_with(tx))
             };
@@ -1111,7 +1137,7 @@ mod tests {
             );
             assert!(st.floor < d.block);
             // 커서를 표본 블록 위로 되감아 같은 구간을 다시 훑게 한다 — 기록 수가 그대로여야 한다(키 중복 방지).
-            let before = read_json::<Vec<Deposit>>(&dp).len();
+            let before = policy::deposits_of(&dp, addr).len();
             st.logs.low = st.logs.low.max(d.block + 5);
             st.eth.low = st.eth.low.max(d.block + 5);
             write_json(sp.clone(), &st).unwrap();
@@ -1132,7 +1158,7 @@ mod tests {
                 }
                 assert!(n < 6, "되감은 구간을 다시 안 봤다");
             }
-            let after = read_json::<Vec<Deposit>>(&dp);
+            let after = policy::deposits_of(&dp, addr);
             assert!(
                 after.iter().filter(|d| d.tx.starts_with(tx)).count() == 1,
                 "같은 입금이 두 번 적혔다"
