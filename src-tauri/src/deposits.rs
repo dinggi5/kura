@@ -171,23 +171,58 @@ fn merge_deposits(
     (list, added)
 }
 
-/// 찾은 입금을 기록 파일에 합쳐 쓴다 — 새로 들어간 수를 돌려준다.
+/// 주소별 보관 파일 — `deposits-8453.json` → `deposits-8453.0xabc….json`.
+fn aside_path(dp: &std::path::Path, address: &str) -> PathBuf {
+    dp.with_extension(format!("{}.json", address.to_ascii_lowercase()))
+}
+
+/// 기록 파일의 주인을 `address` 로 맞추고 그 주소의 기록을 돌려준다.
+/// - 주인이 같으면 그대로.
+/// - 다른 주소의 기록(지갑을 지우고 다른 시드를 가져왔다)이면 **그 주소의 보관 파일에 합쳐** 옆으로 치운다
+///   (🔴 코덱스 개발 69 2차: 이름만 바꿔 치우면 A→B→A→B 에서 A 의 옛 보관분을 덮어써 잃었다).
+/// - 이 주소의 보관 파일이 있으면 되찾는다(A→B→A 에서 A 의 90일 넘은 기록이 돌아온다).
+///
 /// 🔴 파일을 못 읽으면 **에러로 멈춘다** — 빈 목록으로 읽고 합쳐 쓰면 옛 기록이 지워지고, 커서는 그 구간을
-/// 이미 지나 다시 찾지도 않는다(코덱스 개발 69 1차). 다른 주소의 기록(지갑을 지우고 다른 시드를 가져왔다)은
-/// 지우지 않고 `…<그 주소>.json` 으로 옆에 치운다.
-fn store_found(dp: &PathBuf, address: &str, found: Vec<Deposit>) -> Result<usize, String> {
-    if found.is_empty() {
-        return Ok(0);
-    }
-    let items = match policy::read_deposit_log(dp)? {
-        Some(log) if log.address.eq_ignore_ascii_case(address) => log.items,
+/// 이미 지나 다시 찾지도 않는다(코덱스 개발 69 1차).
+fn claim_owner(dp: &PathBuf, address: &str) -> Result<Vec<Deposit>, String> {
+    let mut items = match policy::read_deposit_log(dp)? {
+        Some(log) if log.address.eq_ignore_ascii_case(address) => return Ok(log.items),
         Some(log) => {
-            let aside = dp.with_extension(format!("{}.json", log.address.to_ascii_lowercase()));
-            std::fs::rename(dp, &aside).map_err(|e| e.to_string())?;
+            let aside = aside_path(dp, &log.address);
+            let kept = policy::read_deposit_log(&aside)?
+                .map(|l| l.items)
+                .unwrap_or_default();
+            let (merged, _) = merge_deposits(kept, log.items, DEPOSITS_CAP);
+            let moved = policy::DepositLog {
+                address: log.address,
+                items: merged,
+            };
+            write_json(aside, &moved)?;
+            std::fs::remove_file(dp).map_err(|e| e.to_string())?;
             Vec::new()
         }
         None => Vec::new(),
     };
+    let mine = aside_path(dp, address);
+    if let Some(back) = policy::read_deposit_log(&mine)? {
+        items = merge_deposits(items, back.items, DEPOSITS_CAP).0;
+        let log = policy::DepositLog {
+            address: address.to_string(),
+            items: items.clone(),
+        };
+        // 본 파일에 먼저 쓰고 보관 파일을 지운다 — 사이에 죽어도 기록은 두 곳 중 하나엔 있다(키가 중복을 막는다).
+        write_json(dp.clone(), &log)?;
+        std::fs::remove_file(&mine).map_err(|e| e.to_string())?;
+    }
+    Ok(items)
+}
+
+/// 찾은 입금을 기록 파일에 합쳐 쓴다 — 새로 들어간 수를 돌려준다. 주인 맞추기·못 읽으면 멈추기는 `claim_owner`.
+fn store_found(dp: &PathBuf, address: &str, found: Vec<Deposit>) -> Result<usize, String> {
+    if found.is_empty() {
+        return Ok(0);
+    }
+    let items = claim_owner(dp, address)?;
     let (items, n) = merge_deposits(items, found, DEPOSITS_CAP);
     if n > 0 {
         let log = policy::DepositLog {
@@ -595,7 +630,9 @@ async fn scan_with(
 
     let mut st: ScanState = read_json(&sp);
     if !st.address.eq_ignore_ascii_case(&address) || st.logs.high == 0 {
-        // 처음이거나 다른 주소의 커서 — 지금 끝에서 시작해 90일 전까지 거꾸로.
+        // 처음이거나 다른 주소의 커서 — 지금 끝에서 시작해 90일 전까지 거꾸로. 기록 파일의 주인도 지금 맞춘다
+        // (새 입금이 없어도 옛 주소의 기록이 화면에 남지 않고, 돌아온 주소는 보관분을 바로 되찾게).
+        claim_owner(&dp, &address)?;
         let floor = floor_block(&mut rpc, tip).await?;
         st = ScanState {
             address: address.clone(),
@@ -894,6 +931,27 @@ mod tests {
         assert_eq!(policy::deposits_of(&dp, "0xMe").len(), 1);
         let aside = dir.join("deposits-8453.0xold.json");
         assert_eq!(policy::deposits_of(&aside, "0xOld").len(), 1);
+
+        // 🔴 A→B→A→B (코덱스 2차): 돌아온 주소는 보관분을 되찾고, 다시 치울 때 옛 보관분을 덮어쓰지 않는다.
+        assert_eq!(
+            store_found(&dp, "0xOld", vec![dep("new-old", 4)]).unwrap(),
+            1
+        );
+        let back: Vec<_> = policy::deposits_of(&dp, "0xOld")
+            .into_iter()
+            .map(|d| d.key)
+            .collect();
+        assert_eq!(back, ["new-old", "old"]);
+        assert!(!aside.exists());
+        let me_aside = dir.join("deposits-8453.0xme.json");
+        assert_eq!(policy::deposits_of(&me_aside, "0xMe").len(), 1);
+        std::fs::write(&aside, serde_json::to_string(&foreign).unwrap()).unwrap(); // 겹치는 옛 보관분이 또 있을 때
+        assert_eq!(claim_owner(&dp, "0xMe").unwrap().len(), 1);
+        let kept: Vec<_> = policy::deposits_of(&aside, "0xOld")
+            .into_iter()
+            .map(|d| d.key)
+            .collect();
+        assert_eq!(kept, ["new-old", "old"]); // 둘 다 남았다(덮어쓰지 않았다)
         let _ = std::fs::remove_dir_all(&dir);
     }
 
