@@ -97,9 +97,10 @@ pub(crate) fn write_atomic_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), S
         .map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))?;
     fs::rename(&tmp, path)
         .map_err(|e| tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}"))?;
-    fs::File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))
+    // 디렉터리 동기화는 **최선 노력**이다(코덱스 개발 71 2차 P2) — 여기서 실패를 돌리면 새 장부는 이미 제자리인데 호출자는
+    // 「예약 실패」로 알고 돈을 안 보낸다 → 결제 없이 한도만 깎인다. 파일 자체는 위에서 이미 디스크에 내렸다.
+    let _ = fs::File::open(dir).and_then(|d| d.sync_all());
+    Ok(())
 }
 
 /// 임시 파일을 처음부터 0600 으로 생성해 내용을 쓴다 (생성 후 chmod 사이의 노출 창 제거).

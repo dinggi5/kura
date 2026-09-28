@@ -322,8 +322,15 @@ pub(crate) fn apply_confirmation(
     verdict: crate::confirm::Verdict,
 ) -> Result<bool, String> {
     let _g = history_guard();
-    let path = history_path_for(index)?;
-    let mut list = read_history_at(&path);
+    confirm_at(&history_path_for(index)?, original, verdict)
+}
+
+/// `apply_confirmation` 의 본체 — 경로를 받는다(테스트가 실지갑을 안 건드리게). 잠금은 호출자가 잡는다.
+fn confirm_at(
+    path: &PathBuf,
+    original: &HistoryEntry,
+    verdict: crate::confirm::Verdict,
+) -> Result<bool, String> {
     let same = |e: &HistoryEntry| {
         if original.id.is_empty() {
             e == original
@@ -331,50 +338,80 @@ pub(crate) fn apply_confirmation(
             e.id == original.id
         }
     };
-    if let Some(e) = list.iter_mut().find(|e| same(e)) {
-        if !crate::confirm::apply_verdict(e, verdict).0 {
-            return Ok(false);
-        }
-        write_json(path, &list)?;
-        return Ok(true);
+    let mut list = read_history_at(path);
+    let archive = crate::policy::history_archive_path(path);
+    let mut rows = read_archive_rows(&archive)?;
+    // 🔴 **같은 기록의 사본을 전부 모아 한꺼번에** (코덱스 개발 71 2차 P1). 보관 덧붙이기와 본 파일 쓰기 사이에 죽으면 같은 id 가
+    // 양쪽에 남는다. 한쪽만 확인·환불하면, 나중에 확인 안 된 다른 사본을 또 확인해 **한 번 더 환불**했다. 규칙: 사본이 하나라도
+    // 이미 확인됐거나 기대한 상태가 아니면 아무것도 안 한다(환불을 놓칠 순 있어도 두 번 주지는 않는다). 다 받으면 전부에 적는다.
+    let hot_hits: Vec<usize> = list
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| same(e))
+        .map(|(i, _)| i)
+        .collect();
+    let arch_hits: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.1.as_ref().is_some_and(&same))
+        .map(|(i, _)| i)
+        .collect();
+    if hot_hits.is_empty() && arch_hits.is_empty() {
+        return Ok(false);
     }
-    // 본 파일에 없으면 보관 파일로 밀려난 것 — 그 줄만 고쳐 통째로 원자 교체한다(정산의 `settle_in_archive` 와 같은 모양).
-    confirm_in_archive(&crate::policy::history_archive_path(&path), &same, verdict)
+    let all_accept = hot_hits
+        .iter()
+        .map(|&i| list[i].clone())
+        .chain(arch_hits.iter().filter_map(|&i| rows[i].1.clone()))
+        .all(|mut e| crate::confirm::apply_verdict(&mut e, verdict).0);
+    if !all_accept {
+        return Ok(false);
+    }
+    for &i in &hot_hits {
+        crate::confirm::apply_verdict(&mut list[i], verdict);
+    }
+    if !hot_hits.is_empty() {
+        write_json(path.clone(), &list)?;
+    }
+    for &i in &arch_hits {
+        if let Some(e) = rows[i].1.as_mut() {
+            crate::confirm::apply_verdict(e, verdict);
+            rows[i].0 = serde_json::to_vec(e).map_err(|e| e.to_string())?;
+        }
+    }
+    if !arch_hits.is_empty() {
+        let mut body = Vec::new();
+        for (raw, _) in &rows {
+            body.extend_from_slice(raw);
+            body.push(b'\n');
+        }
+        crate::store::write_atomic(&archive, &body)?;
+    }
+    Ok(true)
 }
 
-/// 보관 파일에서 그 기록을 찾아 결말을 적는다. 없으면 Ok(false). 못 읽는 줄은 그대로 둔다.
-fn confirm_in_archive(
-    path: &std::path::Path,
-    same: &dyn Fn(&HistoryEntry) -> bool,
-    verdict: crate::confirm::Verdict,
-) -> Result<bool, String> {
-    let raw = match fs::read_to_string(path) {
+/// 보관 파일의 한 줄 — (원래 바이트, 풀린 기록). 못 읽는 줄은 기록이 None.
+type ArchiveRow = (Vec<u8>, Option<HistoryEntry>);
+
+/// 보관 파일의 줄들 — (원래 바이트, 풀린 기록). **바이트로** 읽는다(코덱스 개발 71 2차 P2): 덧붙이다 끊겨 한글이 잘린 줄이
+/// 하나라도 있으면 `read_to_string` 이 통째로 실패해, 그 뒤의 멀쩡한 기록에 결말을 영영 못 적었다. 못 읽는 줄은 바이트 그대로
+/// 두고 다시 쓴다. 없는 파일은 빈 목록.
+fn read_archive_rows(path: &std::path::Path) -> Result<Vec<ArchiveRow>, String> {
+    let raw = match fs::read(path) {
         Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.to_string()),
     };
-    let mut hit = false;
-    let mut body = String::with_capacity(raw.len());
-    for line in raw.lines() {
-        let mut out = line.to_string();
-        if !hit {
-            if let Ok(mut e) = serde_json::from_str::<HistoryEntry>(line) {
-                if same(&e) {
-                    if !crate::confirm::apply_verdict(&mut e, verdict).0 {
-                        return Ok(false);
-                    }
-                    out = serde_json::to_string(&e).map_err(|e| e.to_string())?;
-                    hit = true;
-                }
-            }
-        }
-        body.push_str(&out);
-        body.push('\n');
-    }
-    if hit {
-        crate::store::write_atomic(&path.to_path_buf(), body.as_bytes())?;
-    }
-    Ok(hit)
+    Ok(raw
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let e = std::str::from_utf8(l)
+                .ok()
+                .and_then(|t| serde_json::from_str(t).ok());
+            (l.to_vec(), e)
+        })
+        .collect())
 }
 
 /// MCP가 기록한 정산 결과 1건. nonce 로 "signed" 내역과 매칭한다.
@@ -563,23 +600,15 @@ pub(crate) fn apply_x402_settlements() -> u32 {
 /// 보관 파일에서 정산을 찾아 반영한다 — 맞은 게 있으면 파일을 통째로 원자 교체한다. 반환 = 반영 건수.
 /// 없는 파일은 0. 못 읽는 줄은 그대로 둔다(버리면 다시 쓸 때 사라진다).
 fn settle_in_archive(path: &PathBuf, pending: &mut Vec<&Settlement>) -> Result<u32, String> {
-    let raw = match fs::read_to_string(path) {
-        Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(e.to_string()),
-    };
-    // 줄마다 (원문, 풀린 기록). 고친 줄만 다시 직렬화한다.
-    let mut rows: Vec<(String, Option<HistoryEntry>)> = raw
-        .lines()
-        .map(|l| (l.to_string(), serde_json::from_str(l).ok()))
-        .collect();
+    // 바이트로 읽는다(개발 71) — 한글이 잘린 줄 하나가 파일 전체 읽기를 실패시켜 보관된 signed 에 정산이 영영 안 붙었다.
+    let mut rows = read_archive_rows(path)?;
     let mut hit = 0u32;
     pending.retain(|s| {
-        for (line, entry) in rows.iter_mut() {
+        for (raw, entry) in rows.iter_mut() {
             let Some(e) = entry else { continue };
             if apply_settlement(std::slice::from_mut(e), s) {
-                if let Ok(new_line) = serde_json::to_string(e) {
-                    *line = new_line;
+                if let Ok(new_line) = serde_json::to_vec(e) {
+                    *raw = new_line;
                 }
                 hit += 1;
                 return false;
@@ -588,12 +617,12 @@ fn settle_in_archive(path: &PathBuf, pending: &mut Vec<&Settlement>) -> Result<u
         true
     });
     if hit > 0 {
-        let mut body = String::with_capacity(raw.len());
-        for (line, _) in &rows {
-            body.push_str(line);
-            body.push('\n');
+        let mut body = Vec::new();
+        for (raw, _) in &rows {
+            body.extend_from_slice(raw);
+            body.push(b'\n');
         }
-        crate::store::write_atomic(path, body.as_bytes())?;
+        crate::store::write_atomic(path, &body)?;
     }
     Ok(hit)
 }
@@ -746,27 +775,65 @@ mod tests {
         }
     }
 
-    /// 🔴 개발 71(코덱스 1차 P2): 결말을 모르는 기록이 확인 전에 보관 파일로 밀려나도 후보에 오르고, 결말이 거기 적힌다.
+    /// 🔴 개발 71(코덱스 1차 P2): 결말을 모르는 기록이 확인 전에 보관 파일로 밀려나도 결말이 거기 적힌다.
+    /// (코덱스 2차 P2) 한글이 잘린 줄이 보관 파일에 있어도 적히고 그 줄은 바이트 그대로 남는다.
     #[test]
-    fn confirmation_reaches_archived_entry() {
+    fn confirmation_reaches_archive_past_a_broken_line() {
+        use crate::confirm::Verdict;
         let hot = temp_hot("confirm-archive");
+        let archive = crate::policy::history_archive_path(&hot);
         let mut sent = entry("0xhash");
         sent.id = new_record_id();
         record_at(&hot, sent.clone(), 2).unwrap();
+        // 잘린 한글 줄(「가」의 앞 두 바이트)을 보관 파일 맨 앞에 둔다.
+        fs::write(&archive, [0xEA, 0xB0, b'\n']).unwrap();
         for i in 0..3 {
             let mut e = entry(&i.to_string());
             e.id = new_record_id();
             record_at(&hot, e, 2).unwrap();
         }
-        let archive = crate::policy::history_archive_path(&hot);
-        assert!(archive_tail(&archive).iter().any(|e| e.id == sent.id));
-        let same = |e: &HistoryEntry| e.id == sent.id;
-        assert!(confirm_in_archive(&archive, &same, crate::confirm::Verdict::Reverted).unwrap());
-        let got = crate::policy::read_sent_history(&hot, 100, "");
-        let e = got.iter().find(|e| e.id == sent.id).unwrap();
+        assert!(confirm_at(&hot, &sent, Verdict::Reverted).unwrap());
+        let e = crate::policy::read_history_archive(&archive)
+            .into_iter()
+            .find(|e| e.id == sent.id)
+            .unwrap();
         assert_eq!((e.status.as_str(), e.checked), ("reverted", true));
-        // 두 번은 안 적힌다.
-        assert!(!confirm_in_archive(&archive, &same, crate::confirm::Verdict::Reverted).unwrap());
+        assert!(fs::read(&archive)
+            .unwrap()
+            .starts_with(&[0xEA, 0xB0, b'\n']));
+        assert!(!confirm_at(&hot, &sent, Verdict::Reverted).unwrap()); // 두 번은 안 적힌다
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
+    }
+
+    /// 🔴 개발 71(코덱스 2차 P1): 같은 id 사본이 본 파일·보관 파일에 갈라져 있을 때 — 한쪽이 이미 확인됐으면 아무것도 안 하고
+    /// (두 번 환불 금지), 둘 다 미확인이면 둘 다에 적는다.
+    #[test]
+    fn split_copies_are_confirmed_together_or_not_at_all() {
+        use crate::confirm::Verdict;
+        let hot = temp_hot("confirm-copies");
+        let archive = crate::policy::history_archive_path(&hot);
+        let mut sent = entry("0xhash");
+        sent.id = new_record_id();
+        write_json(hot.clone(), &vec![sent.clone()]).unwrap();
+        let mut checked = sent.clone();
+        checked.status = "reverted".into();
+        checked.checked = true;
+        fs::write(
+            &archive,
+            format!("{}\n", serde_json::to_string(&checked).unwrap()),
+        )
+        .unwrap();
+        assert!(!confirm_at(&hot, &sent, Verdict::Reverted).unwrap());
+        assert_eq!(read_history_at(&hot)[0].status, "sent"); // 건드리지 않았다
+                                                             // 둘 다 미확인 — 둘 다 적힌다.
+        fs::write(
+            &archive,
+            format!("{}\n", serde_json::to_string(&sent).unwrap()),
+        )
+        .unwrap();
+        assert!(confirm_at(&hot, &sent, Verdict::Reverted).unwrap());
+        assert!(read_history_at(&hot)[0].checked);
+        assert!(crate::policy::read_history_archive(&archive)[0].checked);
         let _ = fs::remove_dir_all(hot.parent().unwrap());
     }
 

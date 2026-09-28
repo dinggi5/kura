@@ -358,10 +358,14 @@ pub fn history_archive_path(hot: &Path) -> PathBuf {
 }
 
 /// 보관 파일의 기록(최신순). 없으면 빈 목록. 못 읽는 줄(덧붙이다 죽은 마지막 줄)은 건너뛴다.
+///
+/// 🔴 **바이트로 읽는다** (개발 71) — 덧붙이다 끊겨 한글이 잘린 줄이 하나라도 있으면 `read_to_string` 이 통째로 실패해 보관된
+/// 기록 **전부**가 GUI·MCP·CLI 에서 사라져 보였다(개발 70 의 끝 읽기와 같은 병이 전체 읽기에도 있었다). 잘린 줄만 걸러진다.
 pub fn read_history_archive(path: &Path) -> Vec<HistoryEntry> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
+    let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
     };
+    let raw = String::from_utf8_lossy(&bytes);
     let mut list: Vec<HistoryEntry> = raw
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
