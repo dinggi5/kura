@@ -73,6 +73,35 @@ pub(crate) fn write_atomic(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}"))
 }
 
+/// `write_atomic` + **전원이 나가도 남는다** (개발 71, 코덱스 1차): 교체 전에 파일을, 교체 뒤에 디렉터리를 디스크까지 내린다.
+/// 돈이 나가기 **전**에 써야 하는 기록(한도 예약)에만 쓴다 — 예약을 쓰고 tx 를 낸 직후 전원이 나가면 체인엔 송금이 남는데
+/// 장부는 예약 전으로 돌아가 한도를 한 번 더 쓸 수 있었다. macOS 의 `sync_all` 은 F_FULLFSYNC(수~수십 ms)라 2초마다 쓰는
+/// 하트비트 같은 곳엔 넣지 않는다.
+pub(crate) fn write_atomic_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
+    let tmp = unique_tmp(path);
+    // 디렉터리 생성·0700 은 write_atomic 과 같다.
+    let dir = path.parent().ok_or(ts!(
+        "경로에 부모 디렉터리가 없습니다",
+        "That path has no parent folder"
+    ))?;
+    fs::create_dir_all(dir)
+        .map_err(|e| tf!("디렉터리 생성 실패: {e}", "Couldn't create the folder: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    }
+    write_file_private(&tmp, bytes)?;
+    fs::File::open(&tmp)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))?;
+    fs::rename(&tmp, path)
+        .map_err(|e| tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}"))?;
+    fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))
+}
+
 /// 임시 파일을 처음부터 0600 으로 생성해 내용을 쓴다 (생성 후 chmod 사이의 노출 창 제거).
 #[cfg(unix)]
 fn write_file_private(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {

@@ -121,18 +121,24 @@ async fn sign_authorization(
 /// x402 결제용 EIP-3009 인가를 서명한다 (온체인 전송 X — 페이실리테이터가 정산).
 /// 송금과 동일하게 긴급 잠금·단일/일일 한도를 적용하고, 서명 시점에 누적 사용액에 기록한다.
 /// (활성 체인의 USDC 전용. network/asset 은 앱 설정과 동일하게 고정.)
-#[tauri::command]
+///
+/// **`#[tauri::command]` 가 아니다**(개발 71, 코덱스 1차) — 프론트는 이걸 부른 적이 없는데 IPC 문으로 열려 있었고, 그 문은
+/// 유효 시간(`valid_secs`)까지 받아 하루짜리 인가를 만들 수 있었다. 내역 확인(`confirm.rs`)은 모든 서명이
+/// `DEFAULT_VALID_SECS` 라고 보고 「만료」를 판정·환불하므로, 긴 인가가 섞이면 **쓰일 수 있는 인가의 한도를 돌려주게** 된다.
+/// 이제 시작점은 승인(`approve_payment`) 하나뿐이고 유효 시간은 늘 기본값이다.
 pub(crate) async fn sign_x402_payment(
     password: String,
     to: String,
     amount_usdc: String,
-    valid_secs: Option<u64>,
 ) -> Result<X402Payment, String> {
     let password = Zeroizing::new(password);
-    // 진입 시 계정을 한 번 고정 (개발 54) — 서명 키(from)와 내역이 같은 계정을 본다.
-    with_pinned_account(
-        active_account_index(),
-        sign_x402_pinned(password, to, amount_usdc, valid_secs),
+    // 진입 시 체인·계정을 한 번 고정 — 비번 복호화 사이에 설정이 바뀌어도 서명 도메인·내역이 진입 때 것(개발 71, 코덱스 1차).
+    with_pinned_chain(
+        active_chain().chain_id,
+        with_pinned_account(
+            active_account_index(),
+            sign_x402_pinned(password, to, amount_usdc),
+        ),
     )
     .await
 }
@@ -141,7 +147,6 @@ async fn sign_x402_pinned(
     password: Zeroizing<String>,
     to: String,
     amount_usdc: String,
-    valid_secs: Option<u64>,
 ) -> Result<X402Payment, String> {
     let signer = match unlock_signer(&password) {
         Ok(s) => s,
@@ -151,7 +156,7 @@ async fn sign_x402_pinned(
         }
     };
     let to_addr = to.clone();
-    let payment = do_sign_x402(&signer, to, amount_usdc, valid_secs).await?;
+    let payment = do_sign_x402(&signer, to, amount_usdc).await?;
     record_trusted(&to_addr); // 비번(사람) 승인 성공 = 신뢰 주소 학습
     Ok(payment)
 }
@@ -161,14 +166,13 @@ pub(crate) async fn do_sign_x402(
     signer: &PrivateKeySigner,
     to: String,
     amount_usdc: String,
-    valid_secs: Option<u64>,
 ) -> Result<X402Payment, String> {
     // 작업 진입 시 체인·계정 고정 — EIP-712 도메인(체인ID·USDC)·한도·장부·내역이 모두 같은 체인·계정.
     with_pinned_chain(
         active_chain().chain_id,
         with_pinned_account(
             active_account_index(),
-            do_sign_x402_inner(signer, to, amount_usdc, valid_secs),
+            do_sign_x402_inner(signer, to, amount_usdc),
         ),
     )
     .await
@@ -178,7 +182,6 @@ async fn do_sign_x402_inner(
     signer: &PrivateKeySigner,
     to: String,
     amount_usdc: String,
-    valid_secs: Option<u64>,
 ) -> Result<X402Payment, String> {
     let dec = active_chain().usdc_decimals;
     let amt = amount_usdc.trim();
@@ -224,7 +227,23 @@ async fn do_sign_x402_inner(
 
     // 서명만 하므로 RPC/가스 불필요. 서명자는 호출자가 넘긴다(비번 래퍼 또는 자율 세션 키).
     // 서명 실패 시 예약한 사용액을 환불한다(예약한 날에만).
-    let valid = valid_secs.unwrap_or(DEFAULT_VALID_SECS); // 기본 10분 유효
+    // 예약까지 오는 사이(한도 잠금 대기) 긴급 잠금이 켜졌으면 서명하지 않는다(개발 71, 코덱스 1차 P1 — 송금의 제출 직전 검사와 짝).
+    if read_lock() {
+        refund_spend("USDC", value, reserved_day).await;
+        log_attempt(
+            "USDC",
+            to,
+            amt,
+            "blocked",
+            ts!("긴급 잠금 (x402 서명)", "Emergency lock (x402 signature)"),
+        );
+        return Err(ts!(
+            "긴급 잠금이 켜져 있어 결제가 차단됐어요. 해제 후 다시 시도하세요.",
+            "Emergency lock is on, so the payment was blocked. Turn it off and try again."
+        )
+        .into());
+    }
+    let valid = DEFAULT_VALID_SECS; // 10분 — 모든 서명이 같다(내역 확인이 이 값으로 만료를 판정한다)
     let payment = match sign_authorization(signer, to_addr, value, valid, random_nonce()).await {
         Ok(p) => p,
         Err(e) => {
@@ -404,9 +423,12 @@ pub(crate) async fn x402_direct_payment(
     nonce: String,
 ) -> Result<String, SendError> {
     let password = Zeroizing::new(password);
-    with_pinned_account(
-        active_account_index(),
-        x402_direct_pinned(password, to, amount_usdc, nonce),
+    with_pinned_chain(
+        active_chain().chain_id,
+        with_pinned_account(
+            active_account_index(),
+            x402_direct_pinned(password, to, amount_usdc, nonce),
+        ),
     )
     .await
 }

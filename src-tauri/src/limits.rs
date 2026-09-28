@@ -49,11 +49,19 @@ pub(crate) async fn reserve_spend(
     decimals: u8,
 ) -> Result<u64, String> {
     let _g = SPEND_LOCK.lock().await;
-    let mut spend = read_spend_today();
+    let mut spend = spend_for_reserve().ok_or_else(|| {
+        ts!(
+            "오늘 쓴 금액 장부를 읽지 못해 결제를 막았어요. 한도를 지킬 수 없어서예요 — 내일(UTC) 새 장부로 풀리거나, 파일을 고치면 됩니다.",
+            "Couldn't read today's spending ledger, so the payment was blocked — the limits can't be enforced without it. It clears with a fresh ledger tomorrow (UTC), or once the file is fixed."
+        )
+        .to_string()
+    })?;
     let spent = spent_of(&spend, token);
     enforce_caps(value, single, spent, daily, token, decimals)?;
     set_spent(&mut spend, token, spent.saturating_add(value));
-    spend_path().and_then(|p| write_json(p, &spend))?; // 기록 실패면 예약도 실패(헛환불 방지)
+    // 기록 실패면 예약도 실패(헛환불 방지). 디스크까지 내린다 — 이 뒤에 돈이 나간다(개발 71).
+    let json = serde_json::to_string_pretty(&spend).map_err(|e| e.to_string())?;
+    spend_path().and_then(|p| crate::store::write_atomic_durable(&p, json.as_bytes()))?;
     Ok(spend.day)
 }
 
@@ -62,7 +70,10 @@ pub(crate) async fn reserve_spend(
 /// 깎아 일일 한도가 우회될 수 있으므로, 날이 다르면 그 예약은 이미 사라진 것으로 보고 no-op.
 pub(crate) async fn refund_spend(token: &str, value: U256, reserved_day: u64) {
     let _g = SPEND_LOCK.lock().await;
-    let mut spend = read_spend_today();
+    // 못 읽는 장부엔 환불하지 않는다 — 0 에서 빼 봐야 0 이고, 새로 쓰면 깨진 파일(오늘 쓴 기록)을 덮는다.
+    let Some(mut spend) = spend_for_reserve() else {
+        return;
+    };
     if spend.day != reserved_day {
         return; // 다른 날 → 예약분은 이미 리셋됨, 건드리지 않는다
     }
@@ -130,7 +141,51 @@ pub(crate) fn spend_path() -> Result<PathBuf, String> {
     Ok(jigap_dir()?.join(chain_file("spend")))
 }
 
-/// 오늘 장부를 읽는다. 날이 바뀌었으면 0으로 리셋한 새 장부를 돌려준다.
+/// 예약·환불용 오늘 장부 (개발 71, 코덱스 1차 P1). `read_spend_today` 는 못 읽으면 0 으로 삼킨다 — 화면엔 그래도 되지만
+/// **돈이 나가기 전의 한도 검사**에선 「오늘 19 USDC 를 썼는데 장부가 상해 0 부터」가 되어 일일 한도를 넘겨 보냈다
+/// (내역·입금에서 두 번 본 「못 읽으면 빈 값」 병). 파일이 있는데 못 읽으면 None — 단 마지막 수정이 **어제 이전**이면 그 파일은
+/// 오늘 쓴 돈을 담을 수 없으니 새 날 장부로 간다(안 그러면 한 번 상한 장부가 영영 결제를 막는다).
+fn spend_for_reserve() -> Option<Spend> {
+    let path = spend_path().ok()?;
+    let raw = match fs::read_to_string(&path) {
+        Ok(t) => Some(Ok(t)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(Err(())),
+    };
+    let mtime_day = fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() / 86_400);
+    judge_spend(raw, mtime_day, current_day())
+}
+
+/// `spend_for_reserve` 의 판단 (순수 — 테스트용). `raw` = None(파일 없음) | Ok(본문) | Err(있는데 못 읽음).
+fn judge_spend(
+    raw: Option<Result<String, ()>>,
+    mtime_day: Option<u64>,
+    today: u64,
+) -> Option<Spend> {
+    let fresh = Spend {
+        day: today,
+        usdc: "0".into(),
+        eth: "0".into(),
+    };
+    let parsed = match raw {
+        None => return Some(fresh),
+        Some(Ok(t)) => serde_json::from_str::<Spend>(&t).ok(),
+        Some(Err(())) => None,
+    };
+    match parsed {
+        Some(s) if s.day == today => Some(s),
+        Some(_) => Some(fresh),
+        None if mtime_day.is_some_and(|d| d < today) => Some(fresh),
+        None => None,
+    }
+}
+
+/// 오늘 장부를 읽는다(화면용 — 못 읽으면 0). 날이 바뀌었으면 0으로 리셋한 새 장부를 돌려준다.
+/// 🔴 한도 검사엔 쓰지 않는다 — `spend_for_reserve` 를 쓴다.
 pub(crate) fn read_spend_today() -> Spend {
     let today = current_day();
     let s = spend_path()
@@ -192,6 +247,37 @@ pub(crate) fn get_today_spend() -> SpendView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 🔴 개발 71(코덱스 1차 P1): 오늘 고친 장부를 못 읽으면 예약을 거부하고, 어제 이전 파일이면 새 날로 간다.
+    #[test]
+    fn unreadable_ledger_blocks_only_today() {
+        let today = 20_000;
+        let ok = |day: u64| {
+            Some(Ok(format!(
+                r#"{{"day":{day},"usdc":"19000000","eth":"0"}}"#
+            )))
+        };
+        assert_eq!(
+            judge_spend(ok(today), Some(today), today).unwrap().usdc,
+            "19000000"
+        );
+        assert_eq!(
+            judge_spend(ok(today - 1), Some(today - 1), today)
+                .unwrap()
+                .usdc,
+            "0"
+        );
+        assert_eq!(judge_spend(None, None, today).unwrap().usdc, "0");
+        assert!(judge_spend(Some(Ok("{깨짐".into())), Some(today), today).is_none());
+        assert!(judge_spend(Some(Err(())), Some(today), today).is_none());
+        assert!(judge_spend(Some(Err(())), None, today).is_none());
+        assert_eq!(
+            judge_spend(Some(Ok("{깨짐".into())), Some(today - 1), today)
+                .unwrap()
+                .usdc,
+            "0"
+        );
+    }
 
     // 단일 한도 초과는 거부.
     #[test]

@@ -164,10 +164,10 @@ impl Default for Settings {
             // 없는 기존 지갑"은 conservative()(테스트넷)가 따로 맡는다 — 여기는
             // **진짜 신규**(지갑도 설정도 없는 첫 실행)만.
             chain_id: BASE_MAINNET.chain_id,
-            agent_lookup: true,       // 켜짐 — 필드 doc 참고(새 상대 없음, 같은 RPC 읽기)
-            autostart: None,          // 아직 모름 → 첫 실행에서 OS 상태를 채택
+            agent_lookup: true, // 켜짐 — 필드 doc 참고(새 상대 없음, 같은 RPC 읽기)
+            autostart: None,    // 아직 모름 → 첫 실행에서 OS 상태를 채택
             auto_check_update: false, // 신규 기본 꺼짐 (개발 39) — 필드 doc 참고
-            lang: None,               // 아직 안 고름 → 시스템 언어 (개발 42)
+            lang: None,         // 아직 안 고름 → 시스템 언어 (개발 42)
         }
     }
 }
@@ -237,7 +237,7 @@ fn settings_for_read(file: &SettingsFile, wallet_exists: bool) -> Settings {
         SettingsFile::Missing if !wallet_exists => Settings::default(),
         SettingsFile::Missing | SettingsFile::Unreadable => Settings::conservative(),
         SettingsFile::Text(text) => {
-            serde_json::from_str(text).unwrap_or_else(|_| Settings::conservative())
+            serde_json::from_str(text).unwrap_or_else(|_| salvage_limits(text))
         }
     };
     s.chain_id = policy::chain_id_for(file, || wallet_exists);
@@ -248,6 +248,28 @@ fn settings_for_read(file: &SettingsFile, wallet_exists: bool) -> Settings {
     // ERC-8004 조회 스위치도(개발 57) — MCP `lookup_enabled` 와 같은 함수. 돈은 안 움직이지만 설정 화면이
     // 「켜짐」을 그리는데 MCP 는 건너뛰는 갈림을 없앤다.
     s.agent_lookup = policy::agent_lookup_for(file);
+    s
+}
+
+/// 통째로는 못 읽는 설정에서 **한도 넷만은 살린다** (개발 71, 코덱스 1차 P1). 다른 필드 하나가 깨졌다고 보수 기본값으로
+/// 가면 사용자가 1 USDC 로 낮춰 둔 일일 한도가 기본 20 으로 **올라가** 그만큼 더 나갈 수 있었다 — 체인·RPC 를 필드
+/// 단위로 살리는 것(개발 56·57)과 같은 처방을 돈의 상한에도. JSON 자체가 깨져 아무것도 못 읽으면 보수 기본값 그대로다.
+/// 자율 승인 한도는 살리지 않는다 — 보수 기본값이 「자율 꺼짐」이라 그쪽이 더 안전하다.
+fn salvage_limits(text: &str) -> Settings {
+    let mut s = Settings::conservative();
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return s;
+    };
+    for (key, slot) in [
+        ("single_usdc", &mut s.single_usdc),
+        ("daily_usdc", &mut s.daily_usdc),
+        ("single_eth", &mut s.single_eth),
+        ("daily_eth", &mut s.daily_eth),
+    ] {
+        if let Some(x) = v.get(key).and_then(|x| x.as_str()) {
+            *slot = x.to_string();
+        }
+    }
     s
 }
 
@@ -481,6 +503,30 @@ mod tests {
         assert!(!s.lock_on_blur);
         assert_eq!(s.chain_id, BASE_MAINNET.chain_id); // 신규 기본 = 메인넷 (개발 39)
         assert!(!s.auto_check_update); // 신규 기본 꺼짐 (개발 39, 프라이버시)
+    }
+
+    // 🔴 개발 71(코덱스 1차 P1): 다른 필드 하나가 깨져 통째로 못 읽는 파일에서도 사용자가 정한 한도는 살아남는다
+    // (기본 20 으로 올라가 더 나가지 않게). 자율 한도는 살리지 않는다 — 보수 기본이 「꺼짐」이다.
+    // JSON 자체가 깨졌으면 보수 기본값 그대로.
+    #[test]
+    fn broken_field_keeps_user_limits() {
+        let f = SettingsFile::Text(
+            r#"{"single_usdc":"0.5","daily_usdc":"1","single_eth":"0.001","daily_eth":"0.002",
+               "auto_approve_usdc":"3","auto_lock_mins":42}"#
+                .into(),
+        );
+        let s = settings_for_read(&f, true);
+        assert_eq!(
+            (s.single_usdc.as_str(), s.daily_usdc.as_str()),
+            ("0.5", "1")
+        );
+        assert_eq!(
+            (s.single_eth.as_str(), s.daily_eth.as_str()),
+            ("0.001", "0.002")
+        );
+        assert_eq!(s.auto_approve_usdc, "0");
+        let junk = settings_for_read(&SettingsFile::Text("{ 깨짐".into()), true);
+        assert_eq!(junk.daily_usdc, Settings::conservative().daily_usdc);
     }
 
     // 🔴 신규(파일 없음)와 깨진 파일(있는데 못 읽음)은 다른 답이어야 한다 (개발 39).

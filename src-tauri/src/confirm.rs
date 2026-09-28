@@ -29,7 +29,7 @@ const MAX_PER_TICK: usize = 12;
 const LOOKBACK_SECS: u64 = 7 * 86_400;
 /// 보낸 직후엔 아직 채굴 전이다 — 이만큼 지난 뒤부터 영수증을 묻는다.
 const MINE_GRACE_SECS: u64 = 15;
-/// x402 서명의 유효 시간 — `x402::do_sign_x402_inner` 의 기본값과 같다(승인 경로는 값을 안 넘긴다).
+/// x402 서명의 유효 시간 — 모든 서명이 이 값이다(개발 71 에 `valid_secs` 인자를 없애 못박았다 — 긴 인가를 「만료」로 오판해 환불하지 않게).
 const SIGN_VALID_SECS: u64 = crate::x402::DEFAULT_VALID_SECS;
 /// 유효 시간이 끝난 뒤 더 기다리는 여유 — RPC 노드가 몇 블록 늦어도 「안 쓰였다」로 잘못 읽지 않게.
 const SIGN_EXPIRY_MARGIN_SECS: u64 = 300;

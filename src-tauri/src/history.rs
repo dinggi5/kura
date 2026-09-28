@@ -302,11 +302,16 @@ pub(crate) fn recent_same_payment_secs(token: String, to: String, amount: String
 
 // ── 체인 확인 결과 반영 (개발 71, confirm.rs) ────────────────────────────────────────────────────
 
-/// 계정 하나의 본 파일 기록(최신순) — 확인할 후보를 고를 때. 못 읽으면 빈 목록.
+/// 계정 하나의 확인 후보 — 본 파일 전부 + **보관 파일 끝부분**(최근에 밀려난 것, 256KB). 못 읽으면 빈 목록.
+/// 보관 끝까지 보는 이유(개발 71, 코덱스 1차 P2): 짧은 새 200건이 넘게 쌓이면(AI 가 차단당하는 시도를 연타하는 등)
+/// 아직 결말을 모르는 sent·unknown·signed 가 확인 전에 보관 파일로 밀려나 영영 그대로였다(한도 환불도 없이).
 pub(crate) fn read_account_history(index: u32) -> Vec<HistoryEntry> {
-    history_path_for(index)
-        .map(|p| read_history_at(&p))
-        .unwrap_or_default()
+    let Ok(hot) = history_path_for(index) else {
+        return Vec::new();
+    };
+    let mut list = read_history_at(&hot);
+    list.extend(archive_tail(&crate::policy::history_archive_path(&hot)));
+    list
 }
 
 /// 확인 결과를 그 기록에 적는다 — 잠금 안에서 파일을 **다시 읽어** 같은 기록을 찾는다(그새 정산·새 기록이 들어왔을 수
@@ -319,20 +324,57 @@ pub(crate) fn apply_confirmation(
     let _g = history_guard();
     let path = history_path_for(index)?;
     let mut list = read_history_at(&path);
-    let Some(e) = list.iter_mut().find(|e| {
+    let same = |e: &HistoryEntry| {
         if original.id.is_empty() {
-            *e == original
+            e == original
         } else {
             e.id == original.id
         }
-    }) else {
-        return Ok(false);
     };
-    if !crate::confirm::apply_verdict(e, verdict).0 {
-        return Ok(false);
+    if let Some(e) = list.iter_mut().find(|e| same(e)) {
+        if !crate::confirm::apply_verdict(e, verdict).0 {
+            return Ok(false);
+        }
+        write_json(path, &list)?;
+        return Ok(true);
     }
-    write_json(path, &list)?;
-    Ok(true)
+    // 본 파일에 없으면 보관 파일로 밀려난 것 — 그 줄만 고쳐 통째로 원자 교체한다(정산의 `settle_in_archive` 와 같은 모양).
+    confirm_in_archive(&crate::policy::history_archive_path(&path), &same, verdict)
+}
+
+/// 보관 파일에서 그 기록을 찾아 결말을 적는다. 없으면 Ok(false). 못 읽는 줄은 그대로 둔다.
+fn confirm_in_archive(
+    path: &std::path::Path,
+    same: &dyn Fn(&HistoryEntry) -> bool,
+    verdict: crate::confirm::Verdict,
+) -> Result<bool, String> {
+    let raw = match fs::read_to_string(path) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut hit = false;
+    let mut body = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        let mut out = line.to_string();
+        if !hit {
+            if let Ok(mut e) = serde_json::from_str::<HistoryEntry>(line) {
+                if same(&e) {
+                    if !crate::confirm::apply_verdict(&mut e, verdict).0 {
+                        return Ok(false);
+                    }
+                    out = serde_json::to_string(&e).map_err(|e| e.to_string())?;
+                    hit = true;
+                }
+            }
+        }
+        body.push_str(&out);
+        body.push('\n');
+    }
+    if hit {
+        crate::store::write_atomic(&path.to_path_buf(), body.as_bytes())?;
+    }
+    Ok(hit)
 }
 
 /// MCP가 기록한 정산 결과 1건. nonce 로 "signed" 내역과 매칭한다.
@@ -702,6 +744,30 @@ mod tests {
             assert_eq!(got, ["5", "4", "3", "2", "1", "0"], "pad {pad}");
             let _ = fs::remove_dir_all(hot.parent().unwrap());
         }
+    }
+
+    /// 🔴 개발 71(코덱스 1차 P2): 결말을 모르는 기록이 확인 전에 보관 파일로 밀려나도 후보에 오르고, 결말이 거기 적힌다.
+    #[test]
+    fn confirmation_reaches_archived_entry() {
+        let hot = temp_hot("confirm-archive");
+        let mut sent = entry("0xhash");
+        sent.id = new_record_id();
+        record_at(&hot, sent.clone(), 2).unwrap();
+        for i in 0..3 {
+            let mut e = entry(&i.to_string());
+            e.id = new_record_id();
+            record_at(&hot, e, 2).unwrap();
+        }
+        let archive = crate::policy::history_archive_path(&hot);
+        assert!(archive_tail(&archive).iter().any(|e| e.id == sent.id));
+        let same = |e: &HistoryEntry| e.id == sent.id;
+        assert!(confirm_in_archive(&archive, &same, crate::confirm::Verdict::Reverted).unwrap());
+        let got = crate::policy::read_sent_history(&hot, 100, "");
+        let e = got.iter().find(|e| e.id == sent.id).unwrap();
+        assert_eq!((e.status.as_str(), e.checked), ("reverted", true));
+        // 두 번은 안 적힌다.
+        assert!(!confirm_in_archive(&archive, &same, crate::confirm::Verdict::Reverted).unwrap());
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
     }
 
     /// 🔴 개발 71: 같은 결제를 10분 안에 두 번 — 나간(또는 나갔을 수 있는) 기록만, 같은 토큰·받는 곳(대소문자 무시)·금액(숫자로)만.

@@ -178,7 +178,6 @@ pub fn run() {
             ipc::get_pending_request,
             ipc::approve_payment,
             ipc::reject_payment,
-            x402::sign_x402_payment,
             ipc::get_agent_status,
             session::unlock_session,
             session::lock_session,

@@ -325,16 +325,32 @@ pub(crate) async fn broadcast(
     tx: TransactionRequest,
     token: &str,
 ) -> Result<String, SendError> {
-    broadcast_via(&effective_rpc(), signer, tx, token).await
+    broadcast_via(&effective_rpc(), signer, tx, token, read_lock).await
+}
+
+/// 긴급 잠금으로 제출 직전에 멈췄을 때의 문구.
+fn locked_before_submit() -> SendError {
+    SendError::Failed(
+        ts!(
+            "보내기 직전에 긴급 잠금이 켜져 멈췄어요. 아무것도 보내지 않았습니다.",
+            "Emergency lock turned on right before sending, so it stopped. Nothing was sent."
+        )
+        .into(),
+    )
 }
 
 /// `broadcast` 의 속알맹이 — RPC 주소를 받는다. 테스트가 **가짜 RPC**(응답을 일부러 끊는)로 불명 갈래를
 /// 밟으려고 갈라 뒀다 — 실제 노드로는 「받았는데 응답만 유실」을 만들 수 없다.
+///
+/// `locked` = 긴급 잠금을 묻는 함수 — **채우기(RPC 왕복, 최대 30초)가 끝난 뒤 제출 직전에 한 번 더** 본다(개발 71, 코덱스 1차 P1).
+/// 진입 때 검사만 있으면 그 사이 사용자가 켠 비상 스위치가 이미 출발한 송금을 못 막았다. 테스트는 실지갑 잠금 파일을
+/// 안 보게 이음매로 받는다.
 async fn broadcast_via(
     rpc: &str,
     signer: &PrivateKeySigner,
     tx: TransactionRequest,
     token: &str,
+    locked: fn() -> bool,
 ) -> Result<String, SendError> {
     use alloy::network::eip2718::Encodable2718;
 
@@ -386,6 +402,9 @@ async fn broadcast_via(
     })?;
     let hash = envelope.tx_hash().to_string();
     let raw = envelope.encoded_2718();
+    if locked() {
+        return Err(locked_before_submit());
+    }
 
     // ② 제출.
     let why = match tokio::time::timeout(SEND_WAIT, provider.send_raw_transaction(&raw)).await {
@@ -436,9 +455,14 @@ pub(crate) async fn send_eth(
 ) -> Result<String, String> {
     let password = Zeroizing::new(password);
     // 진입 시 계정을 한 번 고정 (개발 54) — 비번 검증·서명·내역이 모두 같은 계정을 본다.
-    with_pinned_account(
-        active_account_index(),
-        send_eth_pinned(password, to, amount_eth),
+    // 체인도 진입 때 고정(개발 71, 코덱스 1차) — 비번 복호화 사이 설정에서 체인을 바꾸면 안쪽 do_* 가 **바뀐** 체인을
+    // 고정했다(승인 경로는 approve_payment 가 이미 바깥에서 고정한다 — 그땐 같은 값이라 무해).
+    with_pinned_chain(
+        active_chain().chain_id,
+        with_pinned_account(
+            active_account_index(),
+            send_eth_pinned(password, to, amount_eth),
+        ),
     )
     .await
     .map_err(SendError::into_message)
@@ -452,9 +476,14 @@ pub(crate) async fn send_eth_checked(
     amount_eth: String,
 ) -> Result<String, SendError> {
     let password = Zeroizing::new(password);
-    with_pinned_account(
-        active_account_index(),
-        send_eth_pinned(password, to, amount_eth),
+    // 체인도 진입 때 고정(개발 71, 코덱스 1차) — 비번 복호화 사이 설정에서 체인을 바꾸면 안쪽 do_* 가 **바뀐** 체인을
+    // 고정했다(승인 경로는 approve_payment 가 이미 바깥에서 고정한다 — 그땐 같은 값이라 무해).
+    with_pinned_chain(
+        active_chain().chain_id,
+        with_pinned_account(
+            active_account_index(),
+            send_eth_pinned(password, to, amount_eth),
+        ),
     )
     .await
 }
@@ -619,9 +648,14 @@ pub(crate) async fn send_usdc(
 ) -> Result<String, String> {
     let password = Zeroizing::new(password);
     // 진입 시 계정을 한 번 고정 (개발 54) — send_eth 와 같은 이유.
-    with_pinned_account(
-        active_account_index(),
-        send_usdc_pinned(password, to, amount_usdc),
+    // 체인도 진입 때 고정(개발 71, 코덱스 1차) — 비번 복호화 사이 설정에서 체인을 바꾸면 안쪽 do_* 가 **바뀐** 체인을
+    // 고정했다(승인 경로는 approve_payment 가 이미 바깥에서 고정한다 — 그땐 같은 값이라 무해).
+    with_pinned_chain(
+        active_chain().chain_id,
+        with_pinned_account(
+            active_account_index(),
+            send_usdc_pinned(password, to, amount_usdc),
+        ),
     )
     .await
     .map_err(SendError::into_message)
@@ -635,9 +669,14 @@ pub(crate) async fn send_usdc_checked(
     amount_usdc: String,
 ) -> Result<String, SendError> {
     let password = Zeroizing::new(password);
-    with_pinned_account(
-        active_account_index(),
-        send_usdc_pinned(password, to, amount_usdc),
+    // 체인도 진입 때 고정(개발 71, 코덱스 1차) — 비번 복호화 사이 설정에서 체인을 바꾸면 안쪽 do_* 가 **바뀐** 체인을
+    // 고정했다(승인 경로는 approve_payment 가 이미 바깥에서 고정한다 — 그땐 같은 값이라 무해).
+    with_pinned_chain(
+        active_chain().chain_id,
+        with_pinned_account(
+            active_account_index(),
+            send_usdc_pinned(password, to, amount_usdc),
+        ),
     )
     .await
 }
@@ -941,10 +980,22 @@ mod tests {
     async fn lost_reply_then_already_known_is_sent() {
         let f = fake_rpc(vec![Act::Drop, Act::RpcErr("already known")]);
         let signer = PrivateKeySigner::random();
-        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC")
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false)
             .await
             .expect("already known 은 받힌 것이다");
         assert_same_raw(&f, &hash, 2);
+    }
+
+    /// 🔴 개발 71(코덱스 1차 P1): 채우기 뒤 제출 직전에 긴급 잠금이 켜져 있으면 **아무것도 안 낸다** — 확실한 실패.
+    #[tokio::test]
+    async fn lock_turned_on_before_submit_sends_nothing() {
+        let f = fake_rpc(vec![Act::Ok]);
+        let signer = PrivateKeySigner::random();
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || true).await {
+            Err(SendError::Failed(_)) => {}
+            other => panic!("확실한 실패여야 한다: {other:?}"),
+        }
+        assert!(f.raws.lock().unwrap().is_empty(), "제출이 나갔다");
     }
 
     /// 응답이 두 번 다 유실 → **불명**(해시는 안다). 확실한 실패가 아니다.
@@ -952,7 +1003,7 @@ mod tests {
     async fn lost_twice_is_unknown_with_the_hash() {
         let f = fake_rpc(vec![Act::Drop, Act::Drop]);
         let signer = PrivateKeySigner::random();
-        match broadcast_via(&f.url, &signer, native_tx(), "USDC").await {
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || false).await {
             Err(SendError::Unknown { hash, msg }) => {
                 assert!(msg.contains(&hash), "{msg}");
                 assert_same_raw(&f, &hash, 2);
@@ -966,7 +1017,7 @@ mod tests {
     async fn gateway_error_then_ok_is_sent() {
         let f = fake_rpc(vec![Act::Http(502), Act::Ok]);
         let signer = PrivateKeySigner::random();
-        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC")
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false)
             .await
             .unwrap();
         assert_same_raw(&f, &hash, 2);
@@ -977,7 +1028,7 @@ mod tests {
     async fn node_rejection_is_final_and_not_resent() {
         let f = fake_rpc(vec![Act::RpcErr("nonce too low")]);
         let signer = PrivateKeySigner::random();
-        match broadcast_via(&f.url, &signer, native_tx(), "USDC").await {
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || false).await {
             Err(SendError::Failed(_)) => {}
             other => panic!("확실한 실패여야 한다: {other:?}"),
         }
@@ -993,9 +1044,12 @@ mod tests {
         let f = fake_rpc(vec![Act::Ok]);
         let signer = PrivateKeySigner::random();
         let base = crate::chain::BASE_SEPOLIA.chain_id;
-        with_pinned_chain(base, broadcast_via(&f.url, &signer, native_tx(), "USDC"))
-            .await
-            .unwrap();
+        with_pinned_chain(
+            base,
+            broadcast_via(&f.url, &signer, native_tx(), "USDC", || false),
+        )
+        .await
+        .unwrap();
         let raw = alloy::hex::decode(&f.raws.lock().unwrap()[0]).unwrap();
         let env = TxEnvelope::decode_2718(&mut raw.as_slice()).unwrap();
         assert_eq!(env.chain_id(), Some(base));
@@ -1006,7 +1060,7 @@ mod tests {
     async fn plain_success_sends_once() {
         let f = fake_rpc(vec![Act::Ok]);
         let signer = PrivateKeySigner::random();
-        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC")
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false)
             .await
             .unwrap();
         assert_same_raw(&f, &hash, 1);

@@ -977,8 +977,7 @@ async fn approve_kind(req: &PaymentRequest, password: String) -> Result<PaymentR
     match req.kind.as_str() {
         // x402: 온체인 전송이 아니라 EIP-3009 인가를 서명만 한다(페이실리테이터가 정산).
         KIND_X402 => {
-            let payment =
-                sign_x402_payment(password, req.to.clone(), req.amount.clone(), None).await?;
+            let payment = sign_x402_payment(password, req.to.clone(), req.amount.clone()).await?;
             Ok(PaymentResult {
                 id: req.id.clone(),
                 status: "approved".into(),

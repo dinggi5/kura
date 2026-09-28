@@ -322,7 +322,7 @@ async fn auto_work(
     use crate::policy::{KIND_TRANSFER, KIND_X402, KIND_X402_DIRECT};
     match req.kind.as_str() {
         KIND_X402 => {
-            let payment = do_sign_x402(&signer, req.to.clone(), req.amount.clone(), None).await?;
+            let payment = do_sign_x402(&signer, req.to.clone(), req.amount.clone()).await?;
             Ok(PaymentResult {
                 id: req.id.clone(),
                 status: "approved".into(),
