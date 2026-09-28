@@ -73,17 +73,24 @@ fn with_entry(
 }
 
 /// 보관 파일에 쓸 줄들 — 넘겨받은 기록(최신순)을 **오래된 것부터** 한 줄씩. 순수 함수(테스트용).
-/// `last` = 보관 파일의 지금 마지막 줄. 그게 가장 먼저 쓸 기록과 같으면 그 기록은 뺀다 — 덧붙인 뒤 본 파일을
-/// 쓰기 전에 죽으면 그 기록이 본 파일에도 남아, 다음 번에 또 밀려나며 두 번 적힌다.
-fn archive_lines(evicted: &[HistoryEntry], last: Option<&HistoryEntry>) -> String {
+/// `tail` = 보관 파일 끝의 기록들(오래된 순). 쓸 기록의 **앞부분이 보관 파일의 끝부분과 겹치면** 그만큼 뺀다 —
+/// 덧붙인 뒤 본 파일을 쓰기 전에 죽으면 그 기록들이 본 파일에도 남아, 다음 번에 또 밀려나며 두 번 적힌다.
+/// 🔴 한때 마지막 한 줄만 비교했다(코덱스 개발 70 2차 P1) — 보관에 실패해 본 파일이 cap 을 넘긴 뒤 여러 건을 한꺼번에
+/// 옮기다 죽으면, 첫 기록이 마지막 줄과 달라 겹친 구간 전체가 다시 적혔다.
+/// (똑같은 기록 — 같은 초·같은 금액·같은 사유 — 이 연달아 있으면 하나로 볼 수 있다. 그 값으로 중복을 막는다.)
+fn archive_lines(evicted: &[HistoryEntry], tail: &[HistoryEntry]) -> String {
+    let oldest_first: Vec<&HistoryEntry> = evicted.iter().rev().collect();
+    let overlap = (1..=oldest_first.len().min(tail.len()))
+        .rev()
+        .find(|&m| {
+            tail[tail.len() - m..]
+                .iter()
+                .zip(&oldest_first[..m])
+                .all(|(a, b)| a == *b)
+        })
+        .unwrap_or(0);
     let mut out = String::new();
-    let mut oldest_first = evicted.iter().rev().peekable();
-    if let (Some(first), Some(last)) = (oldest_first.peek(), last) {
-        if *first == last {
-            oldest_first.next();
-        }
-    }
-    for e in oldest_first {
+    for e in &oldest_first[overlap..] {
         if let Ok(line) = serde_json::to_string(e) {
             out.push_str(&line);
             out.push('\n');
@@ -92,25 +99,35 @@ fn archive_lines(evicted: &[HistoryEntry], last: Option<&HistoryEntry>) -> Strin
     out
 }
 
-/// 보관 파일의 마지막 기록 — 끝의 64KB 만 읽는다(보관 파일은 몇 MB 까지 커질 수 있다).
-fn archive_last(path: &std::path::Path) -> Option<HistoryEntry> {
+/// 보관 파일 끝의 기록들(오래된 순) — 끝의 256KB 만 읽는다(보관 파일은 몇 MB 까지 커질 수 있다).
+/// 자른 자리가 한글 글자 중간일 수 있어 손실 허용 변환으로 읽는다(`read_to_string` 은 거기서 통째로 실패했다).
+/// 잘린 첫 줄은 JSON 이 아니라 걸러진다.
+fn archive_tail(path: &std::path::Path) -> Vec<HistoryEntry> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut f = fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(64 * 1024)))
-        .ok()?;
-    let mut tail = String::new();
-    f.read_to_string(&mut tail).ok()?;
-    tail.lines()
-        .rev()
-        .find_map(|l| serde_json::from_str(l).ok())
+    let Ok(mut f) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if f.seek(SeekFrom::Start(len.saturating_sub(256 * 1024)))
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    if f.read_to_end(&mut bytes).is_err() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
 }
 
 /// 밀려난 기록을 보관 파일 끝에 덧붙인다. 한 번의 쓰기로(줄 사이에서 끊기지 않게).
 /// 앞선 쓰기가 줄 중간에 죽어 파일이 개행으로 안 끝나면 개행부터 — 새 줄이 반쪽 줄에 붙어 같이 버려지지 않게.
 fn append_archive(path: &std::path::Path, evicted: &[HistoryEntry]) -> Result<(), String> {
     use std::io::{Read, Seek, SeekFrom, Write};
-    let mut body = archive_lines(evicted, archive_last(path).as_ref());
+    let mut body = archive_lines(evicted, &archive_tail(path));
     if body.is_empty() {
         return Ok(());
     }
@@ -523,6 +540,39 @@ mod tests {
             ["5", "4", "3", "2", "1", "0"]
         );
         let _ = fs::remove_dir_all(hot.parent().unwrap());
+    }
+
+    /// 🔴 코덱스 개발 70 2차 P1: 여러 건을 한꺼번에 옮기다 죽어도(본 파일이 cap 을 넘겨 있던 경우) 겹친 구간 전체를
+    /// 알아보고 새 것만 붙인다. 한글 사유가 있어 끝 읽기가 글자 중간에서 잘려도 같다.
+    #[test]
+    fn multi_evict_crash_does_not_duplicate() {
+        // 덧대는 바이트를 1·2·3 으로 — 끝 읽기의 자른 자리가 3바이트 글자의 세 위상을 다 밟는다(적어도 한 번은 글자 중간).
+        for pad in ["x", "xx", "xxx"] {
+            let hot = temp_hot(&format!("multi{}", pad.len()));
+            let e = |t: &str| entry(&format!("{t} 한글 사유"));
+            // 본 파일이 cap(2)을 넘겨 5건 = 보관에 실패하던 뒤.
+            let list: Vec<HistoryEntry> = ["4", "3", "2", "1", "0"].iter().map(|t| e(t)).collect();
+            write_json(hot.clone(), &list).unwrap();
+            // 맨 앞에 256KB 넘는 한글 기록(뒤에 덧대 JSON 이 아니게 = 읽을 땐 걸러진다), 그 뒤
+            // 「0·1·2」 를 보관 파일에 덧붙이고 본 파일을 쓰기 전에 죽었다.
+            let archive = crate::policy::history_archive_path(&hot);
+            let mut raw =
+                serde_json::to_string(&entry(&format!("f {}", "가".repeat(90_000)))).unwrap();
+            raw.push_str(pad);
+            raw.push('\n');
+            for t in ["0", "1", "2"] {
+                raw.push_str(&serde_json::to_string(&e(t)).unwrap());
+                raw.push('\n');
+            }
+            fs::write(&archive, raw).unwrap();
+            record_at(&hot, e("5"), 2).unwrap();
+            let got: Vec<String> = crate::policy::read_sent_history(&hot, 100)
+                .iter()
+                .map(|x| x.detail.split(' ').next().unwrap().to_string())
+                .collect();
+            assert_eq!(got, ["5", "4", "3", "2", "1", "0"], "pad {pad}");
+            let _ = fs::remove_dir_all(hot.parent().unwrap());
+        }
     }
 
     /// 🔴 개발 70: 깨진 본 파일을 빈 목록으로 읽고 덮어쓰지 않는다 — 옆으로 치우고 새로 시작.

@@ -112,9 +112,14 @@ export function WalletScreen({
   // 여러 곳이 부르는 loadHistory 가 늘 지금 줄 수로 읽게 ref 로 들고, 버튼 표시는 state 로 다시 그린다.
   const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE);
   const historyLimitRef = useRef(HISTORY_PAGE);
+  // 요청마다 세대 번호 — 늦게 온 옛 응답(200줄)이 새 응답(400줄)을 덮어 「더 보기」가 사라지지 않게(코덱스 개발 70 2차).
+  const historySeq = useRef(0);
   const loadHistory = useCallback(() => {
+    const seq = ++historySeq.current;
     invoke<HistoryEntry[]>("get_history", { limit: historyLimitRef.current })
-      .then(setHistory)
+      .then((list) => {
+        if (seq === historySeq.current) setHistory(list);
+      })
       .catch(() => {});
   }, []);
   const setHistoryPage = useCallback(
