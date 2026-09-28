@@ -11,8 +11,8 @@
 // 🔴 **판단은 GUI 가 체인에서 직접 본 것으로만 한다.** MCP 가 「revert 했다」고 말하는 걸 믿고 한도를 돌려주면 그게
 // 한도 우회 구멍이 된다(개발 64 코덱스). 여기서 묻는 RPC 는 사용자가 정한 그 RPC 이고, 체인 ID 부터 대조한다.
 //
-// 한도 환불은 **내역을 먼저 고치고 그다음**이다 — 반대 순서면 내역 쓰기가 실패할 때 다음 차례가 또 환불한다(한도 우회).
-// 내역만 고치고 환불을 못 하면 사용자에게 불리할 뿐(한도가 덜 남는다) 돈이 새지는 않는다.
+// 한도 환불은 결말 쓰기와 **따로**, 장부에서 기록마다 한 번이다(`refund_pass` → `limits::refund_once`, 개발 71 코덱스 2·3차) —
+// 결말이 사본 둘에 걸쳐 원자적으로 안 써져도 두 번 주지도, 영영 안 주지도 않는다.
 
 use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, ProviderBuilder};
@@ -74,22 +74,32 @@ fn ask_for(e: &HistoryEntry, now: u64) -> Option<Ask> {
     }
 }
 
+/// 이 결말이 기록에 남기는 상태.
+pub(crate) fn verdict_status(v: Verdict) -> &'static str {
+    match v {
+        Verdict::Mined => "sent",
+        Verdict::Reverted => "reverted",
+        Verdict::AuthUsed => "settled",
+        Verdict::AuthExpired => "expired",
+    }
+}
+
 /// 결말을 기록에 적는다 (순수 — 테스트용). 적었으면 true. 이미 다른 상태가 됐거나 확인된 기록은 안 건드린다.
 /// 돌려주는 두 번째 값 = 한도를 돌려줘야 하는가(돈이 안 나간 것으로 확정됐다).
 pub(crate) fn apply_verdict(e: &mut HistoryEntry, v: Verdict) -> (bool, bool) {
     if e.checked {
         return (false, false);
     }
-    let (from, to, refund): (&[&str], &str, bool) = match v {
-        Verdict::Mined => (&["sent", "unknown"], "sent", false),
-        Verdict::Reverted => (&["sent", "unknown"], "reverted", true),
-        Verdict::AuthUsed => (&["signed"], "settled", false),
-        Verdict::AuthExpired => (&["signed"], "expired", true),
+    let (from, refund): (&[&str], bool) = match v {
+        Verdict::Mined => (&["sent", "unknown"], false),
+        Verdict::Reverted => (&["sent", "unknown"], true),
+        Verdict::AuthUsed => (&["signed"], false),
+        Verdict::AuthExpired => (&["signed"], true),
     };
     if !from.contains(&e.status.as_str()) {
         return (false, false);
     }
-    e.status = to.into();
+    e.status = verdict_status(v).into();
     e.checked = true;
     (true, refund)
 }
@@ -144,8 +154,10 @@ async fn tick_with(chain_id: u64, url: String) -> Result<usize, String> {
             }
         }
     }
+    // 환불은 RPC 없이 장부만 본다 — 체인 확인보다 먼저, 매 차례(지난 차례에 결말만 적고 못 준 것까지).
+    let refunded = refund_pass(&accounts, now).await;
     if jobs.is_empty() {
-        return Ok(0); // 대부분의 차례 — RPC 를 부르지 않는다.
+        return Ok(refunded); // 대부분의 차례 — RPC 를 부르지 않는다.
     }
     let provider = ProviderBuilder::new()
         .connect(&url)
@@ -187,23 +199,54 @@ async fn tick_with(chain_id: u64, url: String) -> Result<usize, String> {
                 }
             }
         };
+        // 환불은 여기서 하지 않는다 — 아래 `refund_pass` 가 장부에서 기록마다 한 번으로 한다(개발 71 코덱스 3차).
         match crate::history::apply_confirmation(job.index, &job.entry, verdict) {
-            Ok(true) => {
-                fixed += 1;
-                let refund = matches!(verdict, Verdict::Reverted | Verdict::AuthExpired);
-                if refund {
-                    if let (Some(day), Some(value)) =
-                        (refund_day(job.entry.ts, now), refund_value(&job.entry))
-                    {
-                        crate::limits::refund_spend(&job.entry.token, value, day).await;
-                    }
-                }
-            }
+            Ok(true) => fixed += 1,
             Ok(false) => {}
             Err(e) => eprintln!("[confirm] {e}"),
         }
     }
-    Ok(fixed)
+    // 이번 차례에 적은 결말의 환불도 바로 — 다음 차례를 30초 기다리지 않게.
+    Ok(refunded + fixed + refund_pass(&accounts, now).await)
+}
+
+/// 이 기록의 환불 열쇠 — 고유 id, 옛 기록(개발 71 이전)은 시각·해시.
+fn refund_key(e: &HistoryEntry) -> String {
+    if e.id.is_empty() {
+        format!("{}:{}", e.ts, e.detail)
+    } else {
+        e.id.clone()
+    }
+}
+
+/// 환불 대상인가 (순수 — 테스트용): 체인 확인이 「돈이 안 나갔다」로 확정했고(reverted·expired) 오늘 기록이면 그 날.
+fn refund_due(e: &HistoryEntry, now: u64) -> Option<u64> {
+    (e.checked && matches!(e.status.as_str(), "reverted" | "expired"))
+        .then(|| refund_day(e.ts, now))
+        .flatten()
+}
+
+/// 확정된 「안 나간 결제」의 한도를 돌려준다 — **기록 하나당 한 번**(`limits::refund_once` 가 장부에 열쇠를 적는다).
+///
+/// 🔴 환불을 결말 쓰기에서 떼어 낸 이유(코덱스 개발 71 3차 P1): 결말은 사본 둘(본 파일·보관 파일)에 적히는데 두 쓰기는 원자적이지
+/// 않다. 「적는 데 성공했을 때 환불」이면 한쪽만 써진 실패에서 **영영 안 주거나**(3차) **두 번 줬다**(2차). 이제 결말이 적힌 사본이
+/// 하나라도 보이면 차례마다 여기서 장부에 묻는다 — 이미 준 열쇠면 아무 일도 없다. 내역을 쓰고 환불 전에 죽어도 다음 차례에 준다.
+async fn refund_pass(accounts: &[crate::policy::Account], now: u64) -> usize {
+    let mut n = 0;
+    for a in accounts {
+        for e in crate::history::read_account_history(a.index) {
+            if !crate::policy::history_owned_by(&e, &a.address) {
+                continue;
+            }
+            let (Some(day), Some(value)) = (refund_due(&e, now), refund_value(&e)) else {
+                continue;
+            };
+            if crate::limits::refund_once(&e.token, value, day, &refund_key(&e)).await {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 fn refund_value(e: &HistoryEntry) -> Option<alloy::primitives::U256> {
@@ -310,6 +353,28 @@ mod tests {
         assert_eq!(apply_verdict(&mut e, Verdict::AuthExpired), (false, false));
         let mut e = rec(0, "signed", HASH);
         assert_eq!(apply_verdict(&mut e, Verdict::Mined), (false, false));
+    }
+
+    // 🔴 개발 71(코덱스 3차): 환불 대상은 체인 확인이 「안 나갔다」로 확정한 오늘 기록뿐. 열쇠는 id, 옛 기록은 시각·해시.
+    #[test]
+    fn refund_due_only_for_confirmed_unpaid_today() {
+        let now = 20_000 * 86_400 + 43_200;
+        let mut e = rec(now - 60, "reverted", HASH);
+        assert_eq!(refund_due(&e, now), None); // 확인 표시가 없다
+        e.checked = true;
+        assert_eq!(refund_due(&e, now), Some(20_000));
+        e.status = "expired".into();
+        assert_eq!(refund_due(&e, now), Some(20_000));
+        for s in ["sent", "settled", "unknown", "failed"] {
+            e.status = s.into();
+            assert_eq!(refund_due(&e, now), None, "{s}");
+        }
+        e.status = "reverted".into();
+        e.ts = now - 86_400;
+        assert_eq!(refund_due(&e, now), None); // 어제
+        assert_eq!(refund_key(&e), format!("{}:{HASH}", e.ts));
+        e.id = "abc".into();
+        assert_eq!(refund_key(&e), "abc");
     }
 
     // 환불은 기록이 오늘이고 자정 5분 안쪽이 아닐 때만.

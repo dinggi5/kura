@@ -340,10 +340,16 @@ fn confirm_at(
     };
     let mut list = read_history_at(path);
     let archive = crate::policy::history_archive_path(path);
-    let mut rows = read_archive_rows(&archive)?;
-    // 🔴 **같은 기록의 사본을 전부 모아 한꺼번에** (코덱스 개발 71 2차 P1). 보관 덧붙이기와 본 파일 쓰기 사이에 죽으면 같은 id 가
-    // 양쪽에 남는다. 한쪽만 확인·환불하면, 나중에 확인 안 된 다른 사본을 또 확인해 **한 번 더 환불**했다. 규칙: 사본이 하나라도
-    // 이미 확인됐거나 기대한 상태가 아니면 아무것도 안 한다(환불을 놓칠 순 있어도 두 번 주지는 않는다). 다 받으면 전부에 적는다.
+    // 보관 파일을 못 읽어도 본 파일의 사본은 적는다(코덱스 개발 71 3차 P2) — 예전엔 보관 읽기 실패가 본 파일에만 있는 기록의
+    // 결말까지 막았다. 환불이 장부에서 기록마다 한 번으로 묶였으니(`limits::refund_once`) 사본을 못 본 채 적어도 두 번 주지 않는다.
+    let (mut rows, archive_ok) = match read_archive_rows(&archive) {
+        Ok(r) => (r, true),
+        Err(_) => (Vec::new(), false),
+    };
+    // 🔴 **같은 기록의 사본을 전부 모아 맞춘다** (코덱스 개발 71 2·3차). 보관 덧붙이기와 본 파일 쓰기 사이에 죽으면 같은 id 가
+    // 양쪽에 남는다. 규칙: 사본마다 ① 아직 미확인이고 이 결말을 받을 수 있으면 적고 ② 이미 **같은 결말**로 확인됐으면 그대로 둔다.
+    // ③ 다른 상태(그새 MCP 정산이 와서 settled 등)가 하나라도 있으면 아무것도 안 한다. ②가 있는 이유(3차 P1): 한쪽 쓰기만 성공한
+    // 뒤 예전 규칙 「하나라도 확인됐으면 손대지 않는다」는 남은 사본을 영영 못 맞췄다. 두 번 환불은 이제 장부가 막는다.
     let hot_hits: Vec<usize> = list
         .iter()
         .enumerate()
@@ -356,30 +362,34 @@ fn confirm_at(
         .filter(|(_, r)| r.1.as_ref().is_some_and(&same))
         .map(|(i, _)| i)
         .collect();
-    if hot_hits.is_empty() && arch_hits.is_empty() {
-        return Ok(false);
-    }
-    let all_accept = hot_hits
+    let target = crate::confirm::verdict_status(verdict);
+    let already = |e: &HistoryEntry| e.checked && e.status == target;
+    let accepts = |e: &HistoryEntry| crate::confirm::apply_verdict(&mut e.clone(), verdict).0;
+    let copies: Vec<&HistoryEntry> = hot_hits
         .iter()
-        .map(|&i| list[i].clone())
-        .chain(arch_hits.iter().filter_map(|&i| rows[i].1.clone()))
-        .all(|mut e| crate::confirm::apply_verdict(&mut e, verdict).0);
-    if !all_accept {
+        .map(|&i| &list[i])
+        .chain(arch_hits.iter().filter_map(|&i| rows[i].1.as_ref()))
+        .collect();
+    if copies.is_empty() || !copies.iter().all(|e| already(e) || accepts(e)) {
         return Ok(false);
     }
+    let mut hot_changed = false;
     for &i in &hot_hits {
-        crate::confirm::apply_verdict(&mut list[i], verdict);
+        hot_changed |= crate::confirm::apply_verdict(&mut list[i], verdict).0;
     }
-    if !hot_hits.is_empty() {
+    if hot_changed {
         write_json(path.clone(), &list)?;
     }
+    let mut arch_changed = false;
     for &i in &arch_hits {
         if let Some(e) = rows[i].1.as_mut() {
-            crate::confirm::apply_verdict(e, verdict);
-            rows[i].0 = serde_json::to_vec(e).map_err(|e| e.to_string())?;
+            if crate::confirm::apply_verdict(e, verdict).0 {
+                rows[i].0 = serde_json::to_vec(e).map_err(|e| e.to_string())?;
+                arch_changed = true;
+            }
         }
     }
-    if !arch_hits.is_empty() {
+    if arch_changed && archive_ok {
         let mut body = Vec::new();
         for (raw, _) in &rows {
             body.extend_from_slice(raw);
@@ -387,7 +397,7 @@ fn confirm_at(
         }
         crate::store::write_atomic(&archive, &body)?;
     }
-    Ok(true)
+    Ok(hot_changed || arch_changed)
 }
 
 /// 보관 파일의 한 줄 — (원래 바이트, 풀린 기록). 못 읽는 줄은 기록이 None.
@@ -805,35 +815,43 @@ mod tests {
         let _ = fs::remove_dir_all(hot.parent().unwrap());
     }
 
-    /// 🔴 개발 71(코덱스 2차 P1): 같은 id 사본이 본 파일·보관 파일에 갈라져 있을 때 — 한쪽이 이미 확인됐으면 아무것도 안 하고
-    /// (두 번 환불 금지), 둘 다 미확인이면 둘 다에 적는다.
+    /// 🔴 개발 71(코덱스 2·3차): 같은 id 사본이 본 파일·보관 파일에 갈라져 있을 때 — 같은 결말로 확인된 사본은 두고 나머지를
+    /// 맞추고, 다른 결말이 있으면 아무것도 안 하고, 보관 파일을 못 읽어도 본 파일은 적고, 둘 다 미확인이면 둘 다 적는다.
     #[test]
-    fn split_copies_are_confirmed_together_or_not_at_all() {
+    fn split_copies_converge_without_contradiction() {
         use crate::confirm::Verdict;
         let hot = temp_hot("confirm-copies");
         let archive = crate::policy::history_archive_path(&hot);
+        let line = |e: &HistoryEntry| format!("{}\n", serde_json::to_string(e).unwrap());
         let mut sent = entry("0xhash");
         sent.id = new_record_id();
+        let mut done = sent.clone();
+        done.status = "reverted".into();
+        done.checked = true;
+        // ① 보관 사본은 이미 같은 결말 — 본 파일 사본만 맞춘다. 다 맞으면 할 일 없음.
         write_json(hot.clone(), &vec![sent.clone()]).unwrap();
-        let mut checked = sent.clone();
-        checked.status = "reverted".into();
-        checked.checked = true;
-        fs::write(
-            &archive,
-            format!("{}\n", serde_json::to_string(&checked).unwrap()),
-        )
-        .unwrap();
+        fs::write(&archive, line(&done)).unwrap();
+        assert!(confirm_at(&hot, &sent, Verdict::Reverted).unwrap());
+        assert_eq!(read_history_at(&hot)[0].status, "reverted");
         assert!(!confirm_at(&hot, &sent, Verdict::Reverted).unwrap());
-        assert_eq!(read_history_at(&hot)[0].status, "sent"); // 건드리지 않았다
-                                                             // 둘 다 미확인 — 둘 다 적힌다.
-        fs::write(
-            &archive,
-            format!("{}\n", serde_json::to_string(&sent).unwrap()),
-        )
-        .unwrap();
+        // ② 다른 결말로 확인된 사본이 있으면 아무것도 안 한다.
+        write_json(hot.clone(), &vec![sent.clone()]).unwrap();
+        let mut other = sent.clone();
+        other.checked = true;
+        fs::write(&archive, line(&other)).unwrap();
+        assert!(!confirm_at(&hot, &sent, Verdict::Reverted).unwrap());
+        assert_eq!(read_history_at(&hot)[0].status, "sent");
+        // ③ 둘 다 미확인 — 둘 다 적힌다.
+        fs::write(&archive, line(&sent)).unwrap();
         assert!(confirm_at(&hot, &sent, Verdict::Reverted).unwrap());
         assert!(read_history_at(&hot)[0].checked);
         assert!(crate::policy::read_history_archive(&archive)[0].checked);
+        // ④ 보관 파일을 못 읽어도(그 자리에 디렉터리) 본 파일 사본은 적힌다(3차 P2).
+        write_json(hot.clone(), &vec![sent.clone()]).unwrap();
+        fs::remove_file(&archive).unwrap();
+        fs::create_dir_all(&archive).unwrap();
+        assert!(confirm_at(&hot, &sent, Verdict::Reverted).unwrap());
+        assert_eq!(read_history_at(&hot)[0].status, "reverted");
         let _ = fs::remove_dir_all(hot.parent().unwrap());
     }
 

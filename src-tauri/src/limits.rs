@@ -58,11 +58,21 @@ pub(crate) async fn reserve_spend(
     })?;
     let spent = spent_of(&spend, token);
     enforce_caps(value, single, spent, daily, token, decimals)?;
+    let before = serde_json::to_string_pretty(&spend).map_err(|e| e.to_string())?;
     set_spent(&mut spend, token, spent.saturating_add(value));
     // 기록 실패면 예약도 실패(헛환불 방지). 디스크까지 내린다 — 이 뒤에 돈이 나간다(개발 71).
     let json = serde_json::to_string_pretty(&spend).map_err(|e| e.to_string())?;
-    spend_path().and_then(|p| crate::store::write_atomic_durable(&p, json.as_bytes()))?;
-    Ok(spend.day)
+    let path = spend_path()?;
+    match crate::store::write_atomic_durable(&path, json.as_bytes()) {
+        Ok(()) => Ok(spend.day),
+        Err(crate::store::DurableError::NotWritten(e)) => Err(e),
+        // 새 장부는 제자리인데 디스크까지 못 내렸다 — 예약 전으로 되돌리고 이 결제는 거절한다(개발 71 코덱스 2·3차 절충).
+        // 되돌리기마저 실패하면 한도만 깎인 채 남는다(사용자에게 불리할 뿐 돈은 안 나간다).
+        Err(crate::store::DurableError::NotDurable(e)) => {
+            let _ = crate::store::write_atomic(&path, before.as_bytes());
+            Err(e)
+        }
+    }
 }
 
 /// 전송/서명 실패 시 reserve_spend 로 선반영했던 사용액을 되돌린다(환불). 락 안에서.
@@ -80,6 +90,31 @@ pub(crate) async fn refund_spend(token: &str, value: U256, reserved_day: u64) {
     let spent = spent_of(&spend, token);
     set_spent(&mut spend, token, spent.saturating_sub(value));
     let _ = spend_path().and_then(|p| write_json(p, &spend));
+}
+
+/// 체인 확인이 확정한 「돈이 안 나간 결제」의 한도를 **기록 하나당 한 번만** 돌려준다 (개발 71 코덱스 3차).
+/// `key` = 내역 기록의 열쇠(고유 id, 옛 기록은 시각·해시). 오늘 장부가 아니거나(예약한 날이 지났다) 이미 돌려준 열쇠면 아무것도 안 한다.
+/// 못 읽는 장부엔 손대지 않는다. 돌려줬으면 true.
+pub(crate) async fn refund_once(token: &str, value: U256, day: u64, key: &str) -> bool {
+    let _g = SPEND_LOCK.lock().await;
+    let Some(mut spend) = spend_for_reserve() else {
+        return false;
+    };
+    if !apply_refund_once(&mut spend, token, value, day, key) {
+        return false;
+    }
+    spend_path().and_then(|p| write_json(p, &spend)).is_ok()
+}
+
+/// `refund_once` 의 판단 (순수 — 테스트용).
+fn apply_refund_once(spend: &mut Spend, token: &str, value: U256, day: u64, key: &str) -> bool {
+    if spend.day != day || key.is_empty() || spend.refunded.iter().any(|k| k == key) {
+        return false;
+    }
+    let spent = spent_of(spend, token);
+    set_spent(spend, token, spent.saturating_sub(value));
+    spend.refunded.push(key.to_string());
+    true
 }
 
 /// USDC 금액/한도 문자열을 base unit U256 로 파싱한다. **음수는 거부**한다.
@@ -128,6 +163,11 @@ pub(crate) struct Spend {
     pub(crate) day: u64,
     pub(crate) usdc: String,
     pub(crate) eth: String,
+    /// 오늘 **체인 확인으로** 환불해 준 내역 기록의 열쇠(개발 71 코덱스 3차) — 같은 기록을 두 번 돌려주지 않는 근거.
+    /// 환불을 「내역 파일에 결말을 적었는가」에 매달면, 사본 둘(본 파일·보관 파일) 중 하나만 써지는 실패에서 두 번 주거나
+    /// 영영 안 줬다. 장부 한 파일 안에서 「빼기」와 「적어 두기」를 같이 쓰므로 둘이 갈리지 않는다. 날이 바뀌면 같이 비워진다.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) refunded: Vec<String>,
 }
 
 /// 프론트로 주는 오늘 사용액 (보기 좋은 십진수).
@@ -170,6 +210,7 @@ fn judge_spend(
         day: today,
         usdc: "0".into(),
         eth: "0".into(),
+        ..Default::default()
     };
     let parsed = match raw {
         None => return Some(fresh),
@@ -200,6 +241,7 @@ pub(crate) fn read_spend_today() -> Spend {
             day: today,
             usdc: "0".into(),
             eth: "0".into(),
+            ..Default::default()
         }
     }
 }
@@ -247,6 +289,29 @@ pub(crate) fn get_today_spend() -> SpendView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 🔴 개발 71(코덱스 3차): 체인 확인 환불은 기록 하나당 한 번 — 같은 열쇠는 두 번째에 아무것도 안 한다. 다른 날·빈 열쇠도.
+    #[test]
+    fn refund_once_per_record() {
+        let mut s = Spend {
+            day: 7,
+            usdc: "5000000".into(),
+            eth: "0".into(),
+            ..Default::default()
+        };
+        let one = U256::from(1_000_000u64);
+        assert!(apply_refund_once(&mut s, "USDC", one, 7, "id-a"));
+        assert!(!apply_refund_once(&mut s, "USDC", one, 7, "id-a"));
+        assert_eq!(s.usdc, "4000000");
+        assert!(!apply_refund_once(&mut s, "USDC", one, 6, "id-b")); // 어제 예약
+        assert!(!apply_refund_once(&mut s, "USDC", one, 7, "")); // 열쇠 없음
+        assert!(apply_refund_once(&mut s, "USDC", one, 7, "id-b"));
+        assert_eq!(s.usdc, "3000000");
+        // 새 날 장부는 목록도 비어 있다(직렬화에서도 빠진다).
+        let fresh = judge_spend(None, None, 8).unwrap();
+        assert!(fresh.refunded.is_empty());
+        assert!(!serde_json::to_string(&fresh).unwrap().contains("refunded"));
+    }
 
     // 🔴 개발 71(코덱스 1차 P1): 오늘 고친 장부를 못 읽으면 예약을 거부하고, 어제 이전 파일이면 새 날로 간다.
     #[test]

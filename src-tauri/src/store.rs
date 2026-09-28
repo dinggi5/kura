@@ -73,34 +73,53 @@ pub(crate) fn write_atomic(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}"))
 }
 
+/// `write_atomic_durable` 의 실패 — 둘은 뒷수습이 다르다.
+#[derive(Debug)]
+pub(crate) enum DurableError {
+    /// 새 내용이 제자리에 안 갔다 — 파일은 예전 그대로다.
+    NotWritten(String),
+    /// 새 내용은 제자리에 갔는데 디렉터리를 디스크까지 못 내렸다 — 전원이 나가면 예전으로 돌아갈 수 있다.
+    NotDurable(String),
+}
+
 /// `write_atomic` + **전원이 나가도 남는다** (개발 71, 코덱스 1차): 교체 전에 파일을, 교체 뒤에 디렉터리를 디스크까지 내린다.
 /// 돈이 나가기 **전**에 써야 하는 기록(한도 예약)에만 쓴다 — 예약을 쓰고 tx 를 낸 직후 전원이 나가면 체인엔 송금이 남는데
 /// 장부는 예약 전으로 돌아가 한도를 한 번 더 쓸 수 있었다. macOS 의 `sync_all` 은 F_FULLFSYNC(수~수십 ms)라 2초마다 쓰는
 /// 하트비트 같은 곳엔 넣지 않는다.
-pub(crate) fn write_atomic_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
-    let tmp = unique_tmp(path);
-    // 디렉터리 생성·0700 은 write_atomic 과 같다.
-    let dir = path.parent().ok_or(ts!(
-        "경로에 부모 디렉터리가 없습니다",
-        "That path has no parent folder"
-    ))?;
-    fs::create_dir_all(dir)
-        .map_err(|e| tf!("디렉터리 생성 실패: {e}", "Couldn't create the folder: {e}"))?;
+///
+/// 디렉터리 동기화 실패는 `NotDurable` 로 따로 돌려준다(개발 71 코덱스 2·3차) — 성공으로 치면 전원 장애 때 예약이 사라지고(3차 P1),
+/// 그냥 실패로 치면 새 장부는 이미 제자리라 결제 없이 한도만 깎인다(2차 P2). 호출자가 예전 내용으로 되돌리고 거절한다.
+pub(crate) fn write_atomic_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), DurableError> {
+    let not = |e: String| DurableError::NotWritten(e);
+    let dir = path.parent().ok_or_else(|| {
+        not(ts!(
+            "경로에 부모 디렉터리가 없습니다",
+            "That path has no parent folder"
+        )
+        .into())
+    })?;
+    fs::create_dir_all(dir).map_err(|e| {
+        not(tf!(
+            "디렉터리 생성 실패: {e}",
+            "Couldn't create the folder: {e}"
+        ))
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // 디렉터리 생성·0700 은 write_atomic 과 같다.
         let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
     }
-    write_file_private(&tmp, bytes)?;
+    let tmp = unique_tmp(path);
+    write_file_private(&tmp, bytes).map_err(not)?;
     fs::File::open(&tmp)
         .and_then(|f| f.sync_all())
-        .map_err(|e| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))?;
+        .map_err(|e| not(tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}")))?;
     fs::rename(&tmp, path)
-        .map_err(|e| tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}"))?;
-    // 디렉터리 동기화는 **최선 노력**이다(코덱스 개발 71 2차 P2) — 여기서 실패를 돌리면 새 장부는 이미 제자리인데 호출자는
-    // 「예약 실패」로 알고 돈을 안 보낸다 → 결제 없이 한도만 깎인다. 파일 자체는 위에서 이미 디스크에 내렸다.
-    let _ = fs::File::open(dir).and_then(|d| d.sync_all());
-    Ok(())
+        .map_err(|e| not(tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}")))?;
+    fs::File::open(dir).and_then(|d| d.sync_all()).map_err(|e| {
+        DurableError::NotDurable(tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))
+    })
 }
 
 /// 임시 파일을 처음부터 0600 으로 생성해 내용을 쓴다 (생성 후 chmod 사이의 노출 창 제거).
