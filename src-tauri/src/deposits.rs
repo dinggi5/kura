@@ -89,8 +89,9 @@ fn is_rate_limited(e: &str) -> bool {
     e.contains("429") || e.contains("rate limit") || e.contains("too many requests")
 }
 
-/// 입금 기록 보관 상한(최신순). 잡음 입금이 파일을 끝없이 키우지 않게.
-const DEPOSITS_CAP: usize = 5_000;
+// 입금 기록엔 상한이 없다(개발 70, 코덱스 1차 P1). 한때 5,000건에서 잘랐는데, 커서는 그 구간을 이미 지나 있어
+// 잘린 입금은 다시 찾지도 않았다 = 조용한 유실. 한 건이 250바이트 안팎이라 5만 건이어도 12MB 다. 0 원 잡음은 애초에
+// 안 적는다(`deposit_from_log`). 소액 잡음 공격은 건마다 수수료가 드는 일이라 그 값으로 막는다.
 
 /// 들어온 돈 1건 — 형식의 정본은 `policy::Deposit`(MCP·CLI 가 같은 타입으로 읽는다).
 pub(crate) use crate::policy::Deposit;
@@ -146,13 +147,9 @@ pub(crate) fn read_deposits() -> Vec<Deposit> {
         .unwrap_or_default()
 }
 
-/// 새 입금을 기존 목록에 합친다(순수 함수) — 키가 같은 건 버리고, 블록 시각 최신순, 상한으로 자른다.
+/// 새 입금을 기존 목록에 합친다(순수 함수) — 키가 같은 건 버리고, 블록 시각 최신순.
 /// 반환 = (합친 목록, 새로 들어간 개수).
-fn merge_deposits(
-    mut list: Vec<Deposit>,
-    found: Vec<Deposit>,
-    cap: usize,
-) -> (Vec<Deposit>, usize) {
+fn merge_deposits(mut list: Vec<Deposit>, found: Vec<Deposit>) -> (Vec<Deposit>, usize) {
     let mut seen: HashSet<String> = list.iter().map(|d| d.key.clone()).collect();
     let mut added = 0;
     for d in found {
@@ -167,7 +164,6 @@ fn merge_deposits(
             .then(b.block.cmp(&a.block))
             .then(b.key.cmp(&a.key))
     });
-    list.truncate(cap);
     (list, added)
 }
 
@@ -192,7 +188,7 @@ fn claim_owner(dp: &PathBuf, address: &str) -> Result<Vec<Deposit>, String> {
             let kept = policy::read_deposit_log(&aside)?
                 .map(|l| l.items)
                 .unwrap_or_default();
-            let (merged, _) = merge_deposits(kept, log.items, DEPOSITS_CAP);
+            let (merged, _) = merge_deposits(kept, log.items);
             let moved = policy::DepositLog {
                 address: log.address,
                 items: merged,
@@ -205,7 +201,7 @@ fn claim_owner(dp: &PathBuf, address: &str) -> Result<Vec<Deposit>, String> {
     };
     let mine = aside_path(dp, address);
     if let Some(back) = policy::read_deposit_log(&mine)? {
-        items = merge_deposits(items, back.items, DEPOSITS_CAP).0;
+        items = merge_deposits(items, back.items).0;
         let log = policy::DepositLog {
             address: address.to_string(),
             items: items.clone(),
@@ -223,7 +219,7 @@ fn store_found(dp: &PathBuf, address: &str, found: Vec<Deposit>) -> Result<usize
         return Ok(0);
     }
     let items = claim_owner(dp, address)?;
-    let (items, n) = merge_deposits(items, found, DEPOSITS_CAP);
+    let (items, n) = merge_deposits(items, found);
     if n > 0 {
         let log = policy::DepositLog {
             address: address.to_string(),
@@ -886,25 +882,24 @@ mod tests {
         }
     }
 
-    // 같은 구간을 두 번 훑어도 두 번 안 적힌다(커서를 기록 뒤에 옮기는 근거) · 최신순 · 상한.
+    // 같은 구간을 두 번 훑어도 두 번 안 적힌다(커서를 기록 뒤에 옮기는 근거) · 최신순 · 자르지 않는다(개발 70).
     #[test]
-    fn merge_dedupes_sorts_and_caps() {
+    fn merge_dedupes_sorts_and_keeps_all() {
         let (list, n) = merge_deposits(
             vec![dep("a", 5)],
             vec![dep("a", 5), dep("b", 9), dep("c", 1)],
-            10,
         );
         assert_eq!(n, 2);
         assert_eq!(
             list.iter().map(|d| d.key.as_str()).collect::<Vec<_>>(),
             ["b", "a", "c"]
         );
-        let (again, n2) = merge_deposits(list.clone(), vec![dep("b", 9)], 10);
+        let (again, n2) = merge_deposits(list.clone(), vec![dep("b", 9)]);
         assert_eq!(n2, 0);
         assert_eq!(again, list);
-        let (capped, _) = merge_deposits(list, vec![], 2);
-        assert_eq!(capped.len(), 2);
-        assert_eq!(capped[1].key, "a"); // 가장 오래된 c 가 밀려났다
+        let many: Vec<Deposit> = (0..6_000).map(|i| dep(&format!("k{i}"), i)).collect();
+        let (all, n3) = merge_deposits(list, many);
+        assert_eq!((all.len(), n3), (6_003, 6_000)); // 예전 상한 5,000 을 넘어도 전부
     }
 
     // 🔴 기록 쓰기(코덱스 개발 69 1차): 깨진 파일은 덮지 않고 에러, 남의 주소 기록은 옆으로 치우고 새로 시작.

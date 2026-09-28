@@ -92,7 +92,7 @@ pub(crate) fn needs_setup() -> bool {
 /// 암호화된 지갑 파일 (v2/v3). 주소만 평문(공개정보)이라 비번 없이도 잔액/QR 표시 가능.
 /// v3 = KDF 파라미터를 파일에 명시 + 강화값(KDF_*_V3). v2 파일은 kdf 필드가 없어서
 /// serde default(=옛 기본값)로 복호화되고, 비번 잠금 해제 성공 시 v3로 재암호화된다.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct EncryptedWallet {
     version: u32,
     pub(crate) address: String,
@@ -333,6 +333,17 @@ pub(crate) fn decrypt_wallet(
         })
 }
 
+/// 🔴 **wallet.enc 의 읽기-수정-쓰기를 한 줄로 세운다** (개발 70, 코덱스 1차 P1). 계정 추가·전환·이름·백업 표시·
+/// KDF 업그레이드가 각자 파일을 통째로 읽고 고쳐 통째로 쓴다 — 특히 업그레이드는 송금 스레드에서 1초 안팎의 KDF 를
+/// 돈 뒤에 쓰므로, 그 사이 화면에서 한 계정 추가·전환을 옛 사본으로 덮어 계정이 앱에서 사라졌다.
+/// wallet.enc 를 쓰는 건 이 프로세스(GUI)뿐이라 프로세스 안 잠금이면 된다(MCP 는 읽기만).
+/// 잠금 안에서 `unlock_signer` 를 부르지 말 것 — 업그레이드가 같은 잠금을 잡는다(재진입 없음).
+static WALLET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn wallet_guard() -> std::sync::MutexGuard<'static, ()> {
+    WALLET_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 암호화된 지갑을 디스크에 저장 (소유자만 읽기/쓰기, 원자 교체 —
 /// mark_backed_up 등 재작성 중 크래시로 지갑 파일이 깨지면 키 유실이라 치명적).
 fn write_encrypted(w: &EncryptedWallet) -> Result<(), String> {
@@ -372,10 +383,36 @@ fn upgraded_wallet(w: &EncryptedWallet, phrase: &str, password: &str) -> Option<
 /// 비번 잠금 해제 성공 시 옛 KDF(v2) 파일을 v3로 재암호화한다 (lazy 업그레이드).
 /// 실패해도 조용히 넘어간다 — 업그레이드는 부가 기능, 잠금 해제를 막으면 안 된다.
 /// (write_encrypted = 원자 교체라 도중 크래시에도 기존 파일이 깨지지 않는다.)
+///
+/// 재암호화(KDF)는 잠금 밖에서 하고, 쓰기 직전에 잠금 안에서 **최신 파일을 다시 읽는다**(개발 70, 코덱스 1차 P1):
+/// 그새 바뀐 계정 목록·활성·백업 표시를 싣고, 암호문이 달라졌으면(다른 시드를 가져왔다·이미 업그레이드됐다) 쓰지 않는다.
 pub(crate) fn maybe_upgrade_kdf(w: &EncryptedWallet, phrase: &str, password: &str) {
-    if let Some(nw) = upgraded_wallet(w, phrase, password) {
+    let Some(nw) = upgraded_wallet(w, phrase, password) else {
+        return;
+    };
+    let _g = wallet_guard();
+    let Ok(latest) = read_encrypted() else {
+        return;
+    };
+    if let Some(nw) = carry_metadata(nw, w, &latest) {
         let _ = write_encrypted(&nw);
     }
+}
+
+/// 업그레이드 사본에 최신 파일의 메타데이터를 싣는다 — 최신 파일이 업그레이드를 시작한 그 지갑(같은 암호문, 아직 v2)일
+/// 때만. 순수 함수(테스트용).
+fn carry_metadata(
+    mut nw: EncryptedWallet,
+    started: &EncryptedWallet,
+    latest: &EncryptedWallet,
+) -> Option<EncryptedWallet> {
+    if latest.version >= 3 || latest.ciphertext != started.ciphertext {
+        return None;
+    }
+    nw.backed_up = latest.backed_up;
+    nw.accounts = latest.accounts.clone();
+    nw.active = latest.active;
+    Some(nw)
 }
 
 /// 비번으로 저장된 키를 복호화해 **활성 계정**(작업이 고정했으면 그 계정)의 서명자를 만든다
@@ -468,6 +505,7 @@ fn ensure_no_pending_payment(target: Option<u32>) -> Result<(), String> {
 #[tauri::command]
 pub(crate) fn add_account(password: String) -> Result<WalletStatus, String> {
     let password = Zeroizing::new(password);
+    let _g = wallet_guard();
     ensure_no_pending_payment(None)?; // 새 계정은 어떤 요청도 각인했을 수 없다
     let mut w = read_encrypted()?;
     let phrase = decrypt_wallet(&w, &password)?;
@@ -495,6 +533,7 @@ pub(crate) fn add_account(password: String) -> Result<WalletStatus, String> {
 /// 활성 계정을 바꾼다. 없는 인덱스는 거부.
 #[tauri::command]
 pub(crate) fn switch_account(index: u32) -> Result<WalletStatus, String> {
+    let _g = wallet_guard();
     ensure_no_pending_payment(Some(index))?;
     let mut w = read_encrypted()?;
     if !w.accounts().iter().any(|a| a.index == index) {
@@ -526,6 +565,7 @@ fn clean_label(label: &str) -> String {
 /// 계정 이름을 바꾼다 (비번 불필요 — 비밀이 아닌 메타데이터). 빈 값 = 기본 이름(「계정 N」)으로.
 #[tauri::command]
 pub(crate) fn rename_account(index: u32, label: String) -> Result<WalletStatus, String> {
+    let _g = wallet_guard();
     let mut w = read_encrypted()?;
     let mut accounts = w.accounts();
     let Some(a) = accounts.iter_mut().find(|a| a.index == index) else {
@@ -546,6 +586,7 @@ pub(crate) fn rename_account(index: u32, label: String) -> Result<WalletStatus, 
 #[tauri::command]
 pub(crate) fn create_wallet(password: String) -> Result<WalletInfo, String> {
     let password = Zeroizing::new(password); // 사용 후 메모리에서 0으로 덮음
+    let _g = wallet_guard();
     if enc_path()?.exists() {
         return Err(ts!("이미 지갑이 있습니다", "A wallet already exists").into());
     }
@@ -569,6 +610,7 @@ pub(crate) fn create_wallet(password: String) -> Result<WalletInfo, String> {
 #[tauri::command]
 pub(crate) fn migrate_wallet(password: String) -> Result<WalletInfo, String> {
     let password = Zeroizing::new(password);
+    let _g = wallet_guard();
     if enc_path()?.exists() {
         return Err(ts!(
             "이미 암호화된 지갑이 있습니다",
@@ -670,6 +712,7 @@ fn build_imported_wallet(phrase: &str, password: &str) -> Result<EncryptedWallet
 pub(crate) fn import_wallet(password: String, phrase: String) -> Result<WalletInfo, String> {
     let password = Zeroizing::new(password); // 사용 후 메모리에서 0으로 덮음
     let phrase = Zeroizing::new(phrase);
+    let _g = wallet_guard();
     if enc_path()?.exists() {
         return Err(ts!("이미 지갑이 있습니다", "A wallet already exists").into());
     }
@@ -693,6 +736,7 @@ pub(crate) fn reveal_mnemonic(password: String) -> Result<Vec<String>, String> {
 /// 사용자가 시드 백업을 마쳤다고 표시한다. 비번은 필요 없다(비밀이 아닌 메타데이터).
 #[tauri::command]
 pub(crate) fn mark_backed_up() -> Result<(), String> {
+    let _g = wallet_guard();
     let mut w = read_encrypted()?;
     if !w.backed_up {
         w.backed_up = true;
@@ -818,6 +862,47 @@ mod tests {
 
         // 이미 v3면 재암호화하지 않는다.
         assert!(upgraded_wallet(&v3, phrase, "pw").is_none());
+    }
+
+    /// 🔴 개발 70(코덱스 1차 P1): 업그레이드가 KDF 를 도는 사이 계정이 추가·전환됐으면 그 최신 목록을 싣고,
+    /// 그새 다른 지갑을 가져왔거나 이미 업그레이드됐으면 쓰지 않는다.
+    #[test]
+    fn upgrade_carries_latest_metadata_or_skips() {
+        let phrase = "test test test test test test test test test test test junk";
+        let v2 = encrypt_with(phrase, "0xAddr", "pw", 2, KDF_M_V2, KDF_T_V2, KDF_P_V2).unwrap();
+        let nw = upgraded_wallet(&v2, phrase, "pw").unwrap();
+
+        let mut latest = v2.clone();
+        latest.accounts = vec![
+            Account {
+                index: 0,
+                address: "0xAddr".into(),
+                label: String::new(),
+            },
+            Account {
+                index: 1,
+                address: "0xB".into(),
+                label: String::new(),
+            },
+        ];
+        latest.active = 1;
+        latest.backed_up = true;
+        let out = carry_metadata(nw.clone(), &v2, &latest).expect("같은 지갑이면 쓴다");
+        assert_eq!(out.version, 3);
+        assert_eq!(
+            (out.accounts.len(), out.active, out.backed_up),
+            (2, 1, true)
+        );
+
+        let other = encrypt_with(phrase, "0xAddr", "pw", 2, KDF_M_V2, KDF_T_V2, KDF_P_V2).unwrap();
+        assert!(
+            carry_metadata(nw.clone(), &v2, &other).is_none(),
+            "암호문이 다르면 안 쓴다"
+        );
+        assert!(
+            carry_metadata(nw.clone(), &v2, &nw).is_none(),
+            "이미 v3 면 안 쓴다"
+        );
     }
 
     // 정규화: 줄바꿈·중복 공백·대문자를 흡수해 표준 12단어로 정리한다.

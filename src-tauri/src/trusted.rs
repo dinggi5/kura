@@ -40,8 +40,18 @@ fn add_trusted(list: &mut Vec<String>, addr: &str) -> bool {
     true
 }
 
+/// 🔴 신뢰 목록의 읽기-수정-쓰기를 한 줄로 세운다(개발 70, 코덱스 1차 P2) — 승인 완료의 학습과 설정 화면의 철회가
+/// 겹치면 나중에 쓴 쪽이 다른 쪽을 되돌렸다. 철회가 되돌려지면 그 주소는 계속 자율 결제를 통과한다.
+/// 이 파일을 쓰는 건 GUI 뿐이라 프로세스 안 잠금이면 된다.
+static TRUSTED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn trusted_guard() -> std::sync::MutexGuard<'static, ()> {
+    TRUSTED_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 사람이 비번으로 승인한 송금/서명의 받는 주소를 학습한다. 기록 실패가 결제를 막진 않는다.
 pub(crate) fn record_trusted(addr: &str) {
+    let _g = trusted_guard();
     let mut list = read_trusted();
     if add_trusted(&mut list, addr) {
         if let Ok(p) = trusted_path() {
@@ -77,6 +87,7 @@ fn remove_trusted(list: &mut Vec<String>, addr: &str) -> bool {
 /// 신뢰 철회 — 이후 이 주소로의 자율 결제는 다시 비번 승인이 필요하다.
 #[tauri::command]
 pub(crate) fn remove_trusted_addr(to: String) -> Result<(), String> {
+    let _g = trusted_guard();
     let mut list = read_trusted();
     if remove_trusted(&mut list, &to) {
         write_json(trusted_path()?, &list)?;

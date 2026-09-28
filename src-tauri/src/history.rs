@@ -318,6 +318,7 @@ pub(crate) fn apply_x402_settlements() -> u32 {
                 .filter(|i| *i != active),
         );
     }
+    let all_indices = indices.clone();
     let mut pending: Vec<&Settlement> = settlements.iter().collect();
     let mut applied = 0u32;
     // 내역 저장이 하나라도 실패하면 묶음을 지우지 않는다(개발 68, 코덱스 1차) — 지우면 그 「signed」 는 영영
@@ -349,6 +350,22 @@ pub(crate) fn apply_x402_settlements() -> u32 {
             }
         }
     }
+    // 본 파일에서 못 찾은 정산은 **보관 파일**에서 찾는다(개발 70, 코덱스 1차 P1) — 정산이 늦게 오는 사이 시도가 200건을
+    // 넘게 쌓이면 그 「signed」 는 보관 파일로 밀려나 있다. 드문 경로라 보관 파일을 통째로 다시 써도 된다.
+    if !pending.is_empty() {
+        for index in all_indices {
+            if pending.is_empty() {
+                break;
+            }
+            let Ok(hp) = history_path_for(index) else {
+                continue;
+            };
+            match settle_in_archive(&crate::policy::history_archive_path(&hp), &mut pending) {
+                Ok(hit) => applied += hit,
+                Err(_) => write_failed = true,
+            }
+        }
+    }
     if write_failed {
         return applied;
     }
@@ -357,6 +374,44 @@ pub(crate) fn apply_x402_settlements() -> u32 {
         let _ = fs::remove_file(p);
     }
     applied
+}
+
+/// 보관 파일에서 정산을 찾아 반영한다 — 맞은 게 있으면 파일을 통째로 원자 교체한다. 반환 = 반영 건수.
+/// 없는 파일은 0. 못 읽는 줄은 그대로 둔다(버리면 다시 쓸 때 사라진다).
+fn settle_in_archive(path: &PathBuf, pending: &mut Vec<&Settlement>) -> Result<u32, String> {
+    let raw = match fs::read_to_string(path) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.to_string()),
+    };
+    // 줄마다 (원문, 풀린 기록). 고친 줄만 다시 직렬화한다.
+    let mut rows: Vec<(String, Option<HistoryEntry>)> = raw
+        .lines()
+        .map(|l| (l.to_string(), serde_json::from_str(l).ok()))
+        .collect();
+    let mut hit = 0u32;
+    pending.retain(|s| {
+        for (line, entry) in rows.iter_mut() {
+            let Some(e) = entry else { continue };
+            if apply_settlement(std::slice::from_mut(e), s) {
+                if let Ok(new_line) = serde_json::to_string(e) {
+                    *line = new_line;
+                }
+                hit += 1;
+                return false;
+            }
+        }
+        true
+    });
+    if hit > 0 {
+        let mut body = String::with_capacity(raw.len());
+        for (line, _) in &rows {
+            body.push_str(line);
+            body.push('\n');
+        }
+        crate::store::write_atomic(path, body.as_bytes())?;
+    }
+    Ok(hit)
 }
 
 #[cfg(test)]
@@ -484,6 +539,38 @@ mod tests {
             .collect();
         assert_eq!(aside.len(), 1);
         assert_eq!(fs::read_to_string(aside[0].path()).unwrap(), "[{\"ts\":1,");
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
+    }
+
+    /// 🔴 개발 70(코덱스 1차 P1): 정산이 오기 전에 「signed」 가 보관 파일로 밀려났어도 정산이 반영된다.
+    #[test]
+    fn settlement_reaches_archived_signed_entry() {
+        let hot = temp_hot("settle-archive");
+        let mut signed = entry("0xnonce");
+        signed.status = "signed".into();
+        record_at(&hot, signed, 2).unwrap();
+        for i in 0..3 {
+            record_at(&hot, entry(&i.to_string()), 2).unwrap();
+        }
+        let archive = crate::policy::history_archive_path(&hot);
+        let s = Settlement {
+            nonce: "0xnonce".into(),
+            tx: "0xsettle".into(),
+            success: true,
+        };
+        let mut pending = vec![&s];
+        assert_eq!(settle_in_archive(&archive, &mut pending).unwrap(), 1);
+        assert!(pending.is_empty());
+        let all = crate::policy::read_sent_history(&hot, 100);
+        let got = all.iter().find(|e| e.detail == "0xnonce").unwrap();
+        assert_eq!(
+            (got.status.as_str(), got.settle_tx.as_str()),
+            ("settled", "0xsettle")
+        );
+        assert_eq!(all.len(), 4);
+        // 없는 보관 파일은 0, 에러 아님.
+        let none = hot.with_file_name("nope.archive.jsonl");
+        assert_eq!(settle_in_archive(&none, &mut vec![&s]).unwrap(), 0);
         let _ = fs::remove_dir_all(hot.parent().unwrap());
     }
 
