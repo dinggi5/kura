@@ -24,6 +24,7 @@
 
 mod autostart;
 mod chain;
+mod confirm;
 mod connect;
 mod deposits;
 mod history;
@@ -121,6 +122,8 @@ pub fn run() {
             ipc::spawn_watchdog(app.handle());
             // 입금 기록(개발 69) — 활성 체인·계정으로 들어온 돈을 계속 찾는다(처음엔 90일 전까지 채운다).
             deposits::spawn(app.handle().clone());
+            // 내역의 결말을 체인에서 확인한다(개발 71) — 불명·되돌려짐·만료된 서명.
+            confirm::spawn(app.handle().clone());
             // 평소엔 트레이에만 조용히 상주한다(로그인 자동 시작 때 창이 튀어나오지 않게).
             // 단 첫 실행은 예외 — 메뉴바 아이콘만 뜨고 아무 일도 없으면 뭘 해야 할지 알 수 없다.
             if wallet::needs_setup() {
@@ -171,6 +174,7 @@ pub fn run() {
             lock::is_locked,
             lock::set_locked,
             history::get_history,
+            history::recent_same_payment_secs,
             ipc::get_pending_request,
             ipc::approve_payment,
             ipc::reject_payment,

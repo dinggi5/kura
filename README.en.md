@@ -167,7 +167,7 @@ If you're **editing `kura-mcp` itself**, the installed app won't have your chang
 { "mcpServers": { "kura": { "command": "cargo", "args": ["run", "--quiet", "--manifest-path", "./kura-mcp/Cargo.toml"] } } }
 ```
 
-Tools the AI gets: `get_wallet_status` · `get_balances` · `get_history` (read only) · `request_payment` (asks to pay → approval window in the app) · `x402_fetch` (calls a URL behind an x402 paywall) · `lookup_agent` (reads an ERC-8004 agent record on-chain, read only).
+Tools the AI gets: `get_wallet_status` · `get_balances` · `get_history` (read only) · `request_payment` (asks to pay → approval window in the app) · `x402_fetch` (calls a URL behind an x402 paywall) · `x402_resubmit` (re-sends the proof of a payment the wallet broadcast itself — no new payment) · `lookup_agent` (reads an ERC-8004 agent record on-chain, read only).
 
 > Changing MCP tools means **restarting the AI app** — the server loads once per session.
 

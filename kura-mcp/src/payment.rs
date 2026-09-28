@@ -73,7 +73,7 @@ pub struct PaymentRequest {
 }
 
 fn default_kind() -> String {
-    "transfer".to_string()
+    crate::policy::KIND_TRANSFER.to_string()
 }
 
 /// GUI가 쓰는 처리 결과.
@@ -137,7 +137,7 @@ fn ui_ok_default() -> bool {
 }
 
 fn kinds_default() -> Vec<String> {
-    vec!["transfer".into(), "x402".into()]
+    crate::policy::kinds_legacy()
 }
 
 fn request_path() -> Result<PathBuf, String> {
@@ -349,7 +349,16 @@ pub fn write_request_agent(
     memo: &str,
     agent: Option<AgentTrust>,
 ) -> Result<(String, Option<AgentTrust>), String> {
-    write_request_kind(token, to, amount, memo, "transfer", "", "", agent)
+    write_request_kind(
+        token,
+        to,
+        amount,
+        memo,
+        crate::policy::KIND_TRANSFER,
+        "",
+        "",
+        agent,
+    )
 }
 
 /// x402 결제 서명 요청을 파일에 쓴다 (kind="x402", USDC 고정).
@@ -361,7 +370,16 @@ pub fn write_x402_request(
     resource: &str,
     agent: Option<AgentTrust>,
 ) -> Result<(String, Option<AgentTrust>), String> {
-    write_request_kind("USDC", to, amount, memo, "x402", resource, "", agent)
+    write_request_kind(
+        "USDC",
+        to,
+        amount,
+        memo,
+        crate::policy::KIND_X402,
+        resource,
+        "",
+        agent,
+    )
 }
 
 /// x402 **직접 제출** 요청 (개발 64) — 서명만 받는 게 아니라 **온체인 전송까지** GUI 에 맡긴다.
@@ -379,7 +397,7 @@ pub fn write_x402_direct_request(
         to,
         amount,
         memo,
-        "x402-direct",
+        crate::policy::KIND_X402_DIRECT,
         resource,
         nonce,
         agent,
@@ -481,15 +499,10 @@ fn claim_request_file(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
 /// 내 요청 파일을 거둔다(파일 안의 id 가 내 것일 때만) — 경로를 받는다. **경로를 안에서 구하면 테스트가 실지갑
 /// (`~/.jigap`)을 건드리게 되므로** 여기를 갈라 두고 테스트는 임시 폴더를 넘긴다
 /// (`claim_request_file` 과 같은 이음매). 파일 안의 id 가 내 것일 때만 지운다.
+///
+/// 확인과 삭제를 한 걸음으로(`policy::remove_request_if_mine`, 개발 71) — 둘 사이에 남의 새 요청이 들어와도 안 지운다.
 fn cancel_request_at(path: &Path, id: &str) {
-    let mine = fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<PaymentRequest>(&s).ok())
-        .map(|r| r.id == id)
-        .unwrap_or(false);
-    if mine {
-        let _ = fs::remove_file(path);
-    }
+    crate::policy::remove_request_if_mine(path, id);
 }
 
 /// 대기 중에 이 프로세스가 사라지면 내 요청을 거둔다 (개발 59 에 넣었다 되돌리고, 개발 63 에 복원).
@@ -596,16 +609,23 @@ async fn await_result_in(
     // ① 거두기 — 여기서부터 GUI 는 이 요청의 새 승인을 시작하지 못한다.
     cancel_request_at(&req_path, id);
     guard.armed = false;
+    // 어느 갈래로 끝났는지 남긴다(개발 71 — 개발 67 이 실물에서 이 갈래를 탔는지 못 가렸다). stdout 은 MCP 프로토콜이라 stderr.
+    eprintln!("[kura] 요청 {id}: 승인 대기 시간이 다 됐다 — 거두고 결제 시도 기록을 본다");
     // ② 기록 읽기. 거두기 직전에 결과가 들어왔을 수도 있으니 결과 파일도 같이 본다.
     let late_start = SystemTime::now();
     loop {
         if let Some(r) = take_result(&res_path, id) {
+            eprintln!("[kura] 요청 {id}: 거두기 직전에 온 결과 파일로 끝남");
             return Some(r);
         }
         let rec = read_attempt(dir, id);
         match crate::policy::after_timeout(rec.as_ref()) {
-            crate::policy::AfterTimeout::NothingSent => return None,
+            crate::policy::AfterTimeout::NothingSent => {
+                eprintln!("[kura] 요청 {id}: 아무것도 안 나감으로 끝남");
+                return None;
+            }
             crate::policy::AfterTimeout::Finished => {
+                eprintln!("[kura] 요청 {id}: 결제 시도 기록에서 결말을 받음(늦은 전송 갈래)");
                 return rec.map(PaymentResult::from_record);
             }
             crate::policy::AfterTimeout::StillSending => {
@@ -613,6 +633,7 @@ async fn await_result_in(
                     .duration_since(late_start)
                     .unwrap_or(late_wait);
                 if waited >= late_wait {
+                    eprintln!("[kura] 요청 {id}: 늦은 전송을 기다리다 끝남 — 불명");
                     return Some(PaymentResult::still_sending(id, rec));
                 }
             }
@@ -672,6 +693,39 @@ pub fn write_proof(id: &str, proof: &ProofRecord) {
     }
 }
 
+/// tx 해시로 증거 재료를 찾는다 (개발 71 — 재제출). GUI 의 결제 시도 기록(`<id>.json`)이 그 tx 를 가리키는 요청의
+/// `<id>.proof.json` 만 돌려준다 — 증거 파일만 보고 tx 를 믿으면 **남의 tx 로 우리 증거를** 내게 된다.
+pub fn find_proof_by_tx(tx: &str) -> Option<ProofRecord> {
+    find_proof_in(&jigap_dir().ok()?, tx)
+}
+
+fn find_proof_in(dir: &Path, tx: &str) -> Option<ProofRecord> {
+    let tx = tx.trim();
+    if tx.is_empty() {
+        return None;
+    }
+    for e in fs::read_dir(dir.join(crate::policy::APPROVALS_DIR))
+        .ok()?
+        .flatten()
+    {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_suffix(".proof.json") else {
+            continue;
+        };
+        let Some(rec) = read_attempt(dir, id) else {
+            continue;
+        };
+        if !rec.tx_hash.trim().eq_ignore_ascii_case(tx) {
+            continue;
+        }
+        let proof: ProofRecord = serde_json::from_str(&fs::read_to_string(e.path()).ok()?).ok()?;
+        if proof.id == id {
+            return Some(proof);
+        }
+    }
+    None
+}
+
 /// `<id>.proof.json` 의 내용 — 402 챌린지 원문 + 우리가 정한 신선도 값. 재제출은 이걸 `x402::parse_required`
 /// → `pick_requirement` → `build_direct_submission` 에 그대로 다시 먹이면 된다(flow.rs 가 쓰는 그 함수들).
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -704,6 +758,45 @@ pub const PROOF_BODY_CAP: usize = 64 * 1024;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 개발 71 — 재제출은 **GUI 기록이 그 tx 를 가리키는** 요청의 증거만 찾는다. 증거 파일만 있고 기록의 tx 가
+    /// 다르면(남의 tx) 못 찾는다.
+    #[test]
+    fn proof_is_found_only_through_the_attempt_record() {
+        let dir = std::env::temp_dir().join(format!("kura-proof-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let ap = dir.join(crate::policy::APPROVALS_DIR);
+        fs::create_dir_all(&ap).unwrap();
+        let proof = ProofRecord {
+            v: 1,
+            id: "111".into(),
+            created: 1,
+            chain_id: 5042,
+            url: "https://ex.com/a".into(),
+            challenge_header: None,
+            challenge_body: "{}".into(),
+            body_dropped: false,
+            client_nonce: Some("ab".into()),
+            seed: None,
+            nonce: "0xn".into(),
+        };
+        fs::write(
+            ap.join("111.proof.json"),
+            serde_json::to_string(&proof).unwrap(),
+        )
+        .unwrap();
+        assert!(find_proof_in(&dir, "0xAAA").is_none()); // 기록이 없다
+        let rec = |tx: &str| {
+            format!(
+                r#"{{"v":1,"id":"111","state":"unknown","kind":"x402-direct","chain_id":5042,"started":1,"updated":1,"tx_hash":"{tx}"}}"#
+            )
+        };
+        fs::write(ap.join("111.json"), rec("0xbbb")).unwrap();
+        assert!(find_proof_in(&dir, "0xAAA").is_none()); // 기록의 tx 가 다르다
+        fs::write(ap.join("111.json"), rec("0xaaa")).unwrap();
+        assert_eq!(find_proof_in(&dir, " 0xAAA ").unwrap(), proof);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// 🔴 개발 64 — **옛 앱의 하트비트엔 `kinds` 가 없다.** 그때 새 방식을 「지원한다」로 읽으면
     /// 옛 앱에 `x402-direct` 요청이 가고, 그 앱은 그것을 **평범한 송금으로** 처리한다(돈은 나가고

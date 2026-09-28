@@ -27,6 +27,7 @@ RPC로 잔액을 조회하며, 결제는 GUI 앱에 "요청"만 한다. **비밀
 | 거래 내역 | `get_history` | `kura history [--limit N]` | 불필요 |
 | 송금 요청 | `request_payment` | `kura pay <주소> <금액> [--token USDC\|ETH] [--memo "사유"] [--agent N]` | **GUI 승인** |
 | x402 유료 리소스 | `x402_fetch` | `kura fetch <URL> [--memo "사유"]` | **GUI 승인** |
+| 결제 증거 다시 내기 | `x402_resubmit` | (CLI 없음) | 불필요(새 결제 없음) |
 | 에이전트 신원 조회 | `lookup_agent` | (CLI 없음 — `pay`/`fetch` 의 `--agent N` 으로 대조) | 불필요 |
 
 읽기 명령은 즉시. 결제 명령(`pay`/`fetch`)은 지갑 앱이 팝업으로 사람 승인을 받아야만

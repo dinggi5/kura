@@ -78,6 +78,19 @@ export function PaymentApprovalModal({
       .catch(() => setTrusted(null));
   }, [request.to]);
 
+  // 같은 곳으로 같은 금액이 방금(10분 안) 나갔는가 (개발 71) — 자율 결제가 이 창으로 넘어온 흔한 이유이고,
+  // AI 가 응답을 놓치고 다시 요청한 중복 결제를 사람이 알아보는 유일한 자리다. 몇 초 전인지, 없으면 null.
+  const [repeatSecs, setRepeatSecs] = useState<number | null>(null);
+  useEffect(() => {
+    invoke<number | null>("recent_same_payment_secs", {
+      token: request.token,
+      to: request.to,
+      amount: request.amount,
+    })
+      .then(setRepeatSecs)
+      .catch(() => setRepeatSecs(null));
+  }, [request.token, request.to, request.amount]);
+
   // x402 는 두 갈래다 (개발 64):
   //  · "x402"        = 서명만. 온체인 제출·가스는 페이실리테이터 몫 → 우리 잔액에서 가스가 안 나간다.
   //  · "x402-direct" = **우리가 직접 올린다**(가스가 곧 USDC 인 체인). 결제액 + 가스가 우리 잔액에서 나간다.
@@ -235,6 +248,15 @@ export function PaymentApprovalModal({
             <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-500">
               <AlertTriangle size={11} />
               {t("처음 보는 주소예요", "You haven't sent here before")}
+            </p>
+          )}
+          {repeatSecs != null && (
+            <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-500">
+              <AlertTriangle size={11} />
+              {t(
+                `${Math.max(1, Math.round(repeatSecs / 60))}분 전에 같은 곳으로 같은 금액을 보냈어요`,
+                `You sent the same amount here ${Math.max(1, Math.round(repeatSecs / 60))} min ago`,
+              )}
             </p>
           )}
           {/* ERC-8004 대조 (개발 47) — AI 가 에이전트 번호를 준 결제에만 붙는다.

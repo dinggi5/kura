@@ -299,14 +299,12 @@ async fn cmd_balance(cli: &Cli) -> Result<(), String> {
 async fn cmd_history(cli: &Cli) -> Result<(), String> {
     // 상한 없음 — 200건을 넘친 기록도 보관 파일에 남는다(개발 70, 예전엔 200 으로 클램프했다).
     let limit = match cli.opts.get("limit") {
-        Some(v) => v
-            .parse::<usize>()
-            .map_err(|_| {
-                tf!(
-                    "--limit 은 0 이상의 정수여야 해요: {v}",
-                    "--limit must be a whole number, 0 or more: {v}"
-                )
-            })?,
+        Some(v) => v.parse::<usize>().map_err(|_| {
+            tf!(
+                "--limit 은 0 이상의 정수여야 해요: {v}",
+                "--limit must be a whole number, 0 or more: {v}"
+            )
+        })?,
         None => 20,
     };
     let list = wallet::read_history(limit);
@@ -751,6 +749,9 @@ fn status_label(status: &str, lang: Lang) -> &str {
         "settle_failed" => ("정산실패", "settlement failed"),
         "unknown" => ("확인 필요", "unconfirmed"),
         "received" => ("받음", "received"),
+        // 개발 71 — 지갑 앱이 체인에서 결말을 확인한 뒤 적는 둘.
+        "reverted" => ("되돌려짐", "reverted"),
+        "expired" => ("만료(안 나감)", "expired (not paid)"),
         // 모르는 코드는 그대로 — 새 status 가 생겨도 원문이 보이는 편이 낫다(옛 status_ko 와 같다).
         other => return other,
     };

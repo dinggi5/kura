@@ -12,6 +12,8 @@ import {
   FileSignature,
   History,
   Loader2,
+  Clock,
+  Undo2,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChain } from "@/lib/chain";
@@ -103,6 +105,9 @@ const HISTORY_META: Record<string, { icon: React.ReactNode; ring: string; label:
   settle_failed: { icon: <AlertTriangle size={15} />, ring: "bg-red-500/10 text-red-600 dark:text-red-500", label: t("정산 실패", "Settlement failed"), labelColor: "text-red-500/80" },
   // 서명한 tx 를 냈는데 체인이 받았는지 모름(개발 66) — 나갔을 수 있다. 실패(빨강)가 아니라 확인이 필요한 상태.
   unknown: { icon: <AlertTriangle size={15} />, ring: "bg-amber-500/10 text-amber-600 dark:text-amber-500", label: t("확인 필요", "Unconfirmed"), labelColor: "text-amber-600 dark:text-amber-500" },
+  // 지갑이 체인에서 결말을 확인한 둘(개발 71) — 돈은 안 나갔다(되돌려짐은 가스만). 오늘 한도도 돌려받았다.
+  reverted: { icon: <Undo2 size={15} />, ring: "bg-[var(--color-ink-500)]/10 text-[var(--color-ink-500)] dark:text-[#B5AFA2]", label: t("되돌려짐", "Reverted"), labelColor: "text-[var(--color-ink-300)]" },
+  expired: { icon: <Clock size={15} />, ring: "bg-[var(--color-ink-500)]/10 text-[var(--color-ink-500)] dark:text-[#B5AFA2]", label: t("만료 · 안 나감", "Expired · not paid"), labelColor: "text-[var(--color-ink-300)]" },
 };
 
 /** 금액 — 보통은 USDC 2자리·ETH 5자리로 줄이되, 0 이 아닌 금액이 「0」으로 보이면 원래 값 그대로
@@ -121,7 +126,7 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
   // 받음("received")도 detail 이 tx 해시다 — 컨트랙트가 보낸 ETH 는 해시를 몰라 빈 값(링크 없음).
   const received = entry.status === "received";
   const linkTx =
-    entry.status === "sent" || entry.status === "unknown" || received
+    entry.status === "sent" || entry.status === "unknown" || entry.status === "reverted" || received
       ? entry.detail
       : entry.status === "settled"
         ? entry.settle_tx ?? ""

@@ -289,9 +289,13 @@ pub use crate::policy::HistoryEntry;
 ///
 /// `limit` = 돌려줄 줄 수. 보낸 기록은 본 파일(최신 200건) 다음에 **보관 파일**까지 읽는다(개발 70 — 예전엔
 /// 200건을 넘친 기록이 지워져서 여기서도 200건이 끝이었다). 보관 파일은 본 파일이 모자랄 때만 연다.
+///
+/// 주인이 다른 기록(지갑 파일을 지우고 다른 시드를 가져온 뒤 남은 옛 기록)은 뺀다(개발 71). 주소를 못 읽으면
+/// (옛 평문 지갑 등) 거르지 않는다 — 예전과 같다.
 pub fn read_history(limit: usize) -> Vec<HistoryEntry> {
+    let owner = active_account().map(|a| a.address).unwrap_or_default();
     let mut entries: Vec<HistoryEntry> = history_path()
-        .map(|p| crate::policy::read_sent_history(&p, limit))
+        .map(|p| crate::policy::read_sent_history(&p, limit, &owner))
         .unwrap_or_default();
     for e in &mut entries {
         e.detail = redact_urls(&e.detail);
@@ -409,6 +413,7 @@ mod tests {
             status: "failed".into(),
             detail: "RPC 연결 실패: https://base.alchemy.com/v2/LEAKEDKEY".into(),
             settle_tx: String::new(),
+            ..Default::default()
         };
         // read_history 가 적용하는 redact 를 같은 함수로 검증(파일 I/O 없이).
         let red = redact_urls(&e.detail);

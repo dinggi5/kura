@@ -52,6 +52,10 @@ pub(crate) struct X402Payment {
 /// 주어진 서명자로 EIP-3009 인가를 서명한다 (순수 암호 연산 — 잠금/한도 검사 없음, 테스트용).
 /// validAfter=0(즉시 유효), validBefore=now+valid_secs, nonce=랜덤 32바이트.
 /// 새 인가용 랜덤 nonce (재생 방지). 표준 경로는 이걸 쓴다 — 서버가 nonce 를 지정하지 않으므로.
+/// x402 서명 인가의 기본 유효 시간(초). 승인 경로는 값을 안 넘기므로 모든 「signed」 기록이 이 값이다 —
+/// 내역 확인(`confirm.rs`)이 「이 시간이 지났는데 안 쓰였으면 앞으로도 못 쓴다」를 판정할 때 같은 값을 본다.
+pub(crate) const DEFAULT_VALID_SECS: u64 = 600;
+
 fn random_nonce() -> B256 {
     let mut nonce_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut nonce_bytes);
@@ -220,7 +224,7 @@ async fn do_sign_x402_inner(
 
     // 서명만 하므로 RPC/가스 불필요. 서명자는 호출자가 넘긴다(비번 래퍼 또는 자율 세션 키).
     // 서명 실패 시 예약한 사용액을 환불한다(예약한 날에만).
-    let valid = valid_secs.unwrap_or(600); // 기본 10분 유효
+    let valid = valid_secs.unwrap_or(DEFAULT_VALID_SECS); // 기본 10분 유효
     let payment = match sign_authorization(signer, to_addr, value, valid, random_nonce()).await {
         Ok(p) => p,
         Err(e) => {

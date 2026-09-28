@@ -113,12 +113,18 @@ export function WalletScreen({
   const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE);
   const historyLimitRef = useRef(HISTORY_PAGE);
   // 요청마다 세대 번호 — 늦게 온 옛 응답(200줄)이 새 응답(400줄)을 덮어 「더 보기」가 사라지지 않게(코덱스 개발 70 2차).
+  // 「마지막으로 **반영한** 세대보다 새것」이면 받는다(개발 71, 코덱스 개발 70 3차) — 「가장 최근 요청의 응답만」이면
+  // 그 최근 요청이 실패할 때 앞선 정상 응답까지 버려졌다.
   const historySeq = useRef(0);
+  const historyShown = useRef(0);
   const loadHistory = useCallback(() => {
     const seq = ++historySeq.current;
     invoke<HistoryEntry[]>("get_history", { limit: historyLimitRef.current })
       .then((list) => {
-        if (seq === historySeq.current) setHistory(list);
+        if (seq > historyShown.current) {
+          historyShown.current = seq;
+          setHistory(list);
+        }
       })
       .catch(() => {});
   }, []);
@@ -283,6 +289,18 @@ export function WalletScreen({
       void off.then((f) => f());
     };
   }, [loadHistory, refreshBalancesSilent]);
+
+  // 내역 확인(개발 71): 러스트가 체인에서 결말을 확인해 기록을 고치면(불명 → 보냄·되돌려짐, 서명 → 정산됨·만료)
+  // 알려 온다. 되돌려짐·만료는 오늘 한도도 돌려받으므로 한도도 다시 읽는다.
+  useEffect(() => {
+    const off = listen<number>("history-changed", () => {
+      loadHistory();
+      loadLimits();
+    });
+    return () => {
+      void off.then((f) => f());
+    };
+  }, [loadHistory, loadLimits]);
 
   // 1초 폴링: ① AI 연결 상태 ② 세션 상태 ③ 결제 요청(=앱 생존 하트비트 갱신, 자율 승인 우선 시도).
   // 새 결제 요청 1건당 자율 승인을 먼저 시도 → 자율 불가면(NEEDS_PASSWORD·차단) 사람 승인 모달.

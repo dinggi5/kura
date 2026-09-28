@@ -77,7 +77,8 @@ fn with_entry(
 /// 덧붙인 뒤 본 파일을 쓰기 전에 죽으면 그 기록들이 본 파일에도 남아, 다음 번에 또 밀려나며 두 번 적힌다.
 /// 🔴 한때 마지막 한 줄만 비교했다(코덱스 개발 70 2차 P1) — 보관에 실패해 본 파일이 cap 을 넘긴 뒤 여러 건을 한꺼번에
 /// 옮기다 죽으면, 첫 기록이 마지막 줄과 달라 겹친 구간 전체가 다시 적혔다.
-/// (똑같은 기록 — 같은 초·같은 금액·같은 사유 — 이 연달아 있으면 하나로 볼 수 있다. 그 값으로 중복을 막는다.)
+/// 개발 71 부터 기록마다 고유 `id` 가 있어 「모든 필드가 같은 두 기록」이 없다 — 같은 초·같은 금액·같은 사유가 연달아도
+/// 서로 다른 기록으로 본다(코덱스 개발 70 3차 P2). id 가 없는 옛 기록끼리는 여전히 하나로 볼 수 있다.
 fn archive_lines(evicted: &[HistoryEntry], tail: &[HistoryEntry]) -> String {
     let oldest_first: Vec<&HistoryEntry> = evicted.iter().rev().collect();
     let overlap = (1..=oldest_first.len().min(tail.len()))
@@ -159,6 +160,8 @@ fn append_archive(path: &std::path::Path, evicted: &[HistoryEntry]) -> Result<()
 /// - **깨진 본 파일** — 예전엔 빈 목록으로 읽고 새 한 건으로 덮어써 옛 기록을 통째로 지웠다(개발 69 입금 기록과 같은
 ///   병). 이제 깨진 파일은 `….broken.<초>.json` 으로 옆에 치우고 새로 시작한다 — 기록은 멈추지 않고 옛 파일은 남는다.
 ///   치우지도 못하면(권한 등) 이번 기록을 포기한다 — 덮어쓰는 것보다 낫다.
+///
+/// 기록마다 고유 번호(`id`)와 주인 주소(`from` — 작업이 고정한 계정)를 싣는다(개발 71).
 pub(crate) fn log_attempt(token: &str, to: &str, amount: &str, status: &str, detail: &str) {
     let entry = HistoryEntry {
         ts: now_secs(),
@@ -167,13 +170,28 @@ pub(crate) fn log_attempt(token: &str, to: &str, amount: &str, status: &str, det
         amount: amount.into(),
         status: status.into(),
         detail: detail.into(),
-        settle_tx: String::new(),
+        id: new_record_id(),
+        from: crate::wallet::active_account()
+            .map(|a| a.address)
+            .unwrap_or_default(),
+        ..Default::default()
     };
     let _g = history_guard();
     let Ok(path) = history_path() else {
         return;
     };
     let _ = record_at(&path, entry, HISTORY_CAP);
+}
+
+/// 기록 고유 번호 — 나노초 시각 + 프로세스 + 프로세스 안 순번(같은 나노초·재시작에도 겹치지 않게).
+fn new_record_id() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}-{:x}-{n:x}", std::process::id())
 }
 
 /// `log_attempt` 의 본체 — 경로를 받는다(테스트가 실지갑을 안 건드리게).
@@ -207,13 +225,114 @@ fn redact_details(mut list: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
 #[tauri::command]
 pub(crate) fn get_history(limit: Option<usize>) -> Vec<HistoryEntry> {
     let limit = limit.unwrap_or(HISTORY_CAP);
+    // 주인이 다른 기록은 뺀다(개발 71) — 지갑을 지우고 다른 시드를 가져오면 같은 파일 이름에 옛 기록이 남는다.
+    let owner = crate::wallet::active_account()
+        .map(|a| a.address)
+        .unwrap_or_default();
     let sent = history_path()
-        .map(|p| crate::policy::read_sent_history(&p, limit))
+        .map(|p| crate::policy::read_sent_history(&p, limit, &owner))
         .unwrap_or_default();
     let mut list =
         crate::policy::merge_received(redact_details(sent), &crate::deposits::read_deposits());
     list.truncate(limit);
     list
+}
+
+// ── 같은 결제를 짧은 시간에 두 번 (개발 71) ────────────────────────────────────────────────────
+
+/// 자율 결제를 사람 앞으로 돌리는 창 — 같은 받는 곳·같은 금액이 이 안에 이미 나갔으면(사장 결정 09-28: 10분).
+pub(crate) const REPEAT_WINDOW_SECS: u64 = 600;
+
+/// 「돈이 나갔거나 나갔을 수 있는」 기록인가 — 차단·실패·되돌려짐·만료는 아니다.
+fn counts_as_paid(status: &str) -> bool {
+    matches!(status, "sent" | "signed" | "settled" | "unknown")
+}
+
+/// 같은 토큰·받는 곳·금액의 결제가 `window` 안에 있었으면 몇 초 전인지 (순수 함수 — 테스트용).
+/// 금액은 숫자로 비교한다("0.01" 과 "0.010" 은 같다). `parse` 가 못 읽는 금액은 같지 않은 것으로 본다.
+fn last_same_payment(
+    list: &[HistoryEntry],
+    token: &str,
+    to: &str,
+    amount: &str,
+    now: u64,
+    window: u64,
+    parse: impl Fn(&str) -> Option<alloy::primitives::U256>,
+) -> Option<u64> {
+    let want = parse(amount)?;
+    list.iter()
+        .filter(|e| counts_as_paid(&e.status))
+        .filter(|e| e.token == token && e.to.trim().eq_ignore_ascii_case(to.trim()))
+        .filter(|e| e.ts <= now && now - e.ts <= window)
+        .filter(|e| parse(&e.amount) == Some(want))
+        .map(|e| now - e.ts)
+        .min()
+}
+
+/// 지금 계정(작업이 고정했으면 그 계정)의 본 파일에서 `last_same_payment` — 10분 창이라 본 파일(최신 200건)이면 된다.
+pub(crate) fn recent_same_payment(token: &str, to: &str, amount: &str) -> Option<u64> {
+    let owner = crate::wallet::active_account()
+        .map(|a| a.address)
+        .unwrap_or_default();
+    let mut list = read_history_at(&history_path().ok()?);
+    list.retain(|e| crate::policy::history_owned_by(e, &owner));
+    let dec = crate::chain::active_chain().usdc_decimals;
+    last_same_payment(
+        &list,
+        token,
+        to,
+        amount,
+        now_secs(),
+        REPEAT_WINDOW_SECS,
+        |a| {
+            if token == "ETH" {
+                crate::limits::parse_eth_nonneg(a).ok()
+            } else {
+                crate::limits::parse_usdc_nonneg(a, dec).ok()
+            }
+        },
+    )
+}
+
+/// 승인 창이 묻는다 — 「방금 같은 결제가 나갔나」(몇 초 전). 사람이 중복 결제를 알아보게 한 줄을 띄운다.
+#[tauri::command]
+pub(crate) fn recent_same_payment_secs(token: String, to: String, amount: String) -> Option<u64> {
+    recent_same_payment(&token, &to, &amount)
+}
+
+// ── 체인 확인 결과 반영 (개발 71, confirm.rs) ────────────────────────────────────────────────────
+
+/// 계정 하나의 본 파일 기록(최신순) — 확인할 후보를 고를 때. 못 읽으면 빈 목록.
+pub(crate) fn read_account_history(index: u32) -> Vec<HistoryEntry> {
+    history_path_for(index)
+        .map(|p| read_history_at(&p))
+        .unwrap_or_default()
+}
+
+/// 확인 결과를 그 기록에 적는다 — 잠금 안에서 파일을 **다시 읽어** 같은 기록을 찾는다(그새 정산·새 기록이 들어왔을 수
+/// 있다). 찾는 기준은 고유 id, 없으면(옛 기록) 모든 필드. 적었으면 Ok(true). 파일을 못 쓰면 Err — 환불하면 안 된다.
+pub(crate) fn apply_confirmation(
+    index: u32,
+    original: &HistoryEntry,
+    verdict: crate::confirm::Verdict,
+) -> Result<bool, String> {
+    let _g = history_guard();
+    let path = history_path_for(index)?;
+    let mut list = read_history_at(&path);
+    let Some(e) = list.iter_mut().find(|e| {
+        if original.id.is_empty() {
+            *e == original
+        } else {
+            e.id == original.id
+        }
+    }) else {
+        return Ok(false);
+    };
+    if !crate::confirm::apply_verdict(e, verdict).0 {
+        return Ok(false);
+    }
+    write_json(path, &list)?;
+    Ok(true)
 }
 
 /// MCP가 기록한 정산 결과 1건. nonce 로 "signed" 내역과 매칭한다.
@@ -234,8 +353,14 @@ fn settlements_path() -> Result<PathBuf, String> {
 /// 정산 1건을 내역 목록에 적용한다 (순수 함수 — 테스트용).
 /// nonce 가 일치하고 아직 "signed" 인 첫 항목을 status="settled"/"settle_failed" + settle_tx 로 갱신.
 /// 적용됐으면 true.
+///
+/// 체인 확인(`confirm.rs`, 개발 71)이 먼저 「settled」 로 바꿔 둔 기록(정산 tx 모름)에도 늦게 온 성공 정산의 tx 를 채운다.
 fn apply_settlement(list: &mut [HistoryEntry], s: &Settlement) -> bool {
     for e in list.iter_mut() {
+        if s.success && e.status == "settled" && e.settle_tx.is_empty() && e.detail == s.nonce {
+            e.settle_tx = s.tx.clone();
+            return true;
+        }
         if e.status == "signed" && e.detail == s.nonce {
             e.status = if s.success {
                 "settled"
@@ -473,6 +598,7 @@ mod tests {
             status: "sent".into(),
             detail: tag.into(),
             settle_tx: String::new(),
+            ..Default::default()
         }
     }
 
@@ -499,13 +625,16 @@ mod tests {
         let raw = fs::read_to_string(crate::policy::history_archive_path(&hot)).unwrap();
         assert_eq!(raw.lines().count(), 4, "{raw}");
         assert_eq!(
-            tags(&crate::policy::read_sent_history(&hot, 100)),
+            tags(&crate::policy::read_sent_history(&hot, 100, "")),
             ["6", "5", "4", "3", "2", "1", "0"]
         );
         // 본 파일로 충분하면 딱 그만큼, 모자라면 보관 파일에서 이어서.
-        assert_eq!(tags(&crate::policy::read_sent_history(&hot, 2)), ["6", "5"]);
         assert_eq!(
-            tags(&crate::policy::read_sent_history(&hot, 5)),
+            tags(&crate::policy::read_sent_history(&hot, 2, "")),
+            ["6", "5"]
+        );
+        assert_eq!(
+            tags(&crate::policy::read_sent_history(&hot, 5, "")),
             ["6", "5", "4", "3", "2"]
         );
         let _ = fs::remove_dir_all(hot.parent().unwrap());
@@ -527,7 +656,7 @@ mod tests {
         fs::write(&archive, &raw).unwrap();
         record_at(&hot, entry("4"), 3).unwrap();
         assert_eq!(
-            tags(&crate::policy::read_sent_history(&hot, 100)),
+            tags(&crate::policy::read_sent_history(&hot, 100, "")),
             ["4", "3", "2", "1", "0"]
         );
         // 반쪽 줄(개행 없이 끝남) 뒤에 덧붙여도 새 줄은 멀쩡하다.
@@ -536,7 +665,7 @@ mod tests {
         fs::write(&archive, &raw).unwrap();
         record_at(&hot, entry("5"), 3).unwrap();
         assert_eq!(
-            tags(&crate::policy::read_sent_history(&hot, 100)),
+            tags(&crate::policy::read_sent_history(&hot, 100, "")),
             ["5", "4", "3", "2", "1", "0"]
         );
         let _ = fs::remove_dir_all(hot.parent().unwrap());
@@ -566,13 +695,128 @@ mod tests {
             }
             fs::write(&archive, raw).unwrap();
             record_at(&hot, e("5"), 2).unwrap();
-            let got: Vec<String> = crate::policy::read_sent_history(&hot, 100)
+            let got: Vec<String> = crate::policy::read_sent_history(&hot, 100, "")
                 .iter()
                 .map(|x| x.detail.split(' ').next().unwrap().to_string())
                 .collect();
             assert_eq!(got, ["5", "4", "3", "2", "1", "0"], "pad {pad}");
             let _ = fs::remove_dir_all(hot.parent().unwrap());
         }
+    }
+
+    /// 🔴 개발 71: 같은 결제를 10분 안에 두 번 — 나간(또는 나갔을 수 있는) 기록만, 같은 토큰·받는 곳(대소문자 무시)·금액(숫자로)만.
+    #[test]
+    fn same_payment_within_window() {
+        let parse = |a: &str| crate::limits::parse_usdc_nonneg(a, 6).ok();
+        let rec = |ts: u64, status: &str, to: &str, amount: &str| HistoryEntry {
+            ts,
+            token: "USDC".into(),
+            to: to.into(),
+            amount: amount.into(),
+            status: status.into(),
+            ..Default::default()
+        };
+        let now = 10_000;
+        let hit = |list: &[HistoryEntry], amount: &str| {
+            last_same_payment(list, "USDC", "0xAbC", amount, now, 600, parse)
+        };
+        assert_eq!(
+            hit(&[rec(now - 30, "sent", "0xabc", "0.01")], "0.010"),
+            Some(30)
+        );
+        for s in ["signed", "settled", "unknown"] {
+            assert_eq!(
+                hit(&[rec(now - 5, s, "0xabc", "0.01")], "0.01"),
+                Some(5),
+                "{s}"
+            );
+        }
+        // 안 나간 것·창 밖·다른 금액·다른 곳·다른 토큰은 아니다.
+        for s in [
+            "blocked",
+            "failed",
+            "reverted",
+            "expired",
+            "settle_failed",
+            "received",
+        ] {
+            assert_eq!(
+                hit(&[rec(now - 5, s, "0xabc", "0.01")], "0.01"),
+                None,
+                "{s}"
+            );
+        }
+        assert_eq!(
+            hit(&[rec(now - 601, "sent", "0xabc", "0.01")], "0.01"),
+            None
+        );
+        assert_eq!(
+            hit(&[rec(now - 600, "sent", "0xabc", "0.01")], "0.01"),
+            Some(600)
+        );
+        assert_eq!(hit(&[rec(now - 5, "sent", "0xabc", "0.02")], "0.01"), None);
+        assert_eq!(hit(&[rec(now - 5, "sent", "0xabd", "0.01")], "0.01"), None);
+        let mut eth = rec(now - 5, "sent", "0xabc", "0.01");
+        eth.token = "ETH".into();
+        assert_eq!(hit(&[eth], "0.01"), None);
+        // 여러 건이면 가장 최근.
+        assert_eq!(
+            hit(
+                &[
+                    rec(now - 400, "sent", "0xabc", "0.01"),
+                    rec(now - 90, "unknown", "0xABC", "0.01")
+                ],
+                "0.01"
+            ),
+            Some(90)
+        );
+    }
+
+    /// 🔴 개발 71(코덱스 개발 70 3차 P2): 모든 필드가 같은 기록(같은 초·금액·사유)이 연달아 밀려나도, 고유 id 가
+    /// 달라 보관 파일의 끝과 「겹쳤다」고 보지 않는다 — 진짜 기록을 건너뛰지 않는다.
+    #[test]
+    fn identical_records_with_ids_are_not_skipped() {
+        let hot = temp_hot("same");
+        let same = || {
+            let mut e = entry("같은 사유");
+            e.id = new_record_id();
+            e
+        };
+        for _ in 0..6 {
+            record_at(&hot, same(), 2).unwrap();
+        }
+        assert_eq!(crate::policy::read_sent_history(&hot, 100, "").len(), 6);
+        // 대조군: id 가 없는 옛 기록끼리는 여전히 하나로 보인다(그래서 id 가 필요했다).
+        let old = temp_hot("same-old");
+        for _ in 0..6 {
+            record_at(&old, entry("같은 사유"), 2).unwrap();
+        }
+        assert!(crate::policy::read_sent_history(&old, 100, "").len() < 6);
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
+        let _ = fs::remove_dir_all(old.parent().unwrap());
+    }
+
+    /// 🔴 개발 71(코덱스 개발 70 1차 P1): 주인이 다른 기록은 안 보인다(본 파일·보관 파일 둘 다). 주인이 비어 있는
+    /// 옛 기록은 보인다(누구 것인지 모른다 — 예전과 같다). 대소문자는 가리지 않는다.
+    #[test]
+    fn other_owners_records_are_hidden() {
+        let hot = temp_hot("owner");
+        let by = |tag: &str, from: &str| {
+            let mut e = entry(tag);
+            e.from = from.into();
+            e.id = new_record_id();
+            e
+        };
+        record_at(&hot, by("old-seed", "0xAAAA"), 2).unwrap();
+        record_at(&hot, by("legacy", ""), 2).unwrap();
+        record_at(&hot, by("mine-1", "0xbbbb"), 2).unwrap();
+        record_at(&hot, by("mine-2", "0xBBBB"), 2).unwrap();
+        assert_eq!(
+            tags(&crate::policy::read_sent_history(&hot, 100, "0xBbBb")),
+            ["mine-2", "mine-1", "legacy"]
+        );
+        assert_eq!(crate::policy::read_sent_history(&hot, 100, "").len(), 4);
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
     }
 
     /// 🔴 개발 70: 깨진 본 파일을 빈 목록으로 읽고 덮어쓰지 않는다 — 옆으로 치우고 새로 시작.
@@ -611,7 +855,7 @@ mod tests {
         let mut pending = vec![&s];
         assert_eq!(settle_in_archive(&archive, &mut pending).unwrap(), 1);
         assert!(pending.is_empty());
-        let all = crate::policy::read_sent_history(&hot, 100);
+        let all = crate::policy::read_sent_history(&hot, 100, "");
         let got = all.iter().find(|e| e.detail == "0xnonce").unwrap();
         assert_eq!(
             (got.status.as_str(), got.settle_tx.as_str()),
@@ -648,6 +892,7 @@ mod tests {
             status: "blocked".into(),
             detail: "긴급 잠금".into(),
             settle_tx: String::new(),
+            ..Default::default()
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: HistoryEntry = serde_json::from_str(&json).unwrap();
@@ -677,6 +922,7 @@ mod tests {
                 status: "signed".into(),
                 detail: "0xNONCE".into(),
                 settle_tx: String::new(),
+                ..Default::default()
             },
             HistoryEntry {
                 ts: 2,
@@ -686,6 +932,7 @@ mod tests {
                 status: "sent".into(),
                 detail: "0xtxhash".into(),
                 settle_tx: String::new(),
+                ..Default::default()
             },
         ];
         // 매칭 성공 → settled
@@ -719,6 +966,7 @@ mod tests {
             status: "signed".into(),
             detail: "0xN2".into(),
             settle_tx: String::new(),
+            ..Default::default()
         }];
         let fail = Settlement {
             nonce: "0xN2".into(),
@@ -755,6 +1003,7 @@ mod tests {
             status: "failed".into(),
             detail: "RPC 연결 실패: https://base.alchemy.com/v2/LEAKEDKEY".into(),
             settle_tx: String::new(),
+            ..Default::default()
         }];
         let out = redact_details(list);
         assert!(

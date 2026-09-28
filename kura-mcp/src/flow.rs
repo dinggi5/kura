@@ -609,7 +609,7 @@ pub async fn run_x402(
     // 🔴 **옛 앱에는 새 방식을 보내지 않는다** (개발 64). 옛 앱은 모르는 kind 를 평범한 송금으로
     // 처리했다 — 돈은 나가고 서버는 그 전송을 결제로 알아보지 못한다. 앱이 하트비트에 적어 둔
     // 「내가 아는 방식」에 없으면 여기서 멈춘다(요청 파일을 쓰기 전).
-    if direct && !payment::app_supports("x402-direct") {
+    if direct && !payment::app_supports(crate::policy::KIND_X402_DIRECT) {
         return Err(ts!(
             "이 결제는 지갑이 직접 체인에 올려야 하는데, 켜져 있는 지갑 앱이 그 방식을 아직 몰라요. 앱을 업데이트한 뒤 다시 시도하세요.",
             "This payment has to be broadcast by the wallet itself, and the running wallet app doesn't know that method yet. Update the app and try again."
@@ -810,11 +810,152 @@ pub async fn run_x402(
         signed = Some(payment);
         sub
     };
+    let outcome = deliver(Delivery {
+        sub,
+        url: final_url.as_str(),
+        signed,
+        direct_tx,
+        direct_explorer,
+        amount: amount_usdc,
+        pay_to: req.pay_to,
+        resource,
+    })
+    .await?;
+    Ok(X402Result {
+        outcome,
+        agent,
+        agent_note,
+    })
+}
+
+/// 🔴 **증거 재제출** (개발 71 — 개발 64 「다음」 2번, 가장 값진 이월).
+///
+/// 직접 제출(x402-direct)은 돈이 체인에서 나간 **뒤** 서버에 tx 를 증거로 낸다. 영수증이 늦거나(pending) 이 프로세스가
+/// 죽거나 서버가 응답을 못 하면(undelivered) 돈은 나갔는데 콘텐츠는 없다. 증거 재료(챌린지 원문·clientNonce·seed)는
+/// 개발 66 부터 `<id>.proof.json` 에 남는다 — 여기서 그걸 다시 읽어 **같은 증거**를 다시 낸다. 새 돈은 안 나간다.
+///
+/// 순서: ① 기록이 그 tx 를 가리키는 증거를 찾는다 ② 같은 체인인지 ③ 영수증 — 채굴 성공일 때만 낸다(아직이면
+/// pending, 되돌려졌으면 reverted 로 돌려준다) ④ 챌린지를 다시 풀어 **남긴 nonce 가 재료와 맞는지** 확인 ⑤ 낸다.
+/// 서버가 거절하면(영수증 유효 시간이 지남·이미 소비함) `settlement_failed` + 「다시 결제하지 말라」 안내 — `deliver` 가 한다.
+pub async fn resubmit_x402(tx: &str) -> Result<X402Outcome, String> {
+    let tx = tx.trim().to_string();
+    let proof = payment::find_proof_by_tx(&tx).ok_or(ts!(
+        "그 tx 로 남아 있는 결제 증거가 없어요(이 지갑이 직접 올린 x402 결제만 다시 낼 수 있고, 증거는 7일 뒤 지워집니다).",
+        "No saved payment proof for that tx (only x402 payments this wallet broadcast itself can be resubmitted, and proofs are removed after 7 days)."
+    ))?;
+    if proof.chain_id != active_chain().chain_id {
+        return Err(tf!(
+            "이 결제는 다른 네트워크(체인 {})에서 나갔어요. 지갑 앱에서 그 네트워크로 바꾼 뒤 다시 시도하세요.",
+            "That payment went out on a different network (chain {}). Switch the wallet app to it and try again.",
+            proof.chain_id
+        ));
+    }
+    let explorer = format!("{}{tx}", active_chain().explorer_tx_prefix);
+    match arc_direct::wait_for_receipt(&tx, RECEIPT_WAIT)
+        .await
+        .unwrap_or(ReceiptOutcome::Pending)
+    {
+        ReceiptOutcome::Mined => {}
+        ReceiptOutcome::Reverted => {
+            return Ok(X402Outcome::PaidNoContent {
+                notice: arc_direct::reverted_notice(&tx),
+                tx,
+                explorer,
+                reason: "reverted".into(),
+            })
+        }
+        ReceiptOutcome::Pending => {
+            return Ok(X402Outcome::PaidNoContent {
+                notice: arc_direct::pending_notice(&tx, &explorer),
+                tx,
+                explorer,
+                reason: "pending".into(),
+            })
+        }
+    }
+    if proof.challenge_header.is_none() && proof.body_dropped {
+        return Err(ts!(
+            "402 원문이 너무 커서 남기지 못해 증거를 다시 만들 수 없어요. 결제는 체인에서 확인됩니다 — 판매자에게 tx 를 보여 주세요.",
+            "The 402 challenge was too large to keep, so the proof can't be rebuilt. The payment is on-chain — show the seller the tx."
+        )
+        .into());
+    }
+    let required = x402::parse_required(proof.challenge_header.as_deref(), &proof.challenge_body)?;
+    let req = x402::pick_requirement(&required)?;
+    if req.method != TransferMethod::ClientBroadcast {
+        return Err(ts!(
+            "남은 증거가 직접 제출 결제의 것이 아니에요.",
+            "The saved proof isn't for a wallet-broadcast payment."
+        )
+        .into());
+    }
+    // 남긴 nonce 가 남긴 재료로 다시 만들어지는가 — 아니면 파일이 섞였거나 상했다. 서버도 같은 계산으로 대조한다.
+    let derived = match (&proof.client_nonce, &proof.seed) {
+        (Some(cn), _) => arc_direct::client_nonce_digest(cn, &req.binding()),
+        (None, Some(seed)) => arc_direct::seed_nonce_digest(seed, &req.binding()),
+        (None, None) => String::new(),
+    };
+    if !derived.eq_ignore_ascii_case(proof.nonce.trim()) {
+        return Err(ts!(
+            "남은 증거 재료가 결제 요구와 맞지 않아 다시 낼 수 없어요.",
+            "The saved proof doesn't match the payment challenge, so it can't be resubmitted."
+        )
+        .into());
+    }
+    let sub = required.build_direct_submission(
+        &req,
+        &DirectProof {
+            transaction: tx.clone(),
+            client_nonce: proof.client_nonce.clone(),
+            seed: proof.seed.clone(),
+            nonce: proof.nonce.clone(),
+        },
+    )?;
+    let amount = x402::base_units_to_usdc(&req.amount)?;
+    deliver(Delivery {
+        sub,
+        url: &proof.url,
+        signed: None,
+        direct_tx: tx,
+        direct_explorer: explorer,
+        amount,
+        pay_to: req.pay_to,
+        resource: proof.url.clone(),
+    })
+    .await
+}
+
+/// 결제 제출물 하나를 보낼 때 필요한 것 — `deliver` 의 인자.
+struct Delivery<'a> {
+    sub: x402::Submission,
+    /// 402 를 실제로 낸 최종 URL — 결제 헤더는 여기에만, 리다이렉트를 따라가지 않고 보낸다.
+    url: &'a str,
+    /// 서명 갈래의 인가(정산 기록을 nonce 로 잇는다). 직접 제출이면 None.
+    signed: Option<x402::X402Payment>,
+    /// 직접 제출이면 우리가 올린 tx 와 익스플로러 링크. 서명 갈래면 빈 값.
+    direct_tx: String,
+    direct_explorer: String,
+    amount: String,
+    pay_to: String,
+    resource: String,
+}
+
+/// 결제 제출물을 보내고 응답을 결과로 만든다 — `run_x402` 와 증거 재제출(`resubmit_x402`, 개발 71)이 **같은 함수**를
+/// 쓴다. 「돈이 나간 뒤 서버가 거절·무응답」을 가르는 판정이 여기 다 있다 — 두 벌로 두면 한쪽이 뒤처진다(개발 65 교훈).
+async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
+    let Delivery {
+        sub,
+        url,
+        signed,
+        direct_tx,
+        direct_explorer,
+        amount,
+        pay_to,
+        resource,
+    } = d;
     // 결제 헤더(서명된 인가)는 리다이렉트를 따라가지 않는 클라이언트로 최종 URL 에만 보낸다.
     let pay_client = http_client_no_redirect()?;
-    let mut builder = pay_client
-        .get(final_url)
-        .header(sub.header_name, &sub.value);
+    let mut builder = pay_client.get(url).header(sub.header_name, &sub.value);
     if let Some(alt) = sub.alt_header {
         builder = builder.header(alt, &sub.value); // 같은 값 — 헤더 이름만 다르게 읽는 서버 대비
     }
@@ -827,15 +968,11 @@ pub async fn run_x402(
             // 정산할 수 있다. 여기서 평범한 `Err` 를 돌리면 AI 는 다시 부르고 **새 nonce 로 두 번째 인가**를
             // 받는다 — 둘 다 정산될 수 있다. 연결 자체가 안 됐을 때(`is_connect`)만 확실히 아무것도 안 갔다.
             if signed.is_some() && !e.is_connect() {
-                return Ok(X402Result {
-                    outcome: X402Outcome::PaidNoContent {
-                        notice: x402::signed_unknown_notice(&msg),
-                        tx: String::new(),
-                        explorer: String::new(),
-                        reason: "unknown".into(),
-                    },
-                    agent,
-                    agent_note,
+                return Ok(X402Outcome::PaidNoContent {
+                    notice: x402::signed_unknown_notice(&msg),
+                    tx: String::new(),
+                    explorer: String::new(),
+                    reason: "unknown".into(),
                 });
             }
             // 🔴 **직접 제출이면 이 오류는 «결제 실패»가 아니다** (개발 64 코덱스 P1). 돈은 이미
@@ -843,15 +980,11 @@ pub async fn run_x402(
             // AI 는 「HTTP 가 실패했구나」로 읽어 같은 URL 을 다시 부른다 = **두 번째 결제**.
             // 앞서 고친 `settlement_failed` 는 **응답을 받은** 경우만 덮었다 — 여기가 나머지 반쪽이다.
             if !direct_tx.is_empty() {
-                return Ok(X402Result {
-                    outcome: X402Outcome::PaidNoContent {
-                        notice: arc_direct::undelivered_notice(&direct_tx, &direct_explorer, &msg),
-                        tx: direct_tx,
-                        explorer: direct_explorer,
-                        reason: "undelivered".into(),
-                    },
-                    agent,
-                    agent_note,
+                return Ok(X402Outcome::PaidNoContent {
+                    notice: arc_direct::undelivered_notice(&direct_tx, &direct_explorer, &msg),
+                    tx: direct_tx,
+                    explorer: direct_explorer,
+                    reason: "undelivered".into(),
                 });
             }
             return Err(msg);
@@ -902,21 +1035,17 @@ pub async fn run_x402(
         String::new()
     };
 
-    Ok(X402Result {
-        outcome: X402Outcome::Paid {
-            notice,
-            tx: direct_tx,
-            explorer: direct_explorer,
-            http_status: paid_status,
-            ok,
-            amount: amount_usdc,
-            pay_to: req.pay_to,
-            resource,
-            settlement,
-            body,
-        },
-        agent,
-        agent_note,
+    Ok(X402Outcome::Paid {
+        notice,
+        tx: direct_tx,
+        explorer: direct_explorer,
+        http_status: paid_status,
+        ok,
+        amount,
+        pay_to,
+        resource,
+        settlement,
+        body,
     })
 }
 

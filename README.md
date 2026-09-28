@@ -167,7 +167,7 @@ claude mcp add --scope user kura -- /Applications/Kura.app/Contents/MacOS/kura-m
 { "mcpServers": { "kura": { "command": "cargo", "args": ["run", "--quiet", "--manifest-path", "./kura-mcp/Cargo.toml"] } } }
 ```
 
-AI가 쓸 수 있는 도구: `get_wallet_status` · `get_balances` · `get_history`(읽기 전용) · `request_payment`(결제 요청 → 앱 승인 팝업) · `x402_fetch`(402 결제가 걸린 URL 호출) · `lookup_agent`(ERC-8004 에이전트 신원 조회 — 온체인 읽기 전용).
+AI가 쓸 수 있는 도구: `get_wallet_status` · `get_balances` · `get_history`(읽기 전용) · `request_payment`(결제 요청 → 앱 승인 팝업) · `x402_fetch`(402 결제가 걸린 URL 호출) · `x402_resubmit`(지갑이 직접 올린 결제의 증거를 다시 내기 — 새 결제 없음) · `lookup_agent`(ERC-8004 에이전트 신원 조회 — 온체인 읽기 전용).
 
 > MCP 도구를 바꾸면 **AI 앱을 재시작**해야 반영돼요(서버가 세션 시작 때 1회 로드).
 

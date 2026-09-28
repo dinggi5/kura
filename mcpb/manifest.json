@@ -48,6 +48,10 @@
       "description": "Fetch an x402 paid resource — if payment is required, the same approval rules apply"
     },
     {
+      "name": "x402_resubmit",
+      "description": "Re-send the proof of an x402 payment the wallet already broadcast, to get the content — no new payment"
+    },
+    {
       "name": "lookup_agent",
       "description": "Read an agent's ERC-8004 record on-chain (read only) — registration is permissionless, so it is a claim, not proof of safety"
     }

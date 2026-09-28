@@ -210,6 +210,8 @@ sol! {
             uint256 validAfter, uint256 validBefore, bytes32 nonce,
             uint8 v, bytes32 r, bytes32 s
         ) external;
+        // 인가 nonce 가 쓰였는가 (개발 71) — x402 서명의 결말을 페이실리테이터 응답 없이 체인에서 확인한다.
+        function authorizationState(address authorizer, bytes32 nonce) external view returns (bool);
     }
 
     // EIP-3009 결제 인가 — x402 "exact" 스킴이 오프체인으로 서명하는 구조체.

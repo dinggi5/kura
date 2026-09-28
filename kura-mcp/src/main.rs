@@ -8,6 +8,7 @@
 // 결제 도구 2개 — 사람 승인 필요:
 //   - request_payment   : 송금을 "요청" (개발 9, Session 10). GUI 팝업 → 비번 승인 → 온체인 전송.
 //   - x402_fetch        : x402 유료 리소스를 가져온다 (개발 11, Session 12). 402 → 서명 승인 → 재요청.
+//   - x402_resubmit     : 지갑이 직접 올린 x402 결제의 증거를 다시 낸다 (개발 71). 새 돈은 안 나간다.
 // 신원 조회 1개 — 읽기 전용, 온체인만 (개발 47):
 //   - lookup_agent      : ERC-8004 레지스트리에서 에이전트 번호의 등록 지갑·기재 도메인을 읽는다.
 //
@@ -141,6 +142,13 @@ struct X402Args {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ResubmitArgs {
+    /// The `tx` that x402_fetch returned for a payment the wallet broadcast itself (status pending, unknown
+    /// or undelivered, or settlement_failed with a tx).
+    tx: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct AgentArgs {
     /// The agent's ERC-8004 number (agentId — the Identity Registry NFT token id).
     agent_id: u64,
@@ -200,7 +208,9 @@ impl WalletServer {
         signed (x402 signed, awaiting settlement), settled (x402 settled, settle_tx is the settlement tx), \
         settle_failed, unknown (a signed transaction was submitted but the wallet couldn't confirm the \
         chain received it — detail is its tx hash; it may have gone through, so never resend on the strength \
-        of this entry alone), or received (money that came in — to is the sender, detail the tx hash; both are \
+        of this entry alone; the wallet app later rechecks it on-chain and turns it into sent or reverted), \
+        reverted (mined but reverted on-chain — no money moved, only gas), expired (an x402 signature that was \
+        never used before it expired — no money moved), or received (money that came in — to is the sender, detail the tx hash; both are \
         empty for ETH a contract sent; found on-chain by the wallet app while it runs, back to 90 days). \
         Use limit to cap how many come back (default 20)."
     )]
@@ -279,7 +289,8 @@ impl WalletServer {
         \"confirmed\" = the money left the wallet; \"unknown\" = it MAY have left (status pending/unknown, or \
         settlement_failed on the facilitator path, where the server's refusal doesn't prove the facilitator \
         didn't settle). For confirmed and unknown without content, asking again can pay a second time — stop \
-        and tell the user, showing the tx. `paid` is kept for older callers and is simply payment != \"none\". \
+        and tell the user, showing the tx (when a `tx` came back without content, x402_resubmit re-sends its proof \
+        without paying again). `paid` is kept for older callers and is simply payment != \"none\". \
         Read `notice` when present, and never retry on an HTTP status alone: after the money moved the server \
         may answer with a fresh 402 challenge that reads as if the payment never happened."
     )]
@@ -306,6 +317,27 @@ impl WalletServer {
             body["agent_lookup_note"] = serde_json::json!(agent_note);
         }
         json_result(&body)
+    }
+
+    #[tool(
+        description = "Resubmits the on-chain proof of an x402 payment this wallet already broadcast itself, to \
+        get the content it paid for. Use it when x402_fetch returned a `tx` without content (status pending, \
+        unknown or undelivered, or settlement_failed with a tx). No new money moves and no approval is asked: \
+        the wallet re-sends the same proof (the tx plus the saved challenge values) to the same URL. It first \
+        checks the tx on-chain — if it isn't mined yet you get status pending (wait and call again), if it \
+        reverted you get reverted (payment none: nothing was paid, so paying again is a new decision). Sellers \
+        keep proofs acceptable only for a while (the reference server: 10 minutes), so a late resubmit can be \
+        refused — that is settlement_failed with a notice; do not pay again then, tell the user and show the tx. \
+        Proofs are kept for 7 days. Returns the same shape as x402_fetch."
+    )]
+    async fn x402_resubmit(
+        &self,
+        Parameters(args): Parameters<ResubmitArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let outcome = flow::resubmit_x402(&args.tx)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        json_result(&outcome.to_json())
     }
 
     #[tool(
@@ -407,7 +439,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentArgs, HistoryArgs, PayArgs, X402Args};
+    use super::{AgentArgs, HistoryArgs, PayArgs, ResubmitArgs, X402Args};
     use rmcp::handler::server::common::schema_for_type;
 
     /// 선택 인자가 「스스로 모순된 스키마」로 나가지 않는지 — 개발 61 의 회귀 검사.
@@ -515,6 +547,11 @@ mod tests {
                 vec!["to", "amount"],
             ),
             ("x402_fetch", schema_for_type::<X402Args>(), vec!["url"]),
+            (
+                "x402_resubmit",
+                schema_for_type::<ResubmitArgs>(),
+                vec!["tx"],
+            ),
             (
                 "lookup_agent",
                 schema_for_type::<AgentArgs>(),

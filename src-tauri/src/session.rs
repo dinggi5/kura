@@ -31,7 +31,7 @@ use crate::wallet::{
 use crate::x402::do_sign_x402;
 
 /// 자율 승인 불가(세션 잠김·한도 초과·자율 꺼짐) 신호. 프론트가 이걸 보면 사람 승인 모달을 띄운다.
-const NEEDS_PASSWORD: &str = "NEEDS_PASSWORD";
+pub(crate) const NEEDS_PASSWORD: &str = "NEEDS_PASSWORD";
 
 /// 잠금 해제된 세션 키(니모닉)를 메모리에만 보관한다. 디스크에 절대 쓰지 않는다.
 #[derive(Default)]
@@ -227,6 +227,15 @@ async fn auto_approve_pinned(
         return Err(NEEDS_PASSWORD.into());
     }
 
+    // 🔴 **같은 결제를 짧은 시간에 두 번이면 사람에게 묻는다** (개발 71 — 개발 63 「다음」 2번, 사장 결정 09-28).
+    // 자율 결제가 성공한 뒤 AI 가 그 응답을 못 받으면(죽었다 켜짐·시간 초과) 「아까 실패했다」고 알고 같은 결제를 또
+    // 요청한다 — 겹침 거절(`begin_approval`)은 **겹치는 창**만 닫고, 끝난 뒤의 재요청은 한도 안이면 조용히 또 나갔다.
+    // 직접 제출(x402-direct)이 생긴 뒤로 upfront 결제라 그 창이 더 넓다. 같은 토큰·받는 곳·금액이 10분 안에 나갔으면
+    // (나갔을 수 있는 「불명」 포함) 자율로 처리하지 않는다 — 막는 게 아니라 사람이 승인 창에서 그 사실을 보고 정한다.
+    if crate::history::recent_same_payment(&req.token, &req.to, &req.amount).is_some() {
+        return Err(NEEDS_PASSWORD.into());
+    }
+
     // 여기서부터는 돈이 나갈 수 있는 구간 — 감시 스레드가 이 요청을 실패로 끝내면 안 된다
     // (코덱스 개발51 1차 P1: 자율 경로는 창이 없어 「프론트가 잔다」와 구별이 더 어렵다).
     let _in_flight = crate::ipc::begin_approval(&req)?;
@@ -278,7 +287,7 @@ async fn auto_work(
     // (개발 64): 그 갈래는 우리가 직접 올리므로 **결제액 + 가스**가 같은 잔액에서 나간다. 조건을
     // `!= "x402"` 로 둔 덕에 새 kind 가 자동으로 검사에 들어오는데, 그게 우연이 아니라 의도다 —
     // 「x402 면 가스가 안 나간다」가 아니라 **「우리가 올리면 가스가 나간다」** 가 판정 기준이다.
-    if req.kind != "x402" && active_chain().native_is_usdc {
+    if req.kind != crate::policy::KIND_X402 && active_chain().native_is_usdc {
         let reserve = parse_usdc_nonneg(active_chain().gas_reserve_usdc, dec).unwrap_or(U256::ZERO);
         // 🔴 **시간 상한을 둔다** (코덱스 개발51 3차 P1). RPC 가 멎으면 이 조회가 무한정 걸리고,
         // 그 사이 상대(MCP)는 5분 만에 요청을 거둬간다 → 나중에 깨어난 이 명령이 **이미 만료된
@@ -310,8 +319,9 @@ async fn auto_work(
 
     // 실제 처리 — 긴급잠금·단일/일일 한도·내역·누적은 do_* 가 송금과 동일하게 적용.
     // 여기서 Err(잠금·한도 등)이면 요청을 치우지 않는다 → 프론트가 모달로 사람에게 넘긴다.
+    use crate::policy::{KIND_TRANSFER, KIND_X402, KIND_X402_DIRECT};
     match req.kind.as_str() {
-        "x402" => {
+        KIND_X402 => {
             let payment = do_sign_x402(&signer, req.to.clone(), req.amount.clone(), None).await?;
             Ok(PaymentResult {
                 id: req.id.clone(),
@@ -324,7 +334,7 @@ async fn auto_work(
         // x402 직접 제출 (개발 64) — 서명하고 **우리가** 올린다. 자율 한도·신뢰 주소·ERC-8004·
         // 가스 여유분 검사를 전부 그대로 지난 뒤라, 사람 승인 경로와 같은 규칙으로 나간다.
         // 불명(개발 66)은 오류가 아니라 결과다 — `result_from_send` 가 사람 승인과 같게 가른다.
-        "x402-direct" => crate::ipc::result_from_send(
+        KIND_X402_DIRECT => crate::ipc::result_from_send(
             &req.id,
             crate::x402::do_x402_direct(
                 &signer,
@@ -336,7 +346,7 @@ async fn auto_work(
         ),
         // 🔴 모르는 kind 를 송금으로 떨어뜨리지 않는다(개발 64 — ipc::approve_pinned 와 같은 이유).
         // 자율 경로는 **창이 없어서** 사람이 «이상한 결제»를 볼 기회조차 없다.
-        "transfer" => crate::ipc::result_from_send(
+        KIND_TRANSFER => crate::ipc::result_from_send(
             &req.id,
             do_send_usdc(&signer, req.to.clone(), req.amount.clone()).await,
         ),

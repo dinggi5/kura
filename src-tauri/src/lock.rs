@@ -52,9 +52,20 @@ pub(crate) fn set_locked(
             *g = None;
         }
     }
-    write_json(lock_path()?, &LockState { locked })?;
+    write_lock_at(&lock_path()?, locked)?;
     crate::tray::refresh_icon(&app);
     Ok(())
+}
+
+/// 잠금 상태를 쓴다. 그 자리에 **파일이 아닌 것**(디렉터리 등)이 있으면 옆으로 치우고 쓴다(개발 71, 코덱스 개발 70
+/// 2차 P2) — 읽기는 그걸 「잠금」으로 보는데(닫힌 쪽 실패) 쓰기는 디렉터리 위로 rename 을 못 해, 해제 버튼이 영영
+/// 안 들었다. 치우지도 못하면 그대로 오류 — 잠금은 닫힌 채로 남는다.
+fn write_lock_at(path: &std::path::Path, locked: bool) -> Result<(), String> {
+    if fs::symlink_metadata(path).is_ok_and(|m| !m.is_file()) {
+        let aside = path.with_extension(format!("broken.{}", crate::store::now_secs()));
+        fs::rename(path, aside).map_err(|e| e.to_string())?;
+    }
+    write_json(path.to_path_buf(), &LockState { locked })
 }
 
 #[cfg(test)]
@@ -80,6 +91,21 @@ mod tests {
         fs::write(&p, r#"{"locked":true}"#).unwrap();
         assert!(lock_at(&p));
         fs::write(&p, r#"{"lock"#).unwrap();
+        assert!(lock_at(&p));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // 🔴 개발 71: 그 자리에 디렉터리가 있으면 읽기는 「잠금」, 해제(쓰기)는 그걸 치우고 된다.
+    #[test]
+    fn directory_in_place_can_be_unlocked() {
+        let dir = std::env::temp_dir().join(format!("kura-lockdir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let p = dir.join("lock.json");
+        fs::create_dir_all(p.join("inside")).unwrap();
+        assert!(lock_at(&p));
+        write_lock_at(&p, false).unwrap();
+        assert!(!lock_at(&p));
+        write_lock_at(&p, true).unwrap();
         assert!(lock_at(&p));
         let _ = fs::remove_dir_all(&dir);
     }

@@ -305,7 +305,7 @@ pub fn pick_active(list: &[Account], active: u32) -> Account {
 
 /// 송금 시도 1건의 기록(감사 로그) — GUI 가 history 파일에 쓰고 MCP·CLI 가 그대로 읽는다.
 /// 성공/차단/실패를 모두 남긴다. 필드를 더할 땐 `#[serde(default)]` 를 붙여 옛 기록이 계속 읽히게 한다.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct HistoryEntry {
     /// 유닉스 초.
     pub ts: u64,
@@ -324,6 +324,25 @@ pub struct HistoryEntry {
     /// x402 정산 tx 해시(페이실리테이터가 온체인 제출). 정산 전엔 빈 문자열. (Session 14)
     #[serde(default)]
     pub settle_tx: String,
+    /// 기록마다 고유한 번호 (개발 71). 보관 파일의 겹침 검사가 「모든 필드가 같은 두 기록」(같은 초·금액·사유)을
+    /// 하나로 보고 진짜 기록을 건너뛰던 틈(코덱스 개발 70 3차 P2)을 닫는다. 옛 기록은 빈 값.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// 보낸 계정의 주소 = 이 기록의 주인 (개발 71, 코덱스 개발 70 1차 P1). 파일 이름은 체인·계정 **번호**로만
+    /// 갈려서, 지갑 파일을 지우고 다른 시드를 가져오면 새 계정 0 이 옛 지갑의 기록을 제 것처럼 읽었다.
+    /// 파일 형식(배열)은 그대로 두고 **기록마다** 싣는다 — 옛 MCP·CLI 는 모르는 필드를 무시하고 계속 읽는다.
+    /// 읽는 쪽은 주인이 다른 기록을 뺀다(`read_sent_history`). 옛 기록은 빈 값 = 주인을 모름 → 보여 준다.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    /// 체인에서 확정했는가 (개발 71) — GUI 가 영수증(sent·unknown)이나 `authorizationState`(signed)로 확인했다.
+    /// 확인한 기록은 다시 묻지 않는다. 옛 기록·아직 못 본 기록은 false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checked: bool,
+}
+
+/// 이 기록이 `owner` 의 것으로 보이는가 — 주인이 적혀 있으면 주소 대조, 없으면(옛 기록) 참.
+pub fn history_owned_by(e: &HistoryEntry, owner: &str) -> bool {
+    e.from.is_empty() || owner.is_empty() || e.from.eq_ignore_ascii_case(owner)
 }
 
 /// history 파일이 품는 최신 기록 수 — 넘치면 오래된 것부터 **보관 파일로 옮긴다**(개발 70).
@@ -353,13 +372,19 @@ pub fn read_history_archive(path: &Path) -> Vec<HistoryEntry> {
 
 /// 보낸 기록 중 최신 `want` 건(최신순) — 본 파일 다음에 보관 파일. 보관 파일은 본 파일이 모자랄 때만 연다.
 /// 본 파일을 못 읽으면 빈 목록(예전과 같다 — 보여 줄 게 없을 뿐 지우지 않는다).
-pub fn read_sent_history(hot: &Path, want: usize) -> Vec<HistoryEntry> {
+/// `owner` = 지금 계정의 주소 — 주인이 다른 기록(다른 시드의 옛 기록)은 뺀다. 빈 값이면 거르지 않는다.
+pub fn read_sent_history(hot: &Path, want: usize, owner: &str) -> Vec<HistoryEntry> {
     let mut list: Vec<HistoryEntry> = std::fs::read_to_string(hot)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|s| serde_json::from_str::<Vec<HistoryEntry>>(&s).ok())
         .unwrap_or_default();
+    list.retain(|e| history_owned_by(e, owner));
     if list.len() < want {
-        list.extend(read_history_archive(&history_archive_path(hot)));
+        list.extend(
+            read_history_archive(&history_archive_path(hot))
+                .into_iter()
+                .filter(|e| history_owned_by(e, owner)),
+        );
     }
     list.truncate(want);
     list
@@ -425,7 +450,7 @@ pub fn deposit_as_history(d: &Deposit) -> HistoryEntry {
         amount: d.amount.clone(),
         status: "received".into(),
         detail: d.tx.clone(),
-        settle_tx: String::new(),
+        ..Default::default()
     }
 }
 
@@ -493,6 +518,65 @@ fn scheme_start(s: &str, min: usize, sep: usize) -> Option<usize> {
     }
 }
 
+// ── 결제 방식(kind) (개발 71) ───────────────────────────────────────────────────────────────────
+// 요청 파일의 `kind` 값. 개발 64 부터 `"x402-direct"` 리터럴이 두 크레이트 여섯 곳에, 「옛 앱이 할 수 있던 것」 목록이
+// 두 벌 있었다(opus 개발 64 P3). 하나를 틀리게 고치면 새 MCP 가 옛 앱에 모르는 방식을 보낸다(그 앱은 송금으로 처리했다).
+
+/// 온체인 송금(기본 — 필드가 없던 옛 요청 파일도 이것).
+pub const KIND_TRANSFER: &str = "transfer";
+/// x402 서명만(정산은 페이실리테이터).
+pub const KIND_X402: &str = "x402";
+/// x402 인가를 지갑이 직접 체인에 올린다(개발 64, Arc).
+pub const KIND_X402_DIRECT: &str = "x402-direct";
+
+/// 하트비트에 `kinds` 가 없던 시절의 앱이 할 수 있던 것 — 송금과 x402 서명 둘뿐.
+pub fn kinds_legacy() -> Vec<String> {
+    vec![KIND_TRANSFER.into(), KIND_X402.into()]
+}
+
+/// 지금 빌드의 앱이 처리하는 방식 전부 — GUI 가 하트비트에 싣는다. 승인 경로(`approve_kind`·`auto_work`)의
+/// match 팔과 같이 움직여야 한다.
+pub fn kinds_supported() -> Vec<String> {
+    vec![
+        KIND_TRANSFER.into(),
+        KIND_X402.into(),
+        KIND_X402_DIRECT.into(),
+    ]
+}
+
+// ── 요청 파일 거두기 (개발 71) ──────────────────────────────────────────────────────────────────
+
+/// 요청 파일이 `id` 의 것일 때만 지운다 — 돌려주는 값 = 지웠는가.
+///
+/// 🔴 예전엔 「읽어서 id 확인 → 지우기」 두 걸음이었다(MCP `cancel_request_at`, GUI `resolve_request` — 코덱스 개발 66 #7).
+/// 그 사이에 GUI 가 내 요청을 끝내 지우고 **다른 AI 의 새 요청 B** 가 같은 이름으로 생기면, 두 번째 걸음이 B 를
+/// 지웠다 — B 의 승인 창이 사라지고 그 AI 는 5분을 기다린다(돈은 안 나가지만 결제가 조용히 막힌다).
+/// 이제 **먼저 떼어 온다**(rename — 원자적). 떼어 온 사본은 누구도 못 바꾸니 거기서 id 를 본다. 남의 것이면
+/// 제자리로 돌려놓는다 — `hard_link` 는 그 자리에 새 파일이 이미 생겼으면 실패하므로 남의 새 요청을 덮지 않는다.
+/// (그렇게 돌려놓지 못한 요청은 기다리던 쪽이 시간 초과로 「아무것도 안 나감」을 받는다 — 세 요청이 겹쳐야 생긴다.)
+pub fn remove_request_if_mine(path: &Path, id: &str) -> bool {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let taken = path.with_file_name(format!(".{name}.taking.{}.{n}", std::process::id()));
+    if std::fs::rename(path, &taken).is_err() {
+        return false; // 없다(이미 누가 치웠다) — 할 일 없음.
+    }
+    let mine = std::fs::read_to_string(&taken)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|i| i == id))
+        .unwrap_or(false);
+    if !mine {
+        let _ = std::fs::hard_link(&taken, path);
+    }
+    let _ = std::fs::remove_file(&taken);
+    mine
+}
+
 // ── 결제 시도 기록 `~/.jigap/approvals/` (개발 66) ─────────────────────────────────────────────
 //
 // 🔴 **「결과 불명」을 프로세스 밖에 남기는 자리.** 개발 65 까지 GUI 의 「승인 진행 중」은 메모리
@@ -527,6 +611,10 @@ pub const ATTEMPT_DONE: &str = "done";
 pub const ATTEMPT_FAILED: &str = "failed";
 /// 서명한 트랜잭션을 냈는데 **받혔는지 모른다**(응답 유실·시간 초과). tx 해시는 안다.
 pub const ATTEMPT_UNKNOWN: &str = "unknown";
+/// 자율 승인이 조건(세션 잠김·한도·신뢰 주소 등)에 걸려 **사람에게 넘겼다** — 아무것도 시작하지 않았다(개발 71).
+/// 예전엔 `failed`(detail `NEEDS_PASSWORD`)로 적혀 「실패」라는 거짓 이름을 달았다(개발 67 발견, P3). 뜻은 같다:
+/// 다시 승인해도 되고, 시간 초과면 「아무것도 안 나감」. 이 값을 모르는 옛 MCP 도 `after_timeout` 의 `_` 갈래로 같은 답을 낸다.
+pub const ATTEMPT_HANDED: &str = "handed";
 
 /// 요청 id 가 파일 이름으로 써도 되는 모양인가. id 는 MCP 가 만든 나노초 숫자지만 요청 파일은 로컬의
 /// 다른 프로세스가 쓴 입력이다 — `../` 같은 값으로 디렉터리 밖을 쓰게 두지 않는다.
@@ -580,7 +668,7 @@ pub struct AttemptRecord {
 pub fn attempt_allows_retry(prev: Option<&AttemptRecord>) -> bool {
     match prev {
         None => true,
-        Some(r) => r.state == ATTEMPT_FAILED,
+        Some(r) => r.state == ATTEMPT_FAILED || r.state == ATTEMPT_HANDED,
     }
 }
 
@@ -601,6 +689,7 @@ pub fn after_timeout(rec: Option<&AttemptRecord>) -> AfterTimeout {
     match rec.map(|r| r.state.as_str()) {
         Some(ATTEMPT_SENDING) => AfterTimeout::StillSending,
         Some(ATTEMPT_DONE) | Some(ATTEMPT_UNKNOWN) => AfterTimeout::Finished,
+        Some(ATTEMPT_HANDED) => AfterTimeout::NothingSent,
         // failed(비번 오류 뒤 사람이 떠난 경우 등)·모르는 상태·기록 없음 → 나간 것이 없다.
         // 모르는 상태를 여기로 접는 게 위험하지 않은가: 모르는 값은 새 앱이 새 상태를 만든 경우인데,
         // 그 앱은 하트비트 kinds 로 이미 걸러진다. 그래도 한 줄 남긴다 — 새 상태를 만들면 여기부터 고칠 것.
@@ -637,6 +726,27 @@ pub fn attempt_prunable(age_secs: u64) -> bool {
 mod tests {
     use super::*;
 
+    /// 🔴 개발 71(코덱스 개발 66 #7): 내 것만 지우고, 남의 요청은 제자리에 그대로 둔다(내용·이름 모두).
+    #[test]
+    fn remove_request_if_mine_leaves_others_alone() {
+        let dir = std::env::temp_dir().join(format!("kura-req-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("payment_request.json");
+        std::fs::write(&p, r#"{"id":"B","to":"0x1"}"#).unwrap();
+        assert!(!remove_request_if_mine(&p, "A"));
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            r#"{"id":"B","to":"0x1"}"#
+        );
+        assert!(remove_request_if_mine(&p, "B"));
+        assert!(!p.exists());
+        assert!(!remove_request_if_mine(&p, "B")); // 없으면 아무 일 없음
+                                                   // 떼어 온 사본이 남지 않는다.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn dep(key: &str, ts: u64) -> Deposit {
         Deposit {
             ts,
@@ -660,6 +770,7 @@ mod tests {
             status: "sent".into(),
             detail: tag.into(),
             settle_tx: String::new(),
+            ..Default::default()
         };
         let out = merge_received(
             vec![sent(9, "a"), sent(5, "b"), sent(1, "c")],
@@ -1096,6 +1207,12 @@ mod tests {
         };
         assert!(attempt_allows_retry(None));
         assert!(attempt_allows_retry(Some(&mk(ATTEMPT_FAILED))));
+        // 개발 71: 자율이 사람에게 넘긴 것 — 사람이 곧 승인할 수 있어야 하고, 시간 초과면 아무것도 안 나갔다.
+        assert!(attempt_allows_retry(Some(&mk(ATTEMPT_HANDED))));
+        assert_eq!(
+            after_timeout(Some(&mk(ATTEMPT_HANDED))),
+            AfterTimeout::NothingSent
+        );
         for s in [ATTEMPT_SENDING, ATTEMPT_DONE, ATTEMPT_UNKNOWN, "weird"] {
             assert!(
                 !attempt_allows_retry(Some(&mk(s))),

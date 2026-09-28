@@ -51,10 +51,10 @@ pub(crate) fn auto_pay_notice(
     } else {
         tf!("자율 결제 {amount} {token}", "Autopay {amount} {token}")
     };
-    let body = if kind == "x402" {
+    let body = if kind == crate::policy::KIND_X402 {
         let target = if resource.is_empty() { to } else { resource };
         tf!("x402 서명 · {target}", "x402 signature · {target}")
-    } else if kind == "x402-direct" {
+    } else if kind == crate::policy::KIND_X402_DIRECT {
         // 직접 제출은 **돈이 이미 체인에 나간** 것이다 — 「서명」이라고 적으면 사후 인지의 무게가
         // 달라진다(서명은 아직 정산 전이지만 이건 끝난 전송이다).
         let target = if resource.is_empty() { to } else { resource };

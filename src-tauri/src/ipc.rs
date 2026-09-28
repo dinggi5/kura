@@ -93,7 +93,7 @@ pub(crate) struct AgentTrust {
 }
 
 fn default_kind() -> String {
-    "transfer".to_string()
+    crate::policy::KIND_TRANSFER.to_string()
 }
 
 /// AI 가 주장한 신원을 **온체인이 부정하는가** — 자율 승인(비번 없이 나가는 경로)을 막을 조건.
@@ -209,15 +209,15 @@ fn ui_ok_default() -> bool {
     true
 }
 
-/// 이 필드가 없던 시절의 앱이 할 수 있던 것 — 송금과 x402 서명.
+/// 이 필드가 없던 시절의 앱이 할 수 있던 것 — 송금과 x402 서명(정본 `policy::kinds_legacy`).
 fn kinds_default() -> Vec<String> {
-    vec!["transfer".into(), "x402".into()]
+    crate::policy::kinds_legacy()
 }
 
 /// 지금 이 앱이 처리하는 결제 방식 전부. `approve_payment`·`auto_approve_payment` 의 match 팔과
 /// **같이 움직여야 한다** — 하나를 늘리면 여기도 늘린다(안 늘리면 MCP 가 새 방식을 안 보낸다).
 fn supported_kinds() -> Vec<String> {
-    vec!["transfer".into(), "x402".into(), "x402-direct".into()]
+    crate::policy::kinds_supported()
 }
 
 fn request_path() -> Result<PathBuf, String> {
@@ -311,8 +311,9 @@ pub(crate) fn resolve_request(result: &PaymentResult) -> Result<(), String> {
         return Ok(());
     }
     write_json(result_path()?, result)?;
+    // 확인과 삭제를 한 걸음으로(개발 71) — 위에서 본 뒤 MCP 가 거두고 새 요청이 들어왔으면 그건 안 지운다.
     if let Ok(p) = request_path() {
-        let _ = fs::remove_file(p);
+        crate::policy::remove_request_if_mine(&p, &result.id);
     }
     Ok(())
 }
@@ -441,6 +442,7 @@ fn in_flight_message() -> String {
 /// 쓰는데(남의 결과를 덮지 않으려고), 그때 MCP 가 결말을 알 수 있는 곳은 이 기록뿐이다.
 ///   Ok(approved) → done  ·  Ok(unknown) → unknown(요청은 소비한다 — 다시 승인하면 두 번째 결제)
 ///   Err          → failed(요청은 남는다 — 확실히 안 나갔으니 다시 승인·거부할 수 있다)
+///   Err(NEEDS_PASSWORD) → handed(자율이 사람에게 넘김 — 시작한 것 없음, 개발 71)
 pub(crate) fn finish_approval(
     req: &PaymentRequest,
     outcome: Result<PaymentResult, String>,
@@ -476,6 +478,12 @@ pub(crate) fn finish_approval(
             let _ = write_attempt(&rec);
             resolve_request(&r)?;
             Ok(r)
+        }
+        // 자율이 사람에게 넘긴 것(NEEDS_PASSWORD)은 실패가 아니다 — 「넘김」으로 적는다(개발 71).
+        Err(e) if e == crate::session::NEEDS_PASSWORD => {
+            rec.state = crate::policy::ATTEMPT_HANDED.into();
+            let _ = write_attempt(&rec);
+            Err(e)
         }
         Err(e) => {
             rec.state = crate::policy::ATTEMPT_FAILED.into();
@@ -665,9 +673,11 @@ fn clear_dead_request() {
     let Ok(_lock) = APPROVAL_ARBITER.lock() else {
         return;
     };
-    if should_clear_request(read_request().as_ref(), approval_in_flight()) {
-        if let Ok(p) = request_path() {
-            let _ = fs::remove_file(p);
+    let req = read_request();
+    if should_clear_request(req.as_ref(), approval_in_flight()) {
+        if let (Ok(p), Some(r)) = (request_path(), req) {
+            // 본 그 요청만(개발 71) — 판정한 뒤 MCP 가 새 요청을 썼으면 그건 살아 있는 요청이다.
+            crate::policy::remove_request_if_mine(&p, &r.id);
         }
     }
 }
@@ -680,13 +690,7 @@ fn clear_dead_request() {
 ///
 /// 창 조작은 AppKit 을 건드리므로 반드시 메인 스레드에서 한다(트레이 rect 조회 포함).
 fn watchdog(app: tauri::AppHandle) {
-    let mut last_beat = 0u64;
-    // 마지막으로 창을 깨운 시각. 0 = 아직 안 깨움 → 다음 대기 요청에 즉시 깨운다.
-    let mut last_wake = 0u64;
-    // 우리가 마지막으로 적용한 "항상 위" 값. None = 아직 한 번도 안 건드림.
-    let mut last_pinned: Option<bool> = None;
-    // 창을 깨운 뒤에도 프론트가 폴링을 안 한 횟수. 폴링이 한 번이라도 돌아오면 0으로 리셋.
-    let mut wakes_without_poll: u32 = 0;
+    let mut st = WatchState::default();
     // 결제 시도 기록 청소(개발 66) 마지막 시각. 0 = 켜자마자 한 번.
     let mut last_prune = 0u64;
     loop {
@@ -705,33 +709,31 @@ fn watchdog(app: tauri::AppHandle) {
         // 「이미 승인 대기 중인 결제가 있어요」로 막힌다 — 영구히, 복구는 터미널에서 JSON
         // 파일 지우기. 사용자는 그 파일이 있는 줄도 모른다.
         //
-        // 🔴 **아래 「프론트가 살아 있으면 continue」보다 먼저 있어야 한다** (개발 63 2차
+        // 🔴 **아래 「프론트가 살아 있으면 멈춤」보다 먼저 있어야 한다** (개발 63 2차
         // 리뷰). 뒤에 두면 청소가 **창이 잠들었을 때만** 도는데, 결제가 안 된다고 느낀
         // 사용자가 제일 먼저 하는 일이 창을 여는 것이다 → 여는 순간 폴링이 되살아나 청소가
         // 멎고, 화면엔 (stale 이라) 아무것도 안 보인다. 고치려고 한 행동이 고침을 막는 자리였다.
         // 프론트와 부딪히지 않는다: 프론트가 보는 건 `live_request()`(=stale 아닌 것)뿐이라
         // 여기서 지우는 파일은 어차피 그쪽에 없는 것이다.
         clear_dead_request();
-        let front_alive = now.saturating_sub(LAST_POLL.load(Ordering::Relaxed)) <= FRONT_STALE_SECS;
-        if front_alive {
-            wakes_without_poll = 0;
-        }
-        // 창을 여러 번 깨워도 폴링이 안 돌아온다 = WebView 가 죽었다(개발 51).
-        //
-        // **마지막 깨움에도 회복할 시간을 준다** (코덱스 개발51 2차 P2). 카운터는 깨운 *뒤*에
-        // 올라가므로, 이 조건만 보면 3번째 깨움은 다음 1초 루프에서 곧장 사망 판정을 맞는다 —
-        // 실측(개발 51)상 깨운 뒤 폴링이 돌아오는 데 5초쯤 걸리므로 1초는 너무 짧다.
-        // 마지막 깨움이 `WAKE_RETRY_SECS` 만큼 묵은 뒤에야 판정한다 = 주석대로 "3회 ≈ 45초".
-        let ui_ok =
-            wakes_without_poll < DEAD_WAKES || now.saturating_sub(last_wake) < WAKE_RETRY_SECS;
-        // 하트비트가 뜻하는 건 "프로세스가 살아 있다"가 아니라 **"여기서 사람이 승인까지 할 수
-        // 있다"**이다. 지갑이 아직 없으면(첫 실행·평문 마이그레이션 대기) 프론트는 SetupScreen 을
-        // 그리고 WalletScreen 은 아예 안 뜬다 → 승인 창을 띄울 경로가 없다. 그 상태에서 살아
-        // 있다고 하면 MCP 가 요청을 받아 두고 **5분을 조용히 기다린다**(코덱스 개발49 1차 P2).
-        // 옛 코드도 결과적으로 같은 조건이었다 — 하트비트를 WalletScreen 의 폴링이 찍었으니
-        // 지갑이 없으면 안 찍혔다. 여기서 명시적으로 같은 선을 긋는다.
-        if now.saturating_sub(last_beat) >= HEARTBEAT_SECS && !crate::wallet::needs_setup() {
-            last_beat = now;
+        // 파일은 한 번만 읽어 아래 판단 전부에 같은 값을 쓴다.
+        let live = live_request();
+        let dismissal = live
+            .as_ref()
+            .map(|r| crate::tray::dismissal_for(&app, &r.id, secs_left(r, now)))
+            .unwrap_or(crate::tray::Dismissal::No);
+        let out = watch_tick(
+            &mut st,
+            TickIn {
+                now,
+                front_alive: now.saturating_sub(LAST_POLL.load(Ordering::Relaxed))
+                    <= FRONT_STALE_SECS,
+                live: live.is_some(),
+                dismissal,
+                can_beat: !crate::wallet::needs_setup(),
+            },
+        );
+        if let Some(ui_ok) = out.beat {
             let _ = write_json(
                 heartbeat_path().unwrap_or_default(),
                 &Heartbeat {
@@ -741,42 +743,9 @@ fn watchdog(app: tauri::AppHandle) {
                 },
             );
         }
-        // 사용자가 **일부러 닫아 둔** 승인 창(개발 53, tray::hide_by_user)은 아래 깨우기에서
-        // 빼고, 만료 REMIND_SECS 전에 한 번만 되살린다. 프론트 생사보다 먼저 본다 — 닫힌 창의
-        // WebView 는 아직 폴링 중일 수도(숨긴 뒤 ~7초), 이미 잠들었을 수도 있는데 어느 쪽이든
-        // 창은 숨어 있고 되살릴 수 있는 건 러스트뿐이다. 파일은 한 번만 읽어 아래 고정 수렴과
-        // 같은 값을 쓴다.
-        let live = live_request();
-        let dismissal = live
-            .as_ref()
-            .map(|r| crate::tray::dismissal_for(&app, &r.id, secs_left(r, now)))
-            .unwrap_or(crate::tray::Dismissal::No);
-        if dismissal == crate::tray::Dismissal::Remind {
-            // show 가 「닫아 둠」을 지우므로 다음 루프부턴 평소 규칙이다. 되살린 직후 아래
-            // 깨우기가 곧바로 한 번 더 show 하지 않게 깨운 시각도 맞춘다.
-            last_wake = now;
+        if out.remind {
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || crate::tray::show(&handle));
-        }
-        // 프론트가 살아 있다 → 폴링이 이미 같은 일(고정 수렴·모달·자율 승인)을 하고 있다.
-        if front_alive {
-            last_pinned = None; // 주도권을 넘긴다 — 다시 잠들면 그때 처음부터 다시 맞춘다.
-            continue;
-        }
-        // 여기서부터는 "프론트가 잔다" — 고정 수렴도 우리가 대신한다.
-        let pinned = live.is_some();
-        if !pinned {
-            last_wake = 0;
-        }
-        // 닫아 둔 요청은 깨우지 않는다(Hold·Remind 둘 다 — Remind 는 위에서 이미 띄웠다).
-        // 그래서 사망 판정 카운터(wakes_without_poll)도 안 오른다: 폴링이 멎은 건 WebView 가
-        // 죽어서가 아니라 사용자가 닫아서다.
-        let wake = pinned
-            && dismissal == crate::tray::Dismissal::No
-            && now.saturating_sub(last_wake) >= WAKE_RETRY_SECS;
-        if wake {
-            last_wake = now;
-            wakes_without_poll = wakes_without_poll.saturating_add(1);
         }
         // WebView 가 죽었다고 판정된 순간, **기다리는 요청을 5분 침묵으로 두지 않는다** (개발 51).
         // 승인 창이 뜰 수 없다는 걸 아는 쪽이 러스트뿐이므로 여기서 끝내 준다. 「사람이 거부」가
@@ -790,7 +759,7 @@ fn watchdog(app: tauri::AppHandle) {
         // 판단과 실행을 **한 잠금 안에서** 한다 (4차 P1): 보고 나서 놓으면 그 틈에 승인이
         // 시작돼, 돈은 나가는데 여기선 실패로 적는 상태가 된다. 알림은 잠금 밖에서 띄운다.
         let mut told_dead = false;
-        if !ui_ok {
+        if out.resolve_dead {
             if let Ok(_lock) = APPROVAL_ARBITER.lock() {
                 if !approval_in_flight() {
                     if let Some(req) = live_request() {
@@ -810,16 +779,6 @@ fn watchdog(app: tauri::AppHandle) {
                 }
             }
         }
-        // 🔴 **죽은 요청 파일을 치운다** (개발 63, 에이전트 백지 리뷰 P2).
-        //
-        // 여기 말고는 요청 파일을 지우는 곳이 `resolve_request` 하나뿐이었다 — `is_stale` 은
-        // 보여줄지 말지를 **거르기만** 하고 파일은 남긴다. 그래서 MCP 가 승인 대기 중
-        // SIGKILL 로 죽거나(`CancelOnDrop` 이 못 도는 경우) `kura pay` 를 Ctrl-C 로 끊으면
-        // 고아 파일이 남고, MCP 의 `has_pending()` 은 **존재만** 보므로 그 뒤 모든 결제가
-        // 「이미 승인 대기 중인 결제가 있어요」로 막힌다 — 영구히, 복구는 터미널에서 JSON
-        // 파일 지우기. 사용자는 그 파일이 있는 줄도 모른다.
-        //
-        // 사람에게도 알린다: 화면이 죽은 걸 알 방법이 알림뿐이다(창이 안 뜬다).
         if told_dead {
             crate::notify::show_notification(
                 ts!("지갑 화면이 응답하지 않아요", "The wallet window isn't responding"),
@@ -829,19 +788,112 @@ fn watchdog(app: tauri::AppHandle) {
                 ),
             );
         }
-        let converge = pinned || last_pinned == Some(true);
-        if !converge && !wake {
-            continue;
+        if let Some(pinned) = out.set_pinned {
+            let wake = out.wake;
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                crate::tray::set_pinned(&handle, pinned);
+                if wake {
+                    crate::tray::show(&handle);
+                }
+            });
         }
-        last_pinned = Some(pinned);
-        let handle = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            crate::tray::set_pinned(&handle, pinned);
-            if wake {
-                crate::tray::show(&handle);
-            }
-        });
     }
+}
+
+/// 감시 스레드가 차례를 넘어 들고 가는 상태.
+#[derive(Default, Debug)]
+struct WatchState {
+    last_beat: u64,
+    /// 마지막으로 창을 깨운 시각. 0 = 아직 안 깨움 → 다음 대기 요청에 즉시 깨운다.
+    last_wake: u64,
+    /// 우리가 마지막으로 적용한 "항상 위" 값. None = 아직 한 번도 안 건드림(또는 프론트에 넘김).
+    last_pinned: Option<bool>,
+    /// 창을 깨운 뒤에도 프론트가 폴링을 안 한 횟수. 폴링이 한 번이라도 돌아오면 0으로 리셋.
+    wakes_without_poll: u32,
+}
+
+/// 한 차례의 입력 — 시각과 파일·창에서 읽은 사실.
+struct TickIn {
+    now: u64,
+    /// 프론트가 `FRONT_STALE_SECS` 안에 폴링했다.
+    front_alive: bool,
+    /// 보여줄 대기 요청이 있다.
+    live: bool,
+    dismissal: crate::tray::Dismissal,
+    /// 하트비트를 찍어도 되는 상태(지갑이 있다).
+    can_beat: bool,
+}
+
+/// 한 차례에 할 일 — 파일·창을 만지는 건 호출자가 한다.
+#[derive(Debug, PartialEq, Default)]
+struct TickOut {
+    /// 하트비트를 찍는다(값 = ui_ok).
+    beat: Option<bool>,
+    /// 닫아 둔 승인 창을 만료 직전에 한 번 되살린다.
+    remind: bool,
+    /// WebView 가 죽었다 — 기다리는 요청을 실패로 끝낼지 본다(진행 중 승인이 없을 때만, 호출자가 잠금 안에서).
+    resolve_dead: bool,
+    /// "항상 위" 를 이 값으로 맞춘다(None = 안 건드림).
+    set_pinned: Option<bool>,
+    /// 맞추면서 창도 띄운다(잠든 프론트 깨우기).
+    wake: bool,
+}
+
+/// 감시 스레드 한 차례의 판단 (순수 — 개발 71, 개발 63 「다음」 4번). 예전엔 이 판단이 1초 루프 안에 흩어져 있어
+/// 「언제 깨우고·언제 죽었다고 보고·언제 고정을 푸는가」를 테스트가 볼 수 없었다.
+///
+/// **프론트가 깨어 있으면 하트비트·되살리기 말고는 아무것도 하지 않는다** — 폴링이 이미 같은 일(고정 수렴·모달·
+/// 자율 승인)을 한다. 요청이 오자마자 창을 띄우면 창 없이 조용히 끝나야 하는 자율 결제까지 창이 튀어나온다.
+fn watch_tick(st: &mut WatchState, i: TickIn) -> TickOut {
+    use crate::tray::Dismissal;
+    let mut out = TickOut::default();
+    if i.front_alive {
+        st.wakes_without_poll = 0;
+    }
+    // 창을 여러 번 깨워도 폴링이 안 돌아온다 = WebView 가 죽었다(개발 51).
+    // **마지막 깨움에도 회복할 시간을 준다** (코덱스 개발51 2차 P2) — 카운터는 깨운 *뒤*에 올라가므로
+    // 이 조건만 보면 3번째 깨움은 다음 차례에 곧장 사망 판정을 맞는다. 실측(개발 51)상 깨운 뒤 폴링이
+    // 돌아오는 데 5초쯤 걸린다. 마지막 깨움이 `WAKE_RETRY_SECS` 만큼 묵은 뒤에야 판정 = "3회 ≈ 45초".
+    let ui_ok =
+        st.wakes_without_poll < DEAD_WAKES || i.now.saturating_sub(st.last_wake) < WAKE_RETRY_SECS;
+    // 하트비트가 뜻하는 건 **"여기서 사람이 승인까지 할 수 있다"** — 지갑이 없으면(첫 실행) 승인 창을 띄울
+    // 경로가 없으니 찍지 않는다(코덱스 개발49 1차 P2).
+    if i.now.saturating_sub(st.last_beat) >= HEARTBEAT_SECS && i.can_beat {
+        st.last_beat = i.now;
+        out.beat = Some(ui_ok);
+    }
+    // 사용자가 **일부러 닫아 둔** 승인 창(개발 53)은 깨우기에서 빼고, 만료 직전에 한 번만 되살린다. 프론트 생사보다
+    // 먼저 본다 — 닫힌 창의 WebView 는 아직 폴링 중일 수도, 이미 잠들었을 수도 있는데 되살릴 수 있는 건 러스트뿐이다.
+    if i.dismissal == Dismissal::Remind {
+        st.last_wake = i.now; // 되살린 직후 아래 깨우기가 한 번 더 띄우지 않게
+        out.remind = true;
+    }
+    if i.front_alive {
+        st.last_pinned = None; // 주도권을 넘긴다 — 다시 잠들면 그때 처음부터 다시 맞춘다.
+        return out;
+    }
+    // 여기서부터는 "프론트가 잔다" — 고정 수렴도 우리가 대신한다.
+    let pinned = i.live;
+    if !pinned {
+        st.last_wake = 0;
+    }
+    // 닫아 둔 요청은 깨우지 않는다(Hold·Remind 둘 다). 그래서 사망 판정 카운터도 안 오른다 — 폴링이 멎은 건
+    // WebView 가 죽어서가 아니라 사용자가 닫아서다.
+    let wake = pinned
+        && i.dismissal == Dismissal::No
+        && i.now.saturating_sub(st.last_wake) >= WAKE_RETRY_SECS;
+    if wake {
+        st.last_wake = i.now;
+        st.wakes_without_poll = st.wakes_without_poll.saturating_add(1);
+    }
+    out.resolve_dead = !ui_ok;
+    if pinned || st.last_pinned == Some(true) || wake {
+        st.last_pinned = Some(pinned);
+        out.set_pinned = Some(pinned);
+        out.wake = wake;
+    }
+    out
 }
 
 /// 감시 스레드를 띄운다 (setup 에서 한 번).
@@ -921,9 +973,10 @@ async fn approve_pinned(req: PaymentRequest, password: String) -> Result<Payment
 /// kind 에 따라 처리한다. 둘 다 잠금·한도·내역을 자동 적용한다(같은 하부 함수 재사용).
 /// `Err` = 확실히 안 나감(요청 유지 → 팝업에서 재시도/거부 가능). 불명은 `Ok(status: "unknown")`.
 async fn approve_kind(req: &PaymentRequest, password: String) -> Result<PaymentResult, String> {
+    use crate::policy::{KIND_TRANSFER, KIND_X402, KIND_X402_DIRECT};
     match req.kind.as_str() {
         // x402: 온체인 전송이 아니라 EIP-3009 인가를 서명만 한다(페이실리테이터가 정산).
-        "x402" => {
+        KIND_X402 => {
             let payment =
                 sign_x402_payment(password, req.to.clone(), req.amount.clone(), None).await?;
             Ok(PaymentResult {
@@ -935,7 +988,7 @@ async fn approve_kind(req: &PaymentRequest, password: String) -> Result<PaymentR
             })
         }
         // x402-direct: 서명 + **우리가 직접 전송**(개발 64). 송금과 같은 규칙(한도·잠금·내역 "sent").
-        "x402-direct" => result_from_send(
+        KIND_X402_DIRECT => result_from_send(
             &req.id,
             crate::x402::x402_direct_payment(
                 password,
@@ -949,7 +1002,7 @@ async fn approve_kind(req: &PaymentRequest, password: String) -> Result<PaymentR
         // 🔴 **모르는 kind 는 여기로 오면 안 된다**(개발 64). 예전엔 `_` 가 전부 송금으로 떨어져서,
         // 새 kind 를 아는 MCP + 옛 앱 조합이면 「서버가 알아볼 수 없는 평범한 송금」이 나갔다 —
         // 돈은 나가고 결제는 성립하지 않는 최악의 조합이다. 모르면 거절하고 이유를 말한다.
-        "transfer" => {
+        KIND_TRANSFER => {
             let sent = match req.token.as_str() {
                 "USDC" => send_usdc_checked(password, req.to.clone(), req.amount.clone()).await,
                 "ETH" => send_eth_checked(password, req.to.clone(), req.amount.clone()).await,
@@ -1058,6 +1111,84 @@ pub(crate) fn get_agent_status() -> AgentStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tick_in(now: u64, front_alive: bool, live: bool) -> TickIn {
+        TickIn {
+            now,
+            front_alive,
+            live,
+            dismissal: crate::tray::Dismissal::No,
+            can_beat: true,
+        }
+    }
+
+    /// 🔴 개발 71(개발 63 「다음」 4번): 감시 한 차례를 시간 순으로 밟는다 — 프론트가 깨어 있으면 아무것도 안 하고,
+    /// 잠든 채 요청이 오면 곧바로 한 번·그 뒤 15초마다 깨우고, 세 번 깨워도 안 돌아오면 마지막 깨움 15초 뒤에야
+    /// 「죽었다」로 본다. 요청이 사라지면 고정을 한 번 풀고 그 뒤론 가만히 있다.
+    #[test]
+    fn watch_tick_timeline() {
+        let mut st = WatchState::default();
+        // 프론트가 깨어 있다 — 하트비트만.
+        let o = watch_tick(&mut st, tick_in(100, true, true));
+        assert_eq!(
+            o,
+            TickOut {
+                beat: Some(true),
+                ..Default::default()
+            }
+        );
+        // 하트비트는 2초마다.
+        assert_eq!(watch_tick(&mut st, tick_in(101, true, true)).beat, None);
+        // 잠든 프론트에 요청 — 즉시 깨우고 고정.
+        let o = watch_tick(&mut st, tick_in(103, false, true));
+        assert_eq!(
+            (o.set_pinned, o.wake, o.resolve_dead),
+            (Some(true), true, false)
+        );
+        // 15초 안엔 다시 깨우지 않지만 고정은 계속 맞춘다.
+        let o = watch_tick(&mut st, tick_in(110, false, true));
+        assert_eq!((o.set_pinned, o.wake), (Some(true), false));
+        // 두 번째·세 번째 깨움.
+        assert!(watch_tick(&mut st, tick_in(118, false, true)).wake);
+        assert!(watch_tick(&mut st, tick_in(133, false, true)).wake);
+        assert_eq!(st.wakes_without_poll, 3);
+        // 세 번째 깨움 뒤 15초가 안 됐다 — 아직 살아 있다고 본다.
+        let o = watch_tick(&mut st, tick_in(140, false, true));
+        assert!(!o.resolve_dead);
+        // 15초가 지났다 — 죽었다. 하트비트도 ui_ok=false.
+        let o = watch_tick(&mut st, tick_in(148, false, true));
+        assert!(o.resolve_dead);
+        assert_eq!(o.beat, Some(false));
+        // 폴링이 한 번 돌아오면 카운터가 풀린다.
+        watch_tick(&mut st, tick_in(149, true, true));
+        assert_eq!((st.wakes_without_poll, st.last_pinned), (0, None));
+
+        // 요청이 사라진 뒤: 우리가 고정했으면 한 번 풀고, 그 뒤론 아무것도 안 한다.
+        let mut st = WatchState::default();
+        watch_tick(&mut st, tick_in(200, false, true));
+        let o = watch_tick(&mut st, tick_in(201, false, false));
+        assert_eq!((o.set_pinned, o.wake), (Some(false), false));
+        let o = watch_tick(&mut st, tick_in(202, false, false));
+        assert_eq!(o.set_pinned, None);
+    }
+
+    /// 닫아 둔 요청(Hold)은 깨우지 않고 사망 카운터도 안 올린다. 만료 직전(Remind)엔 프론트 생사와 무관하게 한 번 띄운다.
+    /// 지갑이 없으면 하트비트를 안 찍는다.
+    #[test]
+    fn watch_tick_respects_dismissal_and_setup() {
+        let mut st = WatchState::default();
+        let mut i = tick_in(300, false, true);
+        i.dismissal = crate::tray::Dismissal::Hold;
+        let o = watch_tick(&mut st, i);
+        assert!(!o.wake && !o.remind);
+        assert_eq!(st.wakes_without_poll, 0);
+        let mut i = tick_in(301, true, true);
+        i.dismissal = crate::tray::Dismissal::Remind;
+        assert!(watch_tick(&mut st, i).remind);
+        let mut i = tick_in(400, true, false);
+        i.can_beat = false;
+        assert_eq!(watch_tick(&mut st, i).beat, None);
+    }
 
     /// 🔴 개발 64 — 하트비트가 **실제 처리할 수 있는 방식 전부**를 적어야 한다. MCP 는 이 목록에
     /// 없는 방식이면 요청을 아예 안 쓴다 → 여기서 빠뜨리면 새 결제 방식이 조용히 죽고, 반대로

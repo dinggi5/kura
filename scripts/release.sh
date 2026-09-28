@@ -12,6 +12,10 @@
 #   ./scripts/release.sh --publish --yes 배포 직전 확인 프롬프트를 생략
 #   ./scripts/release.sh --publish --replace-assets
 #                                        이미 올라간 자산을 이번 빌드로 덮어쓴다 (재실행 복구용)
+#   ./scripts/release.sh --resume-publish
+#                                        빌드·공증은 건너뛰고 **지난 빌드 산출물로 배포 단계만** 다시 (개발 71)
+#                                        — 발행이 네트워크 오류로 중간에 끊겼을 때. 산출물이 이 커밋·버전의
+#                                        것인지 지문(sha256)으로 전부 대조한 뒤에만 간다.
 #
 # 1회 설정과 자격증명 만드는 법은 docs/RELEASE.md 를 볼 것.
 #
@@ -64,17 +68,19 @@ PLAIN_DMG=0
 PUBLISH=0
 ASSUME_YES=0
 REPLACE_ASSETS=0
+RESUME=0
 for arg in "$@"; do
   case "$arg" in
     --universal)   UNIVERSAL=1 ;;
     --publish)     PUBLISH=1 ;;
+    --resume-publish) PUBLISH=1; RESUME=1 ;;
     --yes|-y)      ASSUME_YES=1 ;;
     --replace-assets) REPLACE_ASSETS=1 ;;
     --no-notarize) NOTARIZE=0 ;;
     --skip-tests)  RUN_TESTS=0 ;;
     --allow-dirty) ALLOW_DIRTY=1 ;;
     --plain-dmg)   PLAIN_DMG=1 ;;
-    -h|--help)     sed -n '3,18p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '3,22p' "$0"; exit 0 ;;
     *)             die "모르는 옵션: $arg  (--help 로 사용법 확인)" ;;
   esac
 done
@@ -509,6 +515,39 @@ if git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
      이 DMG 에는 태그에 없는 코드가 들어가는데 서명·공증은 그대로 통과한다."
   info "태그 $VERSION_TAG = HEAD (트리 깨끗)"
 fi
+
+# ── 이어 배포 (--resume-publish, 개발 71) ──────────────────────────────────
+# 개발 68 실전: `--publish` 가 DMG 공증 업로드 타임아웃 → 태그 뒤 DNS 실패로 두 번 끊겼고, 매번 **처음부터 15분**을
+# 다시 빌드했다. 배포 단계(8)는 이미 「돼 있으면 건너뛴다」로 짜여 있어 이어 돌리기만 하면 되는데, 빌드가 그 앞을 막았다.
+# 여기서는 2~7 을 건너뛰고 지난 빌드가 남긴 지문 파일(7 의 끝에서 쓴다)로 산출물을 되살린다. 🔴 **지문이 하나라도
+# 안 맞으면 멈춘다** — 다른 커밋·다른 버전·그 뒤 손댄 파일로 배포하는 게 이 옵션이 만들 수 있는 유일한 사고다.
+MANIFEST_REL="src-tauri/target/release/bundle/macos/release-manifest.env"
+if [[ $RESUME -eq 1 ]]; then
+  step "지난 빌드 산출물 대조 (--resume-publish)"
+  [[ $UNIVERSAL -eq 0 ]] || die "--resume-publish 는 --universal 과 같이 못 쓴다"
+  [[ -f "$MANIFEST_REL" ]] || die "지난 빌드의 지문 파일($MANIFEST_REL)이 없다 — 이어 할 빌드가 없으니 --publish 로 처음부터"
+  # shellcheck disable=SC1090
+  source "$MANIFEST_REL"
+  [[ "${M_GIT:-}" == "$(git rev-parse HEAD)" ]] || die "지난 빌드는 커밋 ${M_GIT:-?} 의 것이다(지금 HEAD $(git rev-parse --short HEAD)). --publish 로 처음부터"
+  [[ "${M_VERSION:-}" == "$VERSION_CONF" ]] || die "지난 빌드는 버전 ${M_VERSION:-?} 이다(지금 $VERSION_CONF). --publish 로 처음부터"
+  [[ $IS_DIRTY -eq 0 ]] || die "커밋 안 된 변경이 있다"
+  check_art() { # $1=경로 $2=기대 sha256
+    [[ -f "$1" ]] || die "산출물이 없다: $1 — --publish 로 처음부터"
+    [[ "$(shasum -a 256 "$1" | awk '{print $1}')" == "$2" ]] || die "산출물 지문이 다르다: $1 (빌드 뒤 바뀌었다) — --publish 로 처음부터"
+    info "✓ $(basename "$1")"
+  }
+  check_art "$M_DMG" "$M_DMG_SHA"
+  check_art "$M_TAR" "$M_TAR_SHA"
+  check_art "$M_SIG" "$M_SIG_SHA"
+  check_art "$M_LATEST" "$M_LATEST_SHA"
+  check_art "$M_MCPB" "$M_MCPB_SHA"
+  check_art "$M_BODY" "$M_BODY_SHA"
+  # 공증 티켓이 DMG 에 박혀 있는지만 다시 본다(지문이 같으면 빌드 때 검증한 그 파일이다 — 확인은 싸다).
+  xcrun stapler validate -q "$M_DMG" >/dev/null 2>&1 || die "DMG 에 공증 티켓이 없다: $M_DMG"
+  DMG_PATH="$M_DMG"; UPDATER_TAR="$M_TAR"; UPDATER_SIG="$M_SIG"; LATEST_JSON="$M_LATEST"
+  MCPB_PATH="$M_MCPB"; RELEASE_BODY="$M_BODY"; SHA256="$M_DMG_SHA"
+  info "커밋 $GIT_SHA · 버전 $VERSION_CONF 의 산출물 그대로 — 배포 단계로 간다"
+else
 
 # ── 2. 테스트 ───────────────────────────────────────────────────────────────
 if [[ $RUN_TESTS -eq 1 ]]; then
@@ -1095,6 +1134,21 @@ EOF
 EOF
   fi
 fi
+
+# 이어 배포(--resume-publish)가 쓸 지문 — 공증까지 한 깨끗한 빌드만(개발 71). 경로와 sha256 을 전부 박아 둔다.
+if [[ $IS_DIRTY -eq 0 && $NOTARIZE -eq 1 && $UNIVERSAL -eq 0 ]]; then
+  {
+    printf 'M_GIT=%q\n' "$(git rev-parse HEAD)"
+    printf 'M_VERSION=%q\n' "$VERSION_CONF"
+    for pair in "DMG:$DMG_PATH" "TAR:$UPDATER_TAR" "SIG:$UPDATER_SIG" "LATEST:$LATEST_JSON" "MCPB:$MCPB_PATH" "BODY:$RELEASE_BODY"; do
+      k="${pair%%:*}"; f="${pair#*:}"
+      printf 'M_%s=%q\n' "$k" "$f"
+      printf 'M_%s_SHA=%q\n' "$k" "$(shasum -a 256 "$f" | awk '{print $1}')"
+    done
+  } > "$MANIFEST_REL"
+fi
+
+fi # ← --resume-publish 가 아닐 때의 2~7 끝
 
 RELEASE_OK=1   # 여기까지 왔으면 산출물을 남긴다 (cleanup 이 이름을 안 바꾼다)
 
