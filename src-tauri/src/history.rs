@@ -27,8 +27,8 @@ fn history_guard() -> std::sync::MutexGuard<'static, ()> {
 /// 송금 시도 1건의 기록 — 형식의 정본은 `policy::HistoryEntry`(MCP·CLI 가 같은 타입으로 읽는다, 개발 57).
 pub(crate) use crate::policy::HistoryEntry;
 
-/// 거래 내역 최대 보관 개수 (오래된 건 자동으로 밀려난다).
-const HISTORY_CAP: usize = 200;
+/// 내역 본 파일이 품는 최신 기록 수 — 넘치면 보관 파일로 옮긴다(`policy::HISTORY_HOT_CAP`, 개발 70).
+const HISTORY_CAP: usize = crate::policy::HISTORY_HOT_CAP;
 
 /// 활성 계정(작업이 고정했으면 그 계정)의 내역 파일 (개발 54: 체인별 + 계정별).
 /// 내역은 주소의 것이다 — 계정 2 의 화면에 계정 1 의 송금이 보이면 안 된다.
@@ -56,21 +56,92 @@ fn history_unreadable(path: &PathBuf) -> bool {
     }
 }
 
-/// 저장된 거래 내역을 읽는다 (최신순으로 저장돼 있다).
-fn read_history() -> Vec<HistoryEntry> {
-    history_path()
-        .map(|p| read_history_at(&p))
-        .unwrap_or_default()
+/// 새 기록을 맨 앞에 넣고, cap 을 넘친 오래된 기록을 떼어 돌려준다 (순수 함수 — 파일 I/O 없음, 테스트용).
+/// 반환 = (본 파일에 남길 목록, 보관 파일로 옮길 기록 — 최신순).
+fn with_entry(
+    mut list: Vec<HistoryEntry>,
+    entry: HistoryEntry,
+    cap: usize,
+) -> (Vec<HistoryEntry>, Vec<HistoryEntry>) {
+    list.insert(0, entry);
+    let evicted = if list.len() > cap {
+        list.split_off(cap)
+    } else {
+        Vec::new()
+    };
+    (list, evicted)
 }
 
-/// 새 기록을 맨 앞에 넣고 최대 cap개로 자른다 (순수 함수 — 파일 I/O 없음, 테스트용).
-fn with_entry(mut list: Vec<HistoryEntry>, entry: HistoryEntry, cap: usize) -> Vec<HistoryEntry> {
-    list.insert(0, entry);
-    list.truncate(cap);
-    list
+/// 보관 파일에 쓸 줄들 — 넘겨받은 기록(최신순)을 **오래된 것부터** 한 줄씩. 순수 함수(테스트용).
+/// `last` = 보관 파일의 지금 마지막 줄. 그게 가장 먼저 쓸 기록과 같으면 그 기록은 뺀다 — 덧붙인 뒤 본 파일을
+/// 쓰기 전에 죽으면 그 기록이 본 파일에도 남아, 다음 번에 또 밀려나며 두 번 적힌다.
+fn archive_lines(evicted: &[HistoryEntry], last: Option<&HistoryEntry>) -> String {
+    let mut out = String::new();
+    let mut oldest_first = evicted.iter().rev().peekable();
+    if let (Some(first), Some(last)) = (oldest_first.peek(), last) {
+        if *first == last {
+            oldest_first.next();
+        }
+    }
+    for e in oldest_first {
+        if let Ok(line) = serde_json::to_string(e) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// 보관 파일의 마지막 기록 — 끝의 64KB 만 읽는다(보관 파일은 몇 MB 까지 커질 수 있다).
+fn archive_last(path: &std::path::Path) -> Option<HistoryEntry> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(64 * 1024)))
+        .ok()?;
+    let mut tail = String::new();
+    f.read_to_string(&mut tail).ok()?;
+    tail.lines()
+        .rev()
+        .find_map(|l| serde_json::from_str(l).ok())
+}
+
+/// 밀려난 기록을 보관 파일 끝에 덧붙인다. 한 번의 쓰기로(줄 사이에서 끊기지 않게).
+/// 앞선 쓰기가 줄 중간에 죽어 파일이 개행으로 안 끝나면 개행부터 — 새 줄이 반쪽 줄에 붙어 같이 버려지지 않게.
+fn append_archive(path: &std::path::Path, evicted: &[HistoryEntry]) -> Result<(), String> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut body = archive_lines(evicted, archive_last(path).as_ref());
+    if body.is_empty() {
+        return Ok(());
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .read(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    if len > 0 {
+        let mut last = [0u8; 1];
+        f.seek(SeekFrom::Start(len - 1))
+            .map_err(|e| e.to_string())?;
+        f.read_exact(&mut last).map_err(|e| e.to_string())?;
+        if last[0] != b'\n' {
+            body.insert(0, '\n');
+        }
+    }
+    f.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())
 }
 
 /// 송금 시도 1건을 내역에 추가한다. 실패해도 송금 흐름은 막지 않는다(로그는 부가 기능).
+///
+/// 🔴 (개발 70) 두 가지 조용한 유실을 막는다:
+/// - **200건 넘친 기록** — 예전엔 잘라 버렸다. 이제 보관 파일에 덧붙이고, 덧붙이기가 실패하면 **자르지 않는다**
+///   (본 파일이 잠시 200건을 넘을 뿐, 다음 기록 때 다시 옮긴다).
+/// - **깨진 본 파일** — 예전엔 빈 목록으로 읽고 새 한 건으로 덮어써 옛 기록을 통째로 지웠다(개발 69 입금 기록과 같은
+///   병). 이제 깨진 파일은 `….broken.<초>.json` 으로 옆에 치우고 새로 시작한다 — 기록은 멈추지 않고 옛 파일은 남는다.
+///   치우지도 못하면(권한 등) 이번 기록을 포기한다 — 덮어쓰는 것보다 낫다.
 pub(crate) fn log_attempt(token: &str, to: &str, amount: &str, status: &str, detail: &str) {
     let entry = HistoryEntry {
         ts: now_secs(),
@@ -82,8 +153,25 @@ pub(crate) fn log_attempt(token: &str, to: &str, amount: &str, status: &str, det
         settle_tx: String::new(),
     };
     let _g = history_guard();
-    let list = with_entry(read_history(), entry, HISTORY_CAP);
-    let _ = history_path().and_then(|p| write_json(p, &list));
+    let Ok(path) = history_path() else {
+        return;
+    };
+    let _ = record_at(&path, entry, HISTORY_CAP);
+}
+
+/// `log_attempt` 의 본체 — 경로를 받는다(테스트가 실지갑을 안 건드리게).
+fn record_at(path: &PathBuf, entry: HistoryEntry, cap: usize) -> Result<(), String> {
+    if history_unreadable(path) {
+        let aside = path.with_extension(format!("broken.{}.json", now_secs()));
+        fs::rename(path, &aside).map_err(|e| e.to_string())?;
+    }
+    let (mut list, evicted) = with_entry(read_history_at(path), entry, cap);
+    if !evicted.is_empty()
+        && append_archive(&crate::policy::history_archive_path(path), &evicted).is_err()
+    {
+        list.extend(evicted); // 옮기지 못했으면 자르지 않는다
+    }
+    write_json(path.clone(), &list)
 }
 
 /// detail 의 URL 을 가린다(출력용). 이번 패치 이전이 기록한 비redact 에러에 RPC URL·키가
@@ -97,12 +185,18 @@ fn redact_details(mut list: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
 
 /// 거래 내역을 최신순으로 돌려준다 — 보낸 기록에 **입금 기록**(개발 69)을 시각순으로 섞는다
 /// (`policy::merge_received` — MCP·CLI 와 같은 함수).
+///
+/// `limit` = 돌려줄 줄 수(화면의 「더 보기」가 늘린다, 개발 70). 보낸 기록은 본 파일 다음에 보관 파일까지 읽는다.
 #[tauri::command]
-pub(crate) fn get_history() -> Vec<HistoryEntry> {
-    crate::policy::merge_received(
-        redact_details(read_history()),
-        &crate::deposits::read_deposits(),
-    )
+pub(crate) fn get_history(limit: Option<usize>) -> Vec<HistoryEntry> {
+    let limit = limit.unwrap_or(HISTORY_CAP);
+    let sent = history_path()
+        .map(|p| crate::policy::read_sent_history(&p, limit))
+        .unwrap_or_default();
+    let mut list =
+        crate::policy::merge_received(redact_details(sent), &crate::deposits::read_deposits());
+    list.truncate(limit);
+    list
 }
 
 /// MCP가 기록한 정산 결과 1건. nonce 로 "signed" 내역과 매칭한다.
@@ -298,27 +392,112 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // 거래 내역: 최신 항목이 맨 앞에 오고 cap 개수로 잘린다.
+    fn entry(tag: &str) -> HistoryEntry {
+        HistoryEntry {
+            ts: 0,
+            token: "USDC".into(),
+            to: "0x0".into(),
+            amount: "1".into(),
+            status: "sent".into(),
+            detail: tag.into(),
+            settle_tx: String::new(),
+        }
+    }
+
+    fn temp_hot(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kura-hist-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("history-8453.json")
+    }
+
+    fn tags(list: &[HistoryEntry]) -> Vec<String> {
+        list.iter().map(|e| e.detail.clone()).collect()
+    }
+
+    /// 🔴 개발 70: 200건을 넘친 기록은 지워지지 않고 보관 파일로 간다 — 본 파일은 최신 cap 건, 나머지는 보관 파일에
+    /// 오래된 순으로, 둘을 이어 읽으면 빠짐없이 최신순.
     #[test]
-    fn history_caps_and_orders_newest_first() {
-        fn entry(tag: &str) -> HistoryEntry {
-            HistoryEntry {
-                ts: 0,
-                token: "USDC".into(),
-                to: "0x0".into(),
-                amount: "1".into(),
-                status: "sent".into(),
-                detail: tag.into(),
-                settle_tx: String::new(),
-            }
+    fn overflow_moves_to_archive_without_loss() {
+        let hot = temp_hot("overflow");
+        for i in 0..7 {
+            record_at(&hot, entry(&i.to_string()), 3).unwrap();
         }
-        let mut list: Vec<HistoryEntry> = Vec::new();
+        assert_eq!(tags(&read_history_at(&hot)), ["6", "5", "4"]);
+        let raw = fs::read_to_string(crate::policy::history_archive_path(&hot)).unwrap();
+        assert_eq!(raw.lines().count(), 4, "{raw}");
+        assert_eq!(
+            tags(&crate::policy::read_sent_history(&hot, 100)),
+            ["6", "5", "4", "3", "2", "1", "0"]
+        );
+        // 본 파일로 충분하면 딱 그만큼, 모자라면 보관 파일에서 이어서.
+        assert_eq!(tags(&crate::policy::read_sent_history(&hot, 2)), ["6", "5"]);
+        assert_eq!(
+            tags(&crate::policy::read_sent_history(&hot, 5)),
+            ["6", "5", "4", "3", "2"]
+        );
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
+    }
+
+    /// 덧붙인 뒤 본 파일을 쓰기 전에 죽은 경우 — 같은 기록이 본 파일 끝과 보관 파일 끝에 다 있다. 다음 번에 또
+    /// 밀려나도 두 번 적히지 않는다. 쓰다 죽은 반쪽 줄은 건너뛰고, 그 뒤에 붙인 줄은 살아 있다.
+    #[test]
+    fn crash_between_append_and_write_does_not_duplicate() {
+        let hot = temp_hot("crash");
+        for i in 0..4 {
+            record_at(&hot, entry(&i.to_string()), 3).unwrap();
+        }
+        // 본 파일 = [3,2,1], 보관 = [0]. 「1」 을 보관 파일에 덧붙이고 죽었다고 치자.
+        let archive = crate::policy::history_archive_path(&hot);
+        let mut raw = fs::read_to_string(&archive).unwrap();
+        raw.push_str(&serde_json::to_string(&entry("1")).unwrap());
+        raw.push('\n');
+        fs::write(&archive, &raw).unwrap();
+        record_at(&hot, entry("4"), 3).unwrap();
+        assert_eq!(
+            tags(&crate::policy::read_sent_history(&hot, 100)),
+            ["4", "3", "2", "1", "0"]
+        );
+        // 반쪽 줄(개행 없이 끝남) 뒤에 덧붙여도 새 줄은 멀쩡하다.
+        let mut raw = fs::read_to_string(&archive).unwrap();
+        raw.push_str(r#"{"ts":0,"tok"#);
+        fs::write(&archive, &raw).unwrap();
+        record_at(&hot, entry("5"), 3).unwrap();
+        assert_eq!(
+            tags(&crate::policy::read_sent_history(&hot, 100)),
+            ["5", "4", "3", "2", "1", "0"]
+        );
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
+    }
+
+    /// 🔴 개발 70: 깨진 본 파일을 빈 목록으로 읽고 덮어쓰지 않는다 — 옆으로 치우고 새로 시작.
+    #[test]
+    fn broken_history_is_set_aside_not_overwritten() {
+        let hot = temp_hot("broken");
+        fs::write(&hot, "[{\"ts\":1,").unwrap();
+        record_at(&hot, entry("new"), 3).unwrap();
+        assert_eq!(tags(&read_history_at(&hot)), ["new"]);
+        let aside: Vec<_> = fs::read_dir(hot.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".broken."))
+            .collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(fs::read_to_string(aside[0].path()).unwrap(), "[{\"ts\":1,");
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
+    }
+
+    /// 보관 파일에 못 쓰면 자르지 않는다 — 본 파일이 cap 을 넘길 뿐 잃지 않는다.
+    #[test]
+    fn archive_failure_keeps_everything_in_hot() {
+        let hot = temp_hot("nofail");
+        // 보관 파일 자리에 디렉터리 = 열 수 없다.
+        fs::create_dir_all(crate::policy::history_archive_path(&hot)).unwrap();
         for i in 0..5 {
-            list = with_entry(list, entry(&i.to_string()), 3);
+            record_at(&hot, entry(&i.to_string()), 3).unwrap();
         }
-        assert_eq!(list.len(), 3);
-        assert_eq!(list[0].detail, "4"); // 마지막에 넣은 게 맨 앞
-        assert_eq!(list[2].detail, "2"); // 가장 오래된 2건은 밀려남
+        assert_eq!(tags(&read_history_at(&hot)), ["4", "3", "2", "1", "0"]);
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
     }
 
     // 거래 내역 항목 JSON 왕복 (한글 사유 포함).

@@ -1088,8 +1088,8 @@ mod tests {
         let dir = home.join(".jigap");
         assert!(dir.join("history-a1.json").exists());
         assert!(dir.join("history.json").exists());
-        assert_eq!(crate::history::get_history().len(), 1); // 활성 0 의 눈엔 자기 것 하나
-        let seen = with_pinned_account(1, async { crate::history::get_history().len() }).await;
+        assert_eq!(crate::history::get_history(None).len(), 1); // 활성 0 의 눈엔 자기 것 하나
+        let seen = with_pinned_account(1, async { crate::history::get_history(None).len() }).await;
         assert_eq!(seen, 1);
 
         // ⑨ 정산 교차 반영: 활성은 0 인데 정산은 계정 1 이 서명한 nonce → 1 의 파일이 갱신된다.

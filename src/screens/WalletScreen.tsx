@@ -50,6 +50,9 @@ import { t } from "@/lib/i18n";
 
 type Mode = "balance" | "receive" | "send";
 
+
+/** 내역 화면이 한 번에 읽는 줄 수(개발 70). */
+const HISTORY_PAGE = 200;
 export function WalletScreen({
   address,
   initialBackedUp,
@@ -105,9 +108,23 @@ export function WalletScreen({
   // 활성 체인 — settings.chain_id 로 파생(미로드 시 메인넷 = 신규 기본, 개발 39). ChainProvider 로 내려준다.
   const chain = chainFromId(settings?.chain_id);
 
+  // 내역은 한 번에 HISTORY_PAGE 줄씩 — 「더 보기」가 늘린다(개발 70: 200건을 넘친 기록도 보관 파일에 남는다).
+  // 여러 곳이 부르는 loadHistory 가 늘 지금 줄 수로 읽게 ref 로 들고, 버튼 표시는 state 로 다시 그린다.
+  const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE);
+  const historyLimitRef = useRef(HISTORY_PAGE);
   const loadHistory = useCallback(() => {
-    invoke<HistoryEntry[]>("get_history").then(setHistory).catch(() => {});
+    invoke<HistoryEntry[]>("get_history", { limit: historyLimitRef.current })
+      .then(setHistory)
+      .catch(() => {});
   }, []);
+  const setHistoryPage = useCallback(
+    (limit: number) => {
+      historyLimitRef.current = limit;
+      setHistoryLimit(limit);
+      loadHistory();
+    },
+    [loadHistory],
+  );
 
   // 긴급 잠금 토글. 켜면 안전을 위해 보내기 화면도 닫는다.
   const toggleLock = useCallback(async () => {
@@ -446,7 +463,15 @@ export function WalletScreen({
   // 거래 내역 화면.
   if (showHistory) {
     return withModal(
-      <HistoryScreen entries={history} onClose={() => setShowHistory(false)} />,
+      <HistoryScreen
+        entries={history}
+        onMore={
+          history && history.length >= historyLimit
+            ? () => setHistoryPage(historyLimit + HISTORY_PAGE)
+            : undefined
+        }
+        onClose={() => setShowHistory(false)}
+      />,
     );
   }
 
@@ -514,7 +539,7 @@ export function WalletScreen({
             </HeaderIconButton>
             <HeaderIconButton
               onClick={() => {
-                loadHistory();
+                setHistoryPage(HISTORY_PAGE);
                 setShowHistory(true);
               }}
               label={t("거래 내역", "History")}

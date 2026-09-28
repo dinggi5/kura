@@ -286,16 +286,19 @@ pub use crate::policy::HistoryEntry;
 ///
 /// 입금 기록(개발 69 — GUI 가 체인에서 찾아 적는다)도 시각순으로 섞는다. GUI 내역 화면과 **같은 함수**
 /// (`policy::merge_received`) — AI 가 「돈이 들어왔나」를 물을 때 화면과 다른 답을 하지 않게.
-pub fn read_history() -> Vec<HistoryEntry> {
+///
+/// `limit` = 돌려줄 줄 수. 보낸 기록은 본 파일(최신 200건) 다음에 **보관 파일**까지 읽는다(개발 70 — 예전엔
+/// 200건을 넘친 기록이 지워져서 여기서도 200건이 끝이었다). 보관 파일은 본 파일이 모자랄 때만 연다.
+pub fn read_history(limit: usize) -> Vec<HistoryEntry> {
     let mut entries: Vec<HistoryEntry> = history_path()
-        .ok()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .map(|p| crate::policy::read_sent_history(&p, limit))
         .unwrap_or_default();
     for e in &mut entries {
         e.detail = redact_urls(&e.detail);
     }
-    crate::policy::merge_received(entries, &read_deposits())
+    let mut list = crate::policy::merge_received(entries, &read_deposits());
+    list.truncate(limit);
+    list
 }
 
 /// 활성 계정의 입금 기록 — 파일의 주인 주소가 활성 계정과 같을 때만(`policy::deposits_of`).

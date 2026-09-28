@@ -208,9 +208,7 @@ impl WalletServer {
         &self,
         Parameters(args): Parameters<HistoryArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let mut list = wallet::read_history();
-        let limit = args.limit.unwrap_or(20);
-        list.truncate(limit);
+        let list = wallet::read_history(args.limit.unwrap_or(20));
         json_result(&list)
     }
 

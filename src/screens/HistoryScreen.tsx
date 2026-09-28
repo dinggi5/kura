@@ -22,9 +22,12 @@ import { t } from "@/lib/i18n";
 
 export function HistoryScreen({
   entries,
+  onMore,
   onClose,
 }: {
   entries: HistoryEntry[] | null;
+  /** 더 오래된 기록이 있을 수 있을 때만(읽어 온 줄이 요청한 만큼 꽉 찼다). */
+  onMore?: () => void;
   onClose: () => void;
 }) {
   return (
@@ -65,11 +68,22 @@ export function HistoryScreen({
             </p>
           </div>
         ) : (
-          <ul className="divide-y divide-[var(--color-ivory-300)] dark:divide-[var(--color-night-700)]">
-            {entries.map((e, i) => (
-              <HistoryRow key={`${e.ts}-${i}`} entry={e} />
-            ))}
-          </ul>
+          <>
+            <ul className="divide-y divide-[var(--color-ivory-300)] dark:divide-[var(--color-night-700)]">
+              {entries.map((e, i) => (
+                <HistoryRow key={`${e.ts}-${i}`} entry={e} />
+              ))}
+            </ul>
+            {onMore && (
+              <button
+                type="button"
+                onClick={onMore}
+                className="mt-2 w-full py-3 text-[12px] text-[var(--color-ink-500)] hover:text-[var(--color-ink-900)] dark:hover:text-[#E8E5DD] transition-colors"
+              >
+                {t("더 보기", "Show more")}
+              </button>
+            )}
+          </>
         )}
       </motion.section>
 

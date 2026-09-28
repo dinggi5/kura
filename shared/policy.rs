@@ -305,7 +305,7 @@ pub fn pick_active(list: &[Account], active: u32) -> Account {
 
 /// 송금 시도 1건의 기록(감사 로그) — GUI 가 history 파일에 쓰고 MCP·CLI 가 그대로 읽는다.
 /// 성공/차단/실패를 모두 남긴다. 필드를 더할 땐 `#[serde(default)]` 를 붙여 옛 기록이 계속 읽히게 한다.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct HistoryEntry {
     /// 유닉스 초.
     pub ts: u64,
@@ -324,6 +324,45 @@ pub struct HistoryEntry {
     /// x402 정산 tx 해시(페이실리테이터가 온체인 제출). 정산 전엔 빈 문자열. (Session 14)
     #[serde(default)]
     pub settle_tx: String,
+}
+
+/// history 파일이 품는 최신 기록 수 — 넘치면 오래된 것부터 **보관 파일로 옮긴다**(개발 70).
+/// 예전엔 그냥 잘라 버렸다: 201번째 송금부터 가장 오래된 기록이 조용히 사라졌다.
+/// 본 파일을 이 크기로 묶어 두는 이유 = 송금마다 통째로 읽고 쓰는 파일이라(정산 반영도 1초마다 읽는다).
+pub const HISTORY_HOT_CAP: usize = 200;
+
+/// history 파일 옆의 보관 파일 — `history-8453-a1.json` → `history-8453-a1.archive.jsonl`.
+/// 한 줄에 한 건, **오래된 것부터** 덧붙인다(덧붙이기라 몇만 건이 쌓여도 송금 한 번에 드는 쓰기는 한 줄).
+/// 옛 빌드(0.4.2 이하의 MCP·CLI)는 이 파일을 모른다 — 본 파일 형식이 그대로라 최신 200건은 계속 읽는다.
+pub fn history_archive_path(hot: &Path) -> PathBuf {
+    hot.with_extension("archive.jsonl")
+}
+
+/// 보관 파일의 기록(최신순). 없으면 빈 목록. 못 읽는 줄(덧붙이다 죽은 마지막 줄)은 건너뛴다.
+pub fn read_history_archive(path: &Path) -> Vec<HistoryEntry> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut list: Vec<HistoryEntry> = raw
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    list.reverse();
+    list
+}
+
+/// 보낸 기록 중 최신 `want` 건(최신순) — 본 파일 다음에 보관 파일. 보관 파일은 본 파일이 모자랄 때만 연다.
+/// 본 파일을 못 읽으면 빈 목록(예전과 같다 — 보여 줄 게 없을 뿐 지우지 않는다).
+pub fn read_sent_history(hot: &Path, want: usize) -> Vec<HistoryEntry> {
+    let mut list: Vec<HistoryEntry> = std::fs::read_to_string(hot)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if list.len() < want {
+        list.extend(read_history_archive(&history_archive_path(hot)));
+    }
+    list.truncate(want);
+    list
 }
 
 // ── 입금 기록 (개발 69) ─────────────────────────────────────────────────────────────────────────
@@ -377,7 +416,7 @@ pub fn deposits_of(path: &Path, address: &str) -> Vec<Deposit> {
 }
 
 /// 입금 1건을 내역의 한 줄로 — `status = "received"`, 보낸 주소는 `to` 자리에, 해시는 `detail` 에.
-/// (history 파일에 섞어 쓰지 않는다: 그 파일은 보낸 기록이고 200건 상한이 있다.)
+/// (history 파일에 섞어 쓰지 않는다: 그 파일은 보낸 기록이다.)
 pub fn deposit_as_history(d: &Deposit) -> HistoryEntry {
     HistoryEntry {
         ts: d.ts,

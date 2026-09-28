@@ -27,7 +27,7 @@ Kura — AI 에이전트 전용 로컬 지갑 CLI
 사용법:
   kura status                  지갑 상태와 주소
   kura balance                 ETH(가스) · USDC(결제) 잔액
-  kura history [--limit N]     최근 거래 내역 (기본 20, 최대 200)
+  kura history [--limit N]     최근 거래 내역 (기본 20)
   kura pay <주소> <금액> [옵션]    결제(송금) 요청 → 지갑 앱에서 비번 승인
        --token USDC|ETH        토큰 (기본 USDC)
        --memo \"사유\"            승인 팝업에 보일 결제 사유
@@ -49,7 +49,7 @@ Kura — a local wallet CLI for AI agents
 Usage:
   kura status                     wallet state and address
   kura balance                    ETH (gas) · USDC (payments) balances
-  kura history [--limit N]        recent transactions (default 20, max 200)
+  kura history [--limit N]        recent transactions (default 20)
   kura pay <address> <amount>     ask to pay → approve with your password in the app
        --token USDC|ETH           token (USDC by default)
        --memo \"reason\"            what the payment is for, shown in the approval window
@@ -297,7 +297,7 @@ async fn cmd_balance(cli: &Cli) -> Result<(), String> {
 }
 
 async fn cmd_history(cli: &Cli) -> Result<(), String> {
-    // 저장소가 최대 200건만 보관 → help 와 일치하게 200 으로 클램프(그 이상은 보여줄 게 없다).
+    // 상한 없음 — 200건을 넘친 기록도 보관 파일에 남는다(개발 70, 예전엔 200 으로 클램프했다).
     let limit = match cli.opts.get("limit") {
         Some(v) => v
             .parse::<usize>()
@@ -306,12 +306,10 @@ async fn cmd_history(cli: &Cli) -> Result<(), String> {
                     "--limit 은 0 이상의 정수여야 해요: {v}",
                     "--limit must be a whole number, 0 or more: {v}"
                 )
-            })?
-            .min(200),
+            })?,
         None => 20,
     };
-    let mut list = wallet::read_history();
-    list.truncate(limit);
+    let list = wallet::read_history(limit);
     if cli.json {
         print_json(&list)?;
         return Ok(());

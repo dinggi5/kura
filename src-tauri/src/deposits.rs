@@ -628,11 +628,14 @@ async fn scan_with(
         .map_err(|e| crate::settings::redact_urls(&e.to_string()))?;
     let tip = head.saturating_sub(CONFIRMATIONS);
 
+    // 기록 파일의 주인을 **매 차례** 맞춘다 — 새 입금이 없어도 옛 주소의 기록이 화면에 남지 않고, 돌아온 주소는
+    // 보관분을 바로 되찾게. 주인이 같으면 파일 하나 읽고 끝난다.
+    // 🔴 한때 아래 「커서 새로 만들기」 안에서만 불렀다(코덱스 개발 69 3차 P2) — 주소를 바꾼 차례에 바닥 블록 찾기나
+    // 커서 저장이 실패하고 곧장 원래 주소로 돌아오면, 커서는 이미 원래 주소의 것이라 다시 안 불려 보관분을 못 되찾았다.
+    claim_owner(&dp, &address)?;
     let mut st: ScanState = read_json(&sp);
     if !st.address.eq_ignore_ascii_case(&address) || st.logs.high == 0 {
-        // 처음이거나 다른 주소의 커서 — 지금 끝에서 시작해 90일 전까지 거꾸로. 기록 파일의 주인도 지금 맞춘다
-        // (새 입금이 없어도 옛 주소의 기록이 화면에 남지 않고, 돌아온 주소는 보관분을 바로 되찾게).
-        claim_owner(&dp, &address)?;
+        // 처음이거나 다른 주소의 커서 — 지금 끝에서 시작해 90일 전까지 거꾸로.
         let floor = floor_block(&mut rpc, tip).await?;
         st = ScanState {
             address: address.clone(),
