@@ -359,9 +359,9 @@ export function SettingsScreen({
                     onToggle={() => toggle("notify_hide_amount")}
                   />
                 )}
-                {/* 자율 결제 화이트리스트 (Session 16) — 처음 보는 주소는 자율 대상에서 제외 */}
+                {/* 자율 결제 신뢰 주소 (Session 16) — 처음 보는 주소는 자율 대상에서 제외 */}
                 <ToggleRow
-                  title={t("자율 결제 화이트리스트", "Autopay allowlist")}
+                  title={t("신뢰 주소에만 자율 결제", "Autopay to trusted addresses only")}
                   desc={t(
                     "비번으로 승인한 적 있는 주소에만 자율 결제를 허용해요. 새 주소는 첫 결제만 비번이 필요해요.",
                     "Autopay only goes to addresses you've approved with your password before. A new address needs your password once.",
@@ -369,10 +369,10 @@ export function SettingsScreen({
                   checked={s.auto_trusted_only}
                   onToggle={() => toggle("auto_trusted_only")}
                 />
-                {/* 화이트리스트 주소 (Session 17) — 목록은 모달로 (많아지면 설정이 길어지니) */}
+                {/* 신뢰 주소 목록 (Session 17) — 목록은 모달로 (많아지면 설정이 길어지니) */}
                 <div className="flex items-center justify-between px-4 py-3.5">
                   <div className="min-w-0 pr-3">
-                    <p className="text-[13px] tracking-tight">{t("화이트리스트 주소", "Allowed addresses")}</p>
+                    <p className="text-[13px] tracking-tight">{t("신뢰 주소", "Trusted addresses")}</p>
                     <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-ink-300)]">
                       {trusted === null
                         ? t("불러오는 중…", "Loading…")
@@ -407,8 +407,8 @@ export function SettingsScreen({
             >
               <p className="text-[13px] leading-relaxed text-[var(--color-ink-500)]">
                 {t(
-                  "잔액·결제가 이뤄지는 블록체인이에요. 메인넷은 실제 자금이 오가고, 테스트넷은 가짜 코인으로 연습해요. 체인별로 한도·사용액·내역·화이트리스트가 따로 관리돼요.",
-                  "The blockchain your balance and payments live on. Mainnet moves real funds; the testnet is practice with fake coins. Limits, spending, history, and the allowlist are kept per chain.",
+                  "잔액·결제가 이뤄지는 블록체인이에요. 메인넷은 실제 자금이 오가고, 테스트넷은 가짜 코인으로 연습해요. 체인별로 한도·사용액·내역·신뢰 주소가 따로 관리돼요.",
+                  "The blockchain your balance and payments live on. Mainnet moves real funds; the testnet is practice with fake coins. Limits, spending, history, and trusted addresses are kept per chain.",
                 )}
               </p>
               <div className="mt-4 grid grid-cols-2 gap-2">
@@ -742,7 +742,7 @@ function TrustedAddrsModal({
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5 text-[11px] tracking-[0.04em] text-[var(--color-accent)]">
             <ShieldCheck size={13} />
-            {t("화이트리스트 주소", "Allowed addresses")}
+            {t("신뢰 주소", "Trusted addresses")}
           </span>
           <button
             type="button"
@@ -806,7 +806,7 @@ function TrustedAddrsModal({
                       `${shortenAddress(addr)} 철회`,
                       `Remove ${shortenAddress(addr)}`,
                     )}
-                    title={t("화이트리스트에서 철회", "Remove from the allowlist")}
+                    title={t("신뢰 주소에서 철회", "Remove from trusted addresses")}
                     className="shrink-0 p-1 rounded-md text-[var(--color-ink-300)] hover:text-red-500 transition-colors"
                   >
                     <Trash2 size={13} />

@@ -14,7 +14,7 @@
   <header>
     <div class="eyebrow">Kura</div>
     <h1>개인정보 처리방침</h1>
-    <p class="meta">최종 수정 2026년 8월 20일 · 0.1.2 이상에 적용</p>
+    <p class="meta">최종 수정 2026년 9월 29일 · 0.1.2 이상에 적용</p>
   </header>
 
   <p class="lede">Kura는 개인정보를 <strong>수집하지 않습니다.</strong> 계정도, 서버도, 분석 도구도
@@ -25,7 +25,8 @@
   <ul>
     <li><code>wallet.enc</code> — 비밀번호로 암호화된 개인키·복구 문구</li>
     <li><code>settings.json</code> — 네트워크·한도·RPC 주소 등 설정</li>
-    <li>거래 시도 내역, x402 정산 기록, 일일 사용액, 대기 중인 결제 요청 파일</li>
+    <li>거래 시도 내역(오래된 것은 보관 파일로), x402 정산 기록, 일일 사용액, 대기 중인 결제 요청 파일</li>
+    <li>지갑이 직접 제출한 x402 결제의 증거 — 콘텐츠를 못 받았을 때 다시 내기 위해 7일 보관</li>
   </ul>
   <p>비밀번호와 12단어 복구 문구는 <strong>앱의 입력칸에서만</strong> 다룹니다. 대화창·MCP·설정
   파일 어디에도 들어가지 않습니다.</p>
@@ -57,7 +58,8 @@
 
   <p>이 셋 말고는 없습니다. 텔레메트리·사용 통계·크래시 리포트·광고·추적기가 없고, 글꼴을 비롯한
   자원은 앱 안에 담겨 있어 실행 중에 외부 CDN을 부르지 않습니다.</p>
-  <p class="meta">거래 내역의 링크를 누르면 기본 브라우저로 블록 탐색기(basescan.org)가 열립니다.
+  <p class="meta">거래 내역의 링크를 누르면 기본 브라우저로 그 네트워크의 블록 탐색기(Base는
+  basescan.org, Arc는 explorer.arc.io)가 열립니다.
   그 시점부터는 브라우저와 그 사이트의 영역입니다.</p>
 
   <h2>제3자 제공</h2>
@@ -94,8 +96,9 @@
 
   <h2>English</h2>
   <p><strong>Kura collects nothing.</strong> No accounts, no servers, no analytics, no telemetry, no
-  crash reporting, no ads, no trackers. Wallet data — the encrypted key file, settings, and history —
-  lives only in <code>~/.jigap</code> on your Mac. Your password and 12-word recovery phrase are
+  crash reporting, no ads, no trackers. Wallet data — the encrypted key file, settings, history, and
+  the proofs of x402 payments the wallet broadcast itself (kept 7 days, to resend if the content
+  didn't arrive) — lives only in <code>~/.jigap</code> on your Mac. Your password and 12-word recovery phrase are
   entered in the app alone and are never stored elsewhere or transmitted.</p>
   <p>Three connections leave your machine. <strong>(1) An RPC server for the network you chose</strong>, to read balances, find incoming
   payments (while the app runs, even with its window closed, and once back 90 days), and broadcast transactions — it can see your IP and wallet address, and transactions are permanently

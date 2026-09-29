@@ -22,7 +22,7 @@ On a Mac, when an AI like Claude pays for something online (x402), Kura is the w
 [ Kura desktop app ]  ← approval window → the human types their password
         │  signs (the key stays inside this app)
         ▼
-[ Base chain / x402 facilitator ]  ← the actual payment
+[ Base · Arc chain / x402 ]  ← the actual payment
 ```
 
 Your password is typed **in the Kura app alone**. It never enters a chat window, MCP, or a config file.
@@ -110,15 +110,16 @@ If you run that last `rm -rf ~/.jigap` without your 12 words, **nobody can recov
 To pay for anything, the wallet needs **USDC** — a digital dollar.
 
 - Press **Receive** in the app to see your address and its QR code.
-- Sending from an exchange or another wallet? You must pick the **Base network**. A different network loses the funds.
+- Sending from an exchange or another wallet? Pick **the network named on the Receive screen** (Base or Arc). A different network loses the funds.
 - **Mainnet (the default) is real money** — top up only what the agent needs to spend. To practice first, switch to the **testnet** in settings and use the Faucet buttons on the Receive screen for free test coins.
-- **ETH is optional** — with x402 the facilitator covers the fee, so a zero ETH balance is fine. Only a direct transfer from the app's **Send** screen needs a little ETH for gas (Base fees run around a cent). Topping up USDC alone is enough.
+- **On Base, ETH is optional** — with x402 the facilitator covers the fee, so a zero ETH balance is fine. Only a direct transfer from the app's **Send** screen needs a little ETH for gas (around a cent).
+- **On Arc, USDC is all you need** — gas is USDC too, so transfers and x402 payments alike take their fee from the USDC balance.
 
 ---
 
 ## Connecting an AI (Claude)
 
-Register the Kura server in your AI app's **MCP settings** and they're connected — the main screen then shows a **"Claude connected"** badge. Since 0.1.2 the **MCP server ships inside the app**, so there's no repo to clone and no Rust to install.
+Register the Kura server in your AI app's **MCP settings** and they're connected — the main screen then shows a **"Claude connected"** badge. The **MCP server ships inside the app**, so there's no repo to clone and no Rust to install.
 
 ### The easy way — the app's "Connect an AI" screen
 
@@ -180,6 +181,8 @@ Tools the AI gets: `get_wallet_status` · `get_balances` · `get_history` (read 
 3. You type your password and approve.
 4. The payment goes out and the result goes back to the AI. **No approval within 5 minutes and it's rejected automatically.**
 
+If the wallet can't confirm right away that a payment reached the chain, the history shows it as **unconfirmed**. The app rechecks it on-chain and turns it into **sent** or **reverted** (no money moved, only the fee). The AI is told, too, not to pay again on its own in that case but to tell you.
+
 ---
 
 ## Security model
@@ -187,8 +190,9 @@ Tools the AI gets: `get_wallet_status` · `get_balances` · `get_history` (read 
 - **Password approval** — by default every payment waits for your password (autopay, below, is the one exception). The key is stored encrypted (Argon2id + AES-256-GCM), decrypted only to pay, and wiped right after (with an autopay session on, it stays in memory only while unlocked).
 - **Limits** — you set how much can go out per payment and per day (5 and 20 USDC by default). Anything over is blocked.
 - **Emergency lock** — the shield button in the header blocks every payment at once.
-- **Trusted addresses · autopay** — approving without a password needs all three: *an unlocked session, an amount under the small limit, and an address you've approved before*. Everything else asks.
-- **History** — every payment received or sent, attempt blocked, and signature made is recorded. Incoming payments are found straight from the RPC (the first time, going back 90 days).
+- **Trusted addresses · autopay** — approving without a password needs all three: *an unlocked session, an amount under the small limit, and an address you've approved before*. Everything else asks. The same amount to the same place **again within 10 minutes** asks a human even under autopay.
+- **Several accounts** — one set of twelve words can hold several accounts. The AI sees only the one you've picked, and only you switch accounts, in the app.
+- **History** — every payment received or sent, attempt blocked, and signature made is recorded. Incoming payments are found straight from the RPC (the first time, going back 90 days). Entries whose outcome was uncertain are rechecked on-chain, and money that never left — reverted or expired — goes back into that day's limit if it's still the same day.
 - **Local first** — the key (`~/.jigap/`) lives outside the repo and is never committed.
 - **No analytics, no font CDN** — the app reaches the internet in exactly three places: ① the RPC server used to read balances, find incoming payments, and send payments, ② the x402 URL the AI asked for, and ③ the update check on GitHub. Nothing about your usage is sent anywhere, and the typeface ships inside the app, so the UI renders fine offline.
 - **The update check can be turned off** — on launch the app asks GitHub whether a newer version exists (your IP and current version show up there). Turn off **Settings → About → Check at startup** and that request stops too. Either way, **installing is always your press** — nothing changes behind your back.
@@ -239,8 +243,8 @@ Building a release (a signed, notarized DMG) is written up in **[docs/RELEASE.md
 |---|---|
 | Desktop | Tauri (Rust + web frontend) |
 | Frontend | React + Tailwind CSS, Framer Motion, Lucide, Pretendard |
-| Chain | Base / alloy-rs |
-| Payments | x402 (EIP-3009 off-chain signatures) |
+| Chain | Base · Arc / alloy-rs |
+| Payments | x402 (EIP-3009 signatures — a facilitator settles on Base, the wallet broadcasts on Arc) |
 | AI connection | MCP server (rmcp) |
 
 Shape: `[Rust core (src-tauri)] ← MCP / CLI adapters (kura-mcp)`. Only the GUI process can reach the key to sign — that's the last line of defense.

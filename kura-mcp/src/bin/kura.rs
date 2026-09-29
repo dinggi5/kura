@@ -4,7 +4,7 @@
 // (kura_mcp::{wallet, flow, payment, chain})을 공유하므로 결제·보안 로직이 한 벌이다(분기 없음).
 //
 // 핵심 보안: 비밀번호는 절대 CLI/인자로 받지 않는다. 결제(pay/fetch)는 지갑 앱(GUI)이 팝업으로
-// 사람 승인을 받아야만 실행된다. 한도·긴급잠금·화이트리스트는 앱이 강제한다.
+// 사람 승인을 받아야만 실행된다. 한도·긴급잠금·신뢰 주소는 앱이 강제한다.
 //
 // 읽기 명령(status/balance/history)은 비번 없이 즉시. 결제 명령은 GUI 승인을 최대 5분 기다린다.
 
@@ -26,7 +26,7 @@ Kura — AI 에이전트 전용 로컬 지갑 CLI
 
 사용법:
   kura status                  지갑 상태와 주소
-  kura balance                 ETH(가스) · USDC(결제) 잔액
+  kura balance                 USDC(결제) · 가스 잔액 (Arc 는 가스도 USDC)
   kura history [--limit N]     최근 거래 내역 (기본 20)
   kura pay <주소> <금액> [옵션]    결제(송금) 요청 → 지갑 앱에서 비번 승인
        --token USDC|ETH        토큰 (기본 USDC)
@@ -41,14 +41,14 @@ Kura — AI 에이전트 전용 로컬 지갑 CLI
 
 보안: 비밀번호는 절대 CLI 로 받지 않습니다. 결제는 기본값으로 지갑 앱이 팝업으로 사람 승인을
 받아야 실행되고(최대 5분 대기; 앱에서 자율 결제를 켠 경우만 그 한도 안에서 자동 승인),
-단일/일일 한도·긴급잠금·화이트리스트는 앱이 강제합니다.";
+단일/일일 한도·긴급잠금·신뢰 주소는 앱이 강제합니다.";
 
 const HELP_EN: &str = "\
 Kura — a local wallet CLI for AI agents
 
 Usage:
   kura status                     wallet state and address
-  kura balance                    ETH (gas) · USDC (payments) balances
+  kura balance                    USDC (payments) and gas balances (on Arc, gas is USDC too)
   kura history [--limit N]        recent transactions (default 20)
   kura pay <address> <amount>     ask to pay → approve with your password in the app
        --token USDC|ETH           token (USDC by default)
@@ -64,7 +64,7 @@ Global options:
 Security: this CLI never takes your password. By default a payment only goes out after you
 approve it in the wallet app (it waits up to 5 minutes; automatic approval happens only within
 the limit you set if you turned autopay on), and the app enforces the per-payment and daily
-limits, the emergency lock, and the allowlist.";
+limits, the emergency lock, and trusted addresses.";
 
 /// 도움말은 사람이 읽는 화면이라 언어를 탄다. 상수는 두 벌로 두고 여기서 고른다.
 fn help() -> &'static str {

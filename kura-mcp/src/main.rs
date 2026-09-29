@@ -179,10 +179,12 @@ impl WalletServer {
     }
 
     #[tool(
+        title = "Wallet status",
         description = "Returns the wallet's state and address. state is encrypted (normal), legacy, or none. \
         address is the ACTIVE account's address; accounts lists every account in the wallet (index, address, \
         label) and account is the active index. Balances, history, and payment requests all use the active \
-        account, and only the user can switch accounts, in the wallet app. No password needed — read only."
+        account, and only the user can switch accounts, in the wallet app. No password needed — read only.",
+        annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn get_wallet_status(&self) -> Result<CallToolResult, McpError> {
         let status = wallet::wallet_status().map_err(|e| McpError::internal_error(e, None))?;
@@ -190,7 +192,9 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "Reads the active account's USDC (for payments) and gas-token balances on the active network (Base mainnet, Arc mainnet, Base Sepolia, or Arc testnet, per the user's setting). The `eth` field is the gas balance and is ABSENT on chains where gas is paid in USDC itself (Arc) — there the USDC balance already covers gas, so never add the two together. Errors if there is no wallet."
+        title = "Balances",
+        description = "Reads the active account's USDC (for payments) and gas-token balances on the active network (Base mainnet, Arc mainnet, Base Sepolia, or Arc testnet, per the user's setting). The `eth` field is the gas balance and is ABSENT on chains where gas is paid in USDC itself (Arc) — there the USDC balance already covers gas, so never add the two together. Errors if there is no wallet.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn get_balances(&self) -> Result<CallToolResult, McpError> {
         let status = wallet::wallet_status().map_err(|e| McpError::internal_error(e, None))?;
@@ -204,6 +208,7 @@ impl WalletServer {
     }
 
     #[tool(
+        title = "History",
         description = "Returns the active account's recent transaction attempts, newest first. status is one of sent, blocked, failed, \
         signed (x402 signed, awaiting settlement), settled (x402 settled, settle_tx is the settlement tx), \
         settle_failed, unknown (a signed transaction was submitted but the wallet couldn't confirm the \
@@ -212,7 +217,8 @@ impl WalletServer {
         reverted (mined but reverted on-chain — no money moved, only gas), expired (an x402 signature that was \
         never used before it expired — no money moved), or received (money that came in — to is the sender, detail the tx hash; both are \
         empty for ETH a contract sent; found on-chain by the wallet app while it runs, back to 90 days). \
-        Use limit to cap how many come back (default 20)."
+        Use limit to cap how many come back (default 20).",
+        annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn get_history(
         &self,
@@ -223,6 +229,7 @@ impl WalletServer {
     }
 
     #[tool(
+        title = "Request a payment",
         description = "Asks the user to make a payment. The wallet app opens an approval window, and the \
         payment is only sent once the user approves it with their password (it waits up to 5 minutes). The one \
         exception is autopay, which the user turns on themselves — only then can a payment be approved \
@@ -236,7 +243,8 @@ impl WalletServer {
         (the chain accepted the transfer), rejected or failed (nothing was sent — safe to ask again), or \
         unknown: the user approved but the wallet couldn't confirm whether the transfer reached the chain \
         (tx_hash is set when known). unknown means it MAY have been sent — never ask again on your own; \
-        tell the user and have them check the history or the tx."
+        tell the user and have them check the history or the tx.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
     async fn request_payment(
         &self,
@@ -271,6 +279,7 @@ impl WalletServer {
     }
 
     #[tool(
+        title = "Fetch a paid URL (x402)",
         description = "Fetches an x402 paid resource (a URL). It GETs the URL first; if the server answers \
         402 Payment Required, it asks the user to approve the required payment (exact scheme, the active \
         network, that chain's USDC) in the wallet app, then re-requests the same URL with the payment header \
@@ -292,7 +301,8 @@ impl WalletServer {
         and tell the user, showing the tx (when a `tx` came back without content, x402_resubmit re-sends its proof \
         without paying again). `paid` is kept for older callers and is simply payment != \"none\". \
         Read `notice` when present, and never retry on an HTTP status alone: after the money moved the server \
-        may answer with a fresh 402 challenge that reads as if the payment never happened."
+        may answer with a fresh 402 challenge that reads as if the payment never happened.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true)
     )]
     async fn x402_fetch(
         &self,
@@ -320,6 +330,7 @@ impl WalletServer {
     }
 
     #[tool(
+        title = "Resubmit an x402 payment proof",
         description = "Resubmits the on-chain proof of an x402 payment this wallet already broadcast itself, to \
         get the content it paid for. Use it when x402_fetch returned a `tx` without content (status pending, \
         unknown or undelivered, or settlement_failed with a tx). No new money moves and no approval is asked: \
@@ -328,7 +339,8 @@ impl WalletServer {
         reverted you get reverted (payment none: nothing was paid, so paying again is a new decision). Sellers \
         keep proofs acceptable only for a while (the reference server: 10 minutes), so a late resubmit can be \
         refused — that is settlement_failed with a notice; do not pay again then, tell the user and show the tx. \
-        Proofs are kept for 7 days. Returns the same shape as x402_fetch."
+        Proofs are kept for 7 days. Returns the same shape as x402_fetch.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
     )]
     async fn x402_resubmit(
         &self,
@@ -341,7 +353,8 @@ impl WalletServer {
     }
 
     #[tool(
-        description = "Reads an agent's ERC-8004 record from the registry on the active Base network \
+        title = "Look up an agent (ERC-8004)",
+        description = "Reads an agent's ERC-8004 record from the registry on the active network \
         (read-only, on-chain only — the wallet never fetches the agent's website). Give it agent_id, the \
         agent's number in the Identity Registry. Returns: registered, owner, wallet (the registered \
         agentWallet), token_uri and the uri_domain read from it, declared_name (what the record calls \
@@ -350,7 +363,8 @@ impl WalletServer {
         domain equals the domain listed on-chain. IMPORTANT: registration is permissionless — anyone can \
         register any name, domain, or wallet, and anyone can leave feedback. Being registered is NOT proof \
         of safety. Only a mismatch is a strong signal, and only when the agent number came from a source \
-        you trust (the service's own docs), not from the payment response itself."
+        you trust (the service's own docs), not from the payment response itself.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn lookup_agent(
         &self,
@@ -389,16 +403,26 @@ impl ServerHandler for WalletServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Kura — a local Ethereum wallet for AI agents (on Base mainnet, Arc mainnet, Base Sepolia, \
-                 or Arc testnet, per the user's setting; check get_balances/get_wallet_status for the current \
-                 balance. On a mainnet these are real funds). The wallet can hold several accounts from one seed; \
-                 everything here is about the active one, and only the user can switch accounts in the app. \
-                 Balance, address, and history are read-only. To pay, call \
-                 request_payment: the wallet app opens an approval window — by default a human must approve \
-                 with their password, and only when the user has turned autopay on is it approved \
-                 automatically, within that limit. Never ask for or accept a password in chat or over \
-                 MCP. lookup_agent reads an ERC-8004 agent record on-chain (read-only); registration \
-                 there is permissionless, so it is a claim, not proof of safety."
+                "Kura — a local Ethereum wallet for AI agents on Base or Arc (mainnet or testnet, per the \
+                 user's setting; on a mainnet the funds are real). The wallet can hold several accounts from one \
+                 seed; every tool works on the active one, and only the user can switch accounts, in the app.\n\n\
+                 Reading is free: get_wallet_status, get_balances, get_history and lookup_agent never move \
+                 money and need no approval. Check get_balances before paying — on Arc there is no separate \
+                 gas balance; gas comes out of the USDC.\n\n\
+                 Paying: request_payment sends to an address; x402_fetch fetches a URL and pays only if the \
+                 server answers 402. Either way the wallet app opens an approval window, and by default a \
+                 human approves with their password (it waits up to 5 minutes). Only when the user has turned \
+                 autopay on can a payment go through by itself — within an unlocked session, a small limit, \
+                 and a trusted address — and even then the same payment again (same token, recipient and \
+                 amount) within 10 minutes goes to the human. Never ask for or accept a password in chat or \
+                 over MCP.\n\n\
+                 The rule that matters most: when a result says the money MAY have moved — status unknown, \
+                 or an x402 payment of \"confirmed\" or \"unknown\" that came back without content — do not \
+                 pay again on your own. Tell the user and show the tx. The app rechecks such payments \
+                 on-chain, and get_history later shows how each one ended. If x402_fetch returned a tx but \
+                 no content, x402_resubmit re-sends that payment's proof without paying again.\n\n\
+                 lookup_agent reads an ERC-8004 record on-chain; registration there is permissionless, so a \
+                 record is a claim, not proof of safety."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),

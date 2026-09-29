@@ -194,6 +194,9 @@ export const HELP_SECTIONS: HelpSection[] = [
         <li className="pt-1 text-[var(--color-ink-300)]">
           5분 안에 승인하지 않으면 자동으로 거부돼요.
         </li>
+        <li className="text-[var(--color-ink-300)]">
+          나갔는지 바로 확인이 안 되면 내역에 확인 필요로 남고, 앱이 체인에서 다시 확인해 바로잡아요.
+        </li>
       </ol>,
       <ol className="space-y-1.5">
         <li>
@@ -211,6 +214,10 @@ export const HELP_SECTIONS: HelpSection[] = [
         </li>
         <li className="pt-1 text-[var(--color-ink-300)]">
           If you don't approve within five minutes, it's rejected automatically.
+        </li>
+        <li className="text-[var(--color-ink-300)]">
+          If it can't be confirmed right away, the history marks it unconfirmed, and the app
+          rechecks it on-chain and sets it right.
         </li>
       </ol>,
     ),
@@ -235,7 +242,7 @@ export const HELP_SECTIONS: HelpSection[] = [
         <li>
           <b className={em}>신뢰 주소 · 자율 결제</b> — 비번 없이 자동 승인하려면 기본 설정에선
           세션 잠금 해제 + 소액 한도 + 신뢰하는 주소, <b className={em}>셋 다 맞을 때만</b>{" "}
-          돼요.
+          돼요. 같은 곳에 같은 금액을 10분 안에 또 보내면 그때는 당신에게 물어요.
         </li>
       </ul>,
       <ul className="space-y-2">
@@ -254,7 +261,8 @@ export const HELP_SECTIONS: HelpSection[] = [
         <li>
           <b className={em}>Trusted addresses · autopay</b> — for a payment to go through without
           your password, the default setup needs all three: an unlocked session, an amount under
-          the small autopay limit, and an address you've approved before.
+          the small autopay limit, and an address you've approved before. The same amount to the
+          same place again within ten minutes asks you instead.
         </li>
       </ul>,
     ),

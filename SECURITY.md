@@ -25,7 +25,7 @@ Kura는 개인키를 다루는 지갑이에요. 취약점을 발견하셨다면 
 - 개인키·복구 문구가 암호화된 파일(`~/.jigap/wallet.enc`) 밖으로 새는 경로
 - 비밀번호 없이 서명·송금이 되는 경로
 - MCP 어댑터로 **사람 승인 없이** 결제가 나가는 경로 (승인 팝업 우회, 요청 위조)
-- 거래 한도·긴급 잠금·화이트리스트를 우회하는 방법
+- 거래 한도·긴급 잠금·신뢰 주소·자율 결제 조건(10분 안 같은 결제는 사람에게)을 우회하는 방법
 - 승인 팝업이 **실제와 다른 금액·주소**를 보여주게 만드는 방법
 - 배포본 무결성 (서명·공증·업데이트 경로)
 
@@ -82,9 +82,9 @@ Kura is a wallet that handles private keys. If you find a vulnerability, please 
 
 Report via **Security → Report a vulnerability** on this repository, or email `dinggi5@proton.me`. This is a solo project — expect a reply within a week, and please ping again if you don't hear back. Please hold public disclosure until a fix ships. Credit in release notes if you'd like it; no bug bounty.
 
-Security fixes land on the **latest release only** (0.1.x).
+Security fixes land on the **latest release only**.
 
-**Most interesting:** private key or recovery phrase escaping `~/.jigap/wallet.enc`; signing or sending without the password; the MCP adapter paying without human approval; bypassing spend limits, emergency lock, or the allowlist; making the approval dialog display an amount or address different from what gets signed; distribution integrity.
+**Most interesting:** private key or recovery phrase escaping `~/.jigap/wallet.enc`; signing or sending without the password; the MCP adapter paying without human approval; bypassing spend limits, the emergency lock, trusted addresses, or the autopay conditions (a repeat within 10 minutes goes to a human); making the approval dialog display an amount or address different from what gets signed; distribution integrity.
 
 **Out of scope:** an already-compromised Mac; forgotten password with no 12-word backup (there is no recovery path by design); payments the user approved; what the RPC provider and the public chain can observe; third-party wallets, exchanges, or x402 counterparties.
 
