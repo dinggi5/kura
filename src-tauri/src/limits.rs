@@ -212,9 +212,15 @@ fn judge_spend(
         eth: "0".into(),
         ..Default::default()
     };
+    // 금액 칸이 숫자가 아닌 장부도 「못 읽음」이다 (개발 72 코덱스 1차 P0) — JSON 모양만 맞으면 통과시키고
+    // `spent_of` 가 그 칸을 0 으로 읽어, 오늘 쓴 돈이 지워진 채 한도를 검사했다(「못 읽으면 빈 값」 다섯 번째).
+    // 빈 칸은 옛 기본값이라 0 으로 친다.
+    let amount_ok = |v: &str| v.is_empty() || v.parse::<U256>().is_ok();
     let parsed = match raw {
         None => return Some(fresh),
-        Some(Ok(t)) => serde_json::from_str::<Spend>(&t).ok(),
+        Some(Ok(t)) => serde_json::from_str::<Spend>(&t)
+            .ok()
+            .filter(|s| amount_ok(&s.usdc) && amount_ok(&s.eth)),
         Some(Err(())) => None,
     };
     match parsed {
@@ -338,6 +344,29 @@ mod tests {
         assert!(judge_spend(Some(Err(())), None, today).is_none());
         assert_eq!(
             judge_spend(Some(Ok("{깨짐".into())), Some(today - 1), today)
+                .unwrap()
+                .usdc,
+            "0"
+        );
+    }
+
+    // 🔴 개발 72(코덱스 1차 P0): JSON 모양은 맞는데 금액 칸이 숫자가 아니면 「못 읽음」 — 0 부터 한도를 재면 안 된다.
+    #[test]
+    fn ledger_with_bad_amount_blocks() {
+        let today = 20_000;
+        let with = |usdc: &str, eth: &str| {
+            Some(Ok(format!(
+                r#"{{"day":{today},"usdc":"{usdc}","eth":"{eth}"}}"#
+            )))
+        };
+        assert!(judge_spend(with("abc", "0"), Some(today), today).is_none());
+        assert!(judge_spend(with("0", "1.5"), Some(today), today).is_none());
+        assert!(judge_spend(with("-1", "0"), Some(today), today).is_none());
+        // 빈 칸은 옛 기본값 = 0.
+        assert!(judge_spend(with("", "0"), Some(today), today).is_some());
+        // 어제 파일이면 그래도 새 날로 간다(한 번 상한 장부가 영영 막지 않게).
+        assert_eq!(
+            judge_spend(with("abc", "0"), Some(today - 1), today)
                 .unwrap()
                 .usdc,
             "0"

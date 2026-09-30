@@ -269,12 +269,16 @@ fn last_same_payment(
         .min()
 }
 
-/// 지금 계정(작업이 고정했으면 그 계정)의 본 파일에서 `last_same_payment` — 10분 창이라 본 파일(최신 200건)이면 된다.
+/// 지금 계정(작업이 고정했으면 그 계정)의 본 파일 + **보관 파일 끝부분**에서 `last_same_payment`.
+/// 「10분 창이면 본 파일(최신 200건)로 충분하다」는 가정이었다(개발 72 코덱스 1차 P1) — AI 가 차단당하는 시도를
+/// 10분 안에 200번 넘게 쌓으면 방금 나간 결제가 보관 파일로 밀려나, 같은 결제가 다시 자율로 나갔다.
 pub(crate) fn recent_same_payment(token: &str, to: &str, amount: &str) -> Option<u64> {
     let owner = crate::wallet::active_account()
         .map(|a| a.address)
         .unwrap_or_default();
-    let mut list = read_history_at(&history_path().ok()?);
+    let hot = history_path().ok()?;
+    let mut list = read_history_at(&hot);
+    list.extend(archive_tail(&crate::policy::history_archive_path(&hot)));
     list.retain(|e| crate::policy::history_owned_by(e, &owner));
     let dec = crate::chain::active_chain().usdc_decimals;
     last_same_payment(
@@ -292,6 +296,13 @@ pub(crate) fn recent_same_payment(token: &str, to: &str, amount: &str) -> Option
             }
         },
     )
+}
+
+/// 자율 결제의 문 — 같은 결제가 10분 안에 있었거나, **내역 파일이 있는데 못 읽어서 모르면** 사람에게 넘긴다.
+/// 못 읽는 내역을 「중복 없음」으로 치면 안전장치가 조용히 열린다(「못 읽으면 빈 값」, 개발 72).
+pub(crate) fn autopay_needs_human_for_repeat(token: &str, to: &str, amount: &str) -> bool {
+    let unreadable = history_path().map_or(true, |p| history_unreadable(&p));
+    unreadable || recent_same_payment(token, to, amount).is_some()
 }
 
 /// 승인 창이 묻는다 — 「방금 같은 결제가 나갔나」(몇 초 전). 사람이 중복 결제를 알아보게 한 줄을 띄운다.

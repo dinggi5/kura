@@ -232,7 +232,8 @@ async fn auto_approve_pinned(
     // 요청한다 — 겹침 거절(`begin_approval`)은 **겹치는 창**만 닫고, 끝난 뒤의 재요청은 한도 안이면 조용히 또 나갔다.
     // 직접 제출(x402-direct)이 생긴 뒤로 upfront 결제라 그 창이 더 넓다. 같은 토큰·받는 곳·금액이 10분 안에 나갔으면
     // (나갔을 수 있는 「불명」 포함) 자율로 처리하지 않는다 — 막는 게 아니라 사람이 승인 창에서 그 사실을 보고 정한다.
-    if crate::history::recent_same_payment(&req.token, &req.to, &req.amount).is_some() {
+    // 내역을 못 읽어 모르는 것도 사람에게(개발 72).
+    if crate::history::autopay_needs_human_for_repeat(&req.token, &req.to, &req.amount) {
         return Err(NEEDS_PASSWORD.into());
     }
 

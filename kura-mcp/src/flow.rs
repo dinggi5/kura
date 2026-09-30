@@ -255,6 +255,10 @@ pub async fn run_payment(
     // 요청에 실린 대조 = 응답에 실리는 대조 (코덱스 개발51 1차 P2). 조회 도중 사용자가 네트워크를
     // 바꿨으면 write 쪽이 대조를 버리는데, 여기서 필터 전 값을 돌려주면 **승인 창에도 안 뜬 대조**를
     // AI 에게 사실처럼 말하게 된다.
+    // 탐색기 링크는 **요청에 각인한 체인**의 것이어야 한다(개발 72 코덱스 1차 P2) — 승인을 기다린 최대 5분 뒤의
+    // 활성 체인으로 만들면, 그새 사용자가 네트워크를 바꿨을 때 거래가 없는 체인의 링크가 나갔다.
+    // 각인은 바로 아래 작성기가 활성 체인으로 하므로 그 직전에 붙잡는다(x402 경로의 `picked_explorer` 와 같은 처방).
+    let explorer_prefix = active_chain().explorer_tx_prefix;
     let (id, agent) =
         payment::write_request_agent(&token, to.trim(), amount.trim(), memo.trim(), agent)?;
     on_pending();
@@ -264,7 +268,7 @@ pub async fn run_payment(
             let explorer = if r.tx_hash.is_empty() {
                 String::new()
             } else {
-                format!("{}{}", active_chain().explorer_tx_prefix, r.tx_hash)
+                format!("{explorer_prefix}{}", r.tx_hash)
             };
             Ok(PayOutcome {
                 status: r.status,
