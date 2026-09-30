@@ -104,24 +104,31 @@ fn archive_lines(evicted: &[HistoryEntry], tail: &[HistoryEntry]) -> String {
 /// 자른 자리가 한글 글자 중간일 수 있어 손실 허용 변환으로 읽는다(`read_to_string` 은 거기서 통째로 실패했다).
 /// 잘린 첫 줄은 JSON 이 아니라 걸러진다.
 fn archive_tail(path: &std::path::Path) -> Vec<HistoryEntry> {
+    archive_tail_checked(path)
+        .map(|(v, _)| v)
+        .unwrap_or_default()
+}
+
+/// `archive_tail` + 「없음」과 「있는데 못 읽음」을 가르고, 읽은 끝부분이 **파일 전체였는지**도 돌려준다
+/// (개발 72 코덱스 2차) — 안전장치(자율 결제 중복 검사)는 못 읽었거나 앞부분을 안 본 것을 「없었다」로 치면 안 된다.
+/// 없으면 Ok((빈 목록, true)), 있는데 못 읽으면 Err.
+fn archive_tail_checked(path: &std::path::Path) -> Result<(Vec<HistoryEntry>, bool), ()> {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = fs::File::open(path) else {
-        return Vec::new();
+    let mut f = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), true)),
+        Err(_) => return Err(()),
     };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    if f.seek(SeekFrom::Start(len.saturating_sub(256 * 1024)))
-        .is_err()
-    {
-        return Vec::new();
-    }
+    let len = f.metadata().map_err(|_| ())?.len();
+    let start = len.saturating_sub(256 * 1024);
+    f.seek(SeekFrom::Start(start)).map_err(|_| ())?;
     let mut bytes = Vec::new();
-    if f.read_to_end(&mut bytes).is_err() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&bytes)
+    f.read_to_end(&mut bytes).map_err(|_| ())?;
+    let list = String::from_utf8_lossy(&bytes)
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
-        .collect()
+        .collect();
+    Ok((list, start == 0))
 }
 
 /// 밀려난 기록을 보관 파일 끝에 덧붙인다. 한 번의 쓰기로(줄 사이에서 끊기지 않게).
@@ -269,16 +276,11 @@ fn last_same_payment(
         .min()
 }
 
-/// 지금 계정(작업이 고정했으면 그 계정)의 본 파일 + **보관 파일 끝부분**에서 `last_same_payment`.
-/// 「10분 창이면 본 파일(최신 200건)로 충분하다」는 가정이었다(개발 72 코덱스 1차 P1) — AI 가 차단당하는 시도를
-/// 10분 안에 200번 넘게 쌓으면 방금 나간 결제가 보관 파일로 밀려나, 같은 결제가 다시 자율로 나갔다.
-pub(crate) fn recent_same_payment(token: &str, to: &str, amount: &str) -> Option<u64> {
+/// 지금 계정(작업이 고정했으면 그 계정)의 기록 `list` 에서 `last_same_payment`.
+fn same_payment_in(mut list: Vec<HistoryEntry>, token: &str, to: &str, amount: &str) -> Option<u64> {
     let owner = crate::wallet::active_account()
         .map(|a| a.address)
         .unwrap_or_default();
-    let hot = history_path().ok()?;
-    let mut list = read_history_at(&hot);
-    list.extend(archive_tail(&crate::policy::history_archive_path(&hot)));
     list.retain(|e| crate::policy::history_owned_by(e, &owner));
     let dec = crate::chain::active_chain().usdc_decimals;
     last_same_payment(
@@ -298,11 +300,48 @@ pub(crate) fn recent_same_payment(token: &str, to: &str, amount: &str) -> Option
     )
 }
 
-/// 자율 결제의 문 — 같은 결제가 10분 안에 있었거나, **내역 파일이 있는데 못 읽어서 모르면** 사람에게 넘긴다.
-/// 못 읽는 내역을 「중복 없음」으로 치면 안전장치가 조용히 열린다(「못 읽으면 빈 값」, 개발 72).
+/// 본 파일 + **보관 파일 끝부분**에서 같은 결제(승인 창의 「N분 전에…」 줄 — 보여 주기용이라 못 읽으면 없음).
+/// 「10분 창이면 본 파일(최신 200건)로 충분하다」는 가정이었다(개발 72 코덱스 1차 P1) — AI 가 차단당하는 시도를
+/// 10분 안에 200번 넘게 쌓으면 방금 나간 결제가 보관 파일로 밀려나, 같은 결제가 다시 자율로 나갔다.
+pub(crate) fn recent_same_payment(token: &str, to: &str, amount: &str) -> Option<u64> {
+    let hot = history_path().ok()?;
+    let mut list = read_history_at(&hot);
+    list.extend(archive_tail(&crate::policy::history_archive_path(&hot)));
+    same_payment_in(list, token, to, amount)
+}
+
+/// 읽은 보관 끝부분이 10분 창을 다 덮는가 (순수 함수 — 테스트용). 파일 전체를 읽었으면 덮는다.
+/// 끝부분만 읽었으면 그 가장 오래된 기록이 창 밖이어야 덮는다 — 보관 파일은 밀려난 순서(오래된 순)로 쌓이니
+/// 그보다 앞은 더 오래됐다. 끝부분에 기록이 하나도 없으면 증명할 수 없다.
+fn archive_covers_window(tail: &[HistoryEntry], whole: bool, now: u64, window: u64) -> bool {
+    whole
+        || tail
+            .iter()
+            .map(|e| e.ts)
+            .min()
+            .is_some_and(|oldest| now.saturating_sub(oldest) >= window)
+}
+
+/// 자율 결제의 문 — 같은 결제가 10분 안에 있었거나, **그걸 확인할 수 없으면** 사람에게 넘긴다(개발 72).
+/// 확인할 수 없는 셋: 본 파일이 있는데 못 읽음 · 보관 파일이 있는데 못 읽음(코덱스 2차 P1) ·
+/// 보관 파일이 커서 끝 256KB 에 10분 창이 다 안 들어옴(코덱스 2차 P1 — AI 가 시도를 수백 번 쌓은 경우).
+/// 못 읽는 내역을 「중복 없음」으로 치면 안전장치가 조용히 열린다(「못 읽으면 빈 값」).
 pub(crate) fn autopay_needs_human_for_repeat(token: &str, to: &str, amount: &str) -> bool {
-    let unreadable = history_path().map_or(true, |p| history_unreadable(&p));
-    unreadable || recent_same_payment(token, to, amount).is_some()
+    let Ok(hot) = history_path() else {
+        return true;
+    };
+    if history_unreadable(&hot) {
+        return true;
+    }
+    let Ok((tail, whole)) = archive_tail_checked(&crate::policy::history_archive_path(&hot)) else {
+        return true;
+    };
+    if !archive_covers_window(&tail, whole, now_secs(), REPEAT_WINDOW_SECS) {
+        return true;
+    }
+    let mut list = read_history_at(&hot);
+    list.extend(tail);
+    same_payment_in(list, token, to, amount).is_some()
 }
 
 /// 승인 창이 묻는다 — 「방금 같은 결제가 나갔나」(몇 초 전). 사람이 중복 결제를 알아보게 한 줄을 띄운다.
@@ -864,6 +903,48 @@ mod tests {
         assert!(confirm_at(&hot, &sent, Verdict::Reverted).unwrap());
         assert_eq!(read_history_at(&hot)[0].status, "reverted");
         let _ = fs::remove_dir_all(hot.parent().unwrap());
+    }
+
+    /// 🔴 개발 72(코덱스 2차 P1): 보관 파일 끝부분만 읽었으면, 그 가장 오래된 기록이 10분 창 밖이어야 「창을 다 봤다」.
+    #[test]
+    fn archive_tail_must_cover_window() {
+        let at = |ts: u64| HistoryEntry {
+            ts,
+            ..Default::default()
+        };
+        let now = 10_000;
+        // 파일 전체를 읽었으면 기록이 없어도 덮는다.
+        assert!(archive_covers_window(&[], true, now, 600));
+        // 끝부분만 — 가장 오래된 게 창 안이면 앞쪽에 창 안 기록이 더 있을 수 있다.
+        assert!(!archive_covers_window(&[at(now - 100), at(now - 5)], false, now, 600));
+        assert!(!archive_covers_window(&[], false, now, 600));
+        assert!(archive_covers_window(&[at(now - 600), at(now - 5)], false, now, 600));
+    }
+
+    /// 🔴 개발 72(코덱스 2차 P1): 보관 파일은 「없음」과 「있는데 못 읽음」을 가른다.
+    #[test]
+    fn archive_tail_checked_separates_missing_from_unreadable() {
+        let dir = std::env::temp_dir().join(format!("kura-archive-{}-{}", std::process::id(), now_secs()));
+        fs::create_dir_all(&dir).unwrap();
+        // 없음 → 빈 목록, 전체를 본 셈.
+        let (v, whole) = archive_tail_checked(&dir.join("none.jsonl")).unwrap();
+        assert!(v.is_empty() && whole);
+        // 그 자리에 디렉터리 → 있는데 못 읽음.
+        let blocked = dir.join("blocked.jsonl");
+        fs::create_dir_all(&blocked).unwrap();
+        assert!(archive_tail_checked(&blocked).is_err());
+        // 작은 파일 → 전체.
+        let small = dir.join("small.jsonl");
+        let one = HistoryEntry {
+            ts: 1,
+            status: "sent".into(),
+            ..Default::default()
+        };
+        fs::write(&small, format!("{}\n", serde_json::to_string(&one).unwrap())).unwrap();
+        let (v, whole) = archive_tail_checked(&small).unwrap();
+        assert_eq!(v.len(), 1);
+        assert!(whole);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 🔴 개발 71: 같은 결제를 10분 안에 두 번 — 나간(또는 나갔을 수 있는) 기록만, 같은 토큰·받는 곳(대소문자 무시)·금액(숫자로)만.

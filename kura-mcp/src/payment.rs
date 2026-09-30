@@ -348,7 +348,7 @@ pub fn write_request_agent(
     amount: &str,
     memo: &str,
     agent: Option<AgentTrust>,
-) -> Result<(String, Option<AgentTrust>), String> {
+) -> Result<(String, Option<AgentTrust>, &'static str), String> {
     write_request_kind(
         token,
         to,
@@ -380,6 +380,7 @@ pub fn write_x402_request(
         "",
         agent,
     )
+    .map(|(id, agent, _)| (id, agent))
 }
 
 /// x402 **직접 제출** 요청 (개발 64) — 서명만 받는 게 아니라 **온체인 전송까지** GUI 에 맡긴다.
@@ -402,6 +403,7 @@ pub fn write_x402_direct_request(
         nonce,
         agent,
     )
+    .map(|(id, agent, _)| (id, agent))
 }
 
 /// 공통 요청 작성기 — kind/resource 만 다르고 나머지 single-flight 로직은 동일.
@@ -410,6 +412,8 @@ pub fn write_x402_direct_request(
 /// 아래 체인 필터가 대조를 버릴 수 있는데, 호출자가 필터 전 값을 그대로 응답에 실으면
 /// **승인 창에도 안 뜨고 자율 차단에도 안 쓰인 대조**를 AI 에게 사실처럼 말하게 된다
 /// (코덱스 개발51 1차 P2). 요청에 실린 것과 응답에 실리는 것이 같아야 한다.
+/// 세 번째 값 = **각인한 체인**의 탐색기 주소 앞부분(개발 72 코덱스 2차 P2) — 호출자가 따로 활성 체인을 읽으면
+/// 그 사이 네트워크 전환으로 각인과 링크가 갈린다.
 fn write_request_kind(
     token: &str,
     to: &str,
@@ -419,9 +423,10 @@ fn write_request_kind(
     resource: &str,
     nonce: &str,
     agent: Option<AgentTrust>,
-) -> Result<(String, Option<AgentTrust>), String> {
+) -> Result<(String, Option<AgentTrust>, &'static str), String> {
     let id = new_id();
-    let chain_id = crate::chain::active_chain().chain_id;
+    let chain = crate::chain::active_chain();
+    let chain_id = chain.chain_id;
     // 활성 계정 각인 (개발 54). 여기서 못 읽으면(지갑 파일 없음·깨짐) 요청을 만들지 않는다 —
     // 어느 계정에서 나갈지 모르는 결제를 사람 앞에 띄우지 않는다.
     let account = crate::wallet::active_account()?;
@@ -457,7 +462,7 @@ fn write_request_kind(
     if let Ok(p) = result_path() {
         let _ = fs::remove_file(p);
     }
-    Ok((id, agent))
+    Ok((id, agent, chain.explorer_tx_prefix))
 }
 
 /// 요청 파일을 create_new(O_EXCL)로 원자적으로 만들어 single-flight 슬롯을 획득한다.
