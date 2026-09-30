@@ -104,15 +104,21 @@ fn archive_lines(evicted: &[HistoryEntry], tail: &[HistoryEntry]) -> String {
 /// 자른 자리가 한글 글자 중간일 수 있어 손실 허용 변환으로 읽는다(`read_to_string` 은 거기서 통째로 실패했다).
 /// 잘린 첫 줄은 JSON 이 아니라 걸러진다.
 fn archive_tail(path: &std::path::Path) -> Vec<HistoryEntry> {
-    archive_tail_checked(path)
+    read_archive_tail(path, false)
         .map(|(v, _)| v)
         .unwrap_or_default()
 }
 
 /// `archive_tail` + 「없음」과 「있는데 못 읽음」을 가르고, 읽은 끝부분이 **파일 전체였는지**도 돌려준다
 /// (개발 72 코덱스 2차) — 안전장치(자율 결제 중복 검사)는 못 읽었거나 앞부분을 안 본 것을 「없었다」로 치면 안 된다.
-/// 없으면 Ok((빈 목록, true)), 있는데 못 읽으면 Err.
+/// 없으면 Ok((빈 목록, true)), 있는데 못 읽으면 Err. **깨진 줄이 하나라도 있어도 Err**(개발 73, 코덱스 72 3차 P1) —
+/// 방금 나간 결제의 줄이 깨져 있으면 건너뛴 목록은 「그 결제 없음」이 된다. 단 256KB 로 자른 자리의 첫 줄은
+/// 원래 반쪽이라 봐준다(파일 전체를 읽었으면 첫 줄도 온전해야 한다).
 fn archive_tail_checked(path: &std::path::Path) -> Result<(Vec<HistoryEntry>, bool), ()> {
+    read_archive_tail(path, true)
+}
+
+fn read_archive_tail(path: &std::path::Path, strict: bool) -> Result<(Vec<HistoryEntry>, bool), ()> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = match fs::File::open(path) {
         Ok(f) => f,
@@ -124,10 +130,18 @@ fn archive_tail_checked(path: &std::path::Path) -> Result<(Vec<HistoryEntry>, bo
     f.seek(SeekFrom::Start(start)).map_err(|_| ())?;
     let mut bytes = Vec::new();
     f.read_to_end(&mut bytes).map_err(|_| ())?;
-    let list = String::from_utf8_lossy(&bytes)
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
+    let text = String::from_utf8_lossy(&bytes);
+    let mut list = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(e) => list.push(e),
+            Err(_) if !strict || (i == 0 && start > 0) => {}
+            Err(_) => return Err(()),
+        }
+    }
     Ok((list, start == 0))
 }
 
@@ -313,13 +327,15 @@ pub(crate) fn recent_same_payment(token: &str, to: &str, amount: &str) -> Option
 /// 읽은 보관 끝부분이 10분 창을 다 덮는가 (순수 함수 — 테스트용). 파일 전체를 읽었으면 덮는다.
 /// 끝부분만 읽었으면 그 가장 오래된 기록이 창 밖이어야 덮는다 — 보관 파일은 밀려난 순서(오래된 순)로 쌓이니
 /// 그보다 앞은 더 오래됐다. 끝부분에 기록이 하나도 없으면 증명할 수 없다.
+/// 창 밖은 **엄격히 넘어야**(`>`) 한다 — `last_same_payment` 는 정확히 창 길이 전도 창 안으로 세서, 가장 오래된 게
+/// 딱 그 초면 잘린 앞쪽에 같은 초의 기록이 더 있을 수 있다(개발 73, 코덱스 72 3차 P2).
 fn archive_covers_window(tail: &[HistoryEntry], whole: bool, now: u64, window: u64) -> bool {
     whole
         || tail
             .iter()
             .map(|e| e.ts)
             .min()
-            .is_some_and(|oldest| now.saturating_sub(oldest) >= window)
+            .is_some_and(|oldest| now.saturating_sub(oldest) > window)
 }
 
 /// 자율 결제의 문 — 같은 결제가 10분 안에 있었거나, **그걸 확인할 수 없으면** 사람에게 넘긴다(개발 72).
@@ -918,7 +934,9 @@ mod tests {
         // 끝부분만 — 가장 오래된 게 창 안이면 앞쪽에 창 안 기록이 더 있을 수 있다.
         assert!(!archive_covers_window(&[at(now - 100), at(now - 5)], false, now, 600));
         assert!(!archive_covers_window(&[], false, now, 600));
-        assert!(archive_covers_window(&[at(now - 600), at(now - 5)], false, now, 600));
+        // 정확히 창 길이 전은 아직 창 안(`last_same_payment` 와 같은 경계) — 앞쪽에 같은 초가 더 있을 수 있다.
+        assert!(!archive_covers_window(&[at(now - 600), at(now - 5)], false, now, 600));
+        assert!(archive_covers_window(&[at(now - 601), at(now - 5)], false, now, 600));
     }
 
     /// 🔴 개발 72(코덱스 2차 P1): 보관 파일은 「없음」과 「있는데 못 읽음」을 가른다.
@@ -944,6 +962,25 @@ mod tests {
         let (v, whole) = archive_tail_checked(&small).unwrap();
         assert_eq!(v.len(), 1);
         assert!(whole);
+        // 🔴 개발 73(코덱스 72 3차 P1): 깨진 줄이 하나라도 있으면 못 읽음 — 관대한 쪽(`archive_tail`)만 건너뛴다.
+        let line = serde_json::to_string(&one).unwrap();
+        let broken = dir.join("broken.jsonl");
+        fs::write(&broken, format!("{line}\n{{\"ts\":2,\"sta\n{line}\n")).unwrap();
+        assert!(archive_tail_checked(&broken).is_err());
+        assert_eq!(archive_tail(&broken).len(), 2);
+        // 전체를 읽었으면 첫 줄이 깨져도 못 읽음.
+        fs::write(&broken, format!("{{\"ts\"\n{line}\n")).unwrap();
+        assert!(archive_tail_checked(&broken).is_err());
+        // 256KB 로 자른 자리의 첫 줄(원래 반쪽)은 봐준다 — 나머지가 온전하면 읽힌다.
+        let big = dir.join("big.jsonl");
+        let mut body = String::new();
+        while body.len() < 300 * 1024 {
+            body.push_str(&line);
+            body.push('\n');
+        }
+        fs::write(&big, &body).unwrap();
+        let (v, whole) = archive_tail_checked(&big).unwrap();
+        assert!(!whole && !v.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

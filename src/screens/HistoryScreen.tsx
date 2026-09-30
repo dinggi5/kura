@@ -164,13 +164,19 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
 
       <div className="shrink-0 flex flex-col items-end gap-1">
         <span className="text-[11px] text-[var(--color-ink-300)] num">{fmtRelTime(entry.ts)}</span>
+        {/* 링크가 있으면 상태 글자 자체가 링크다(개발 73) — 전엔 그 자리에 「보기」를 띄워
+            「확인 필요」·「되돌려짐」이 아이콘 색으로만 보였다. */}
         {hasLink ? (
           <button
             type="button"
             onClick={() => openUrl(chain.explorerTx + linkTx).catch(() => {})}
-            className="inline-flex items-center gap-1 text-[11px] text-[var(--color-ink-500)] hover:text-[var(--color-accent)] transition-colors"
+            aria-label={`${meta.label} — ${t("탐색기에서 보기", "View in explorer")}`}
+            className={cn(
+              "inline-flex items-center gap-1 text-[11px] hover:text-[var(--color-accent)] transition-colors",
+              meta.labelColor || "text-[var(--color-ink-500)]",
+            )}
           >
-            <ExternalLink size={11} /> {t("보기", "View")}
+            {meta.label} <ExternalLink size={10} />
           </button>
         ) : (
           <span className={cn("text-[11px]", meta.labelColor || "text-[var(--color-ink-300)]")}>{meta.label}</span>
