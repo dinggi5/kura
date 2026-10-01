@@ -623,8 +623,16 @@ async fn await_result_in(
             eprintln!("[kura] 요청 {id}: 거두기 직전에 온 결과 파일로 끝남");
             return Some(r);
         }
-        let rec = read_attempt(dir, id);
-        match crate::policy::after_timeout(rec.as_ref()) {
+        // 기록이 있는데 못 읽으면 「아무것도 안 나감」이 아니라 「아직 처리 중」으로 본다(개발 73, 코덱스 1차 P1) —
+        // 깨진 게 `sending`·`done` 이었을 수 있다. 끝내 못 읽으면 늦은 대기 끝에 불명으로 답한다.
+        let (rec, verdict) = match crate::policy::read_attempt_at(dir, id) {
+            Ok(rec) => {
+                let v = crate::policy::after_timeout(rec.as_ref());
+                (rec, v)
+            }
+            Err(()) => (None, crate::policy::AfterTimeout::StillSending),
+        };
+        match verdict {
             crate::policy::AfterTimeout::NothingSent => {
                 eprintln!("[kura] 요청 {id}: 아무것도 안 나감으로 끝남");
                 return None;
@@ -672,10 +680,10 @@ fn take_result(path: &Path, id: &str) -> Option<PaymentResult> {
     Some(r)
 }
 
-/// GUI 가 쓴 결제 시도 기록(개발 66). 없거나 못 읽으면 None.
+/// GUI 가 쓴 결제 시도 기록(개발 66). 없거나 못 읽으면 None — **찾기 전용**(재제출의 tx 대조). 시간 초과 뒤 결말을
+/// 정하는 곳은 `policy::read_attempt_at` 으로 「못 읽음」을 따로 받는다(개발 73).
 fn read_attempt(dir: &Path, id: &str) -> Option<crate::policy::AttemptRecord> {
-    let path = crate::policy::attempt_path(dir, id)?;
-    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+    crate::policy::read_attempt_at(dir, id).ok().flatten()
 }
 
 /// x402 직접 제출의 **증거 재료**를 남긴다 (개발 66 — 형식만, 읽는 쪽은 다음 세션의 재제출 경로).
@@ -1133,6 +1141,20 @@ mod tests {
             .expect("불명은 None 이 아니다");
         assert_eq!(r.status, "unknown");
         assert!(!r.detail.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 🔴 개발 73(코덱스 1차 P1): 시도 기록이 깨져 있으면 「아무것도 안 나감」이 아니라 불명 — 깨진 게 sending·done 이었을 수 있다.
+    #[tokio::test]
+    async fn broken_attempt_after_timeout_is_unknown() {
+        let dir = tmp_dir("broken-attempt");
+        write_req(&dir.join("payment_request.json"), "A");
+        write_attempt(&dir, "A", crate::policy::ATTEMPT_SENDING, "", "");
+        fs::write(crate::policy::attempt_path(&dir, "A").unwrap(), "{\"v\":1,").unwrap();
+        let r = await_result_in(&dir, "A", Duration::ZERO, Duration::from_millis(800))
+            .await
+            .expect("못 읽는 기록은 「안 나감」(None)이 아니다");
+        assert_eq!(r.status, "unknown");
         let _ = fs::remove_dir_all(&dir);
     }
 

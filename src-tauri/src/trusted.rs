@@ -9,6 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::chain::chain_file;
+use crate::i18n::tf;
 use crate::store::{jigap_dir, write_json};
 
 // 화이트리스트도 체인별로 분리(chain_file) — 테스트넷에서 학습한 신뢰 주소가 메인넷 자율 결제를
@@ -17,12 +18,21 @@ fn trusted_path() -> Result<PathBuf, String> {
     Ok(jigap_dir()?.join(chain_file("trusted")))
 }
 
+/// 보기·판정용 — 못 읽으면 빈 목록(= 신뢰하는 곳 없음, 자율 결제가 닫히는 쪽이라 안전하다).
 fn read_trusted() -> Vec<String> {
-    trusted_path()
-        .ok()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    read_trusted_checked().unwrap_or_default()
+}
+
+/// 고치기용 — 없으면 빈 목록, **있는데 못 읽으면 Err** (개발 73, 코덱스 1차 P1). 빈 목록으로 접으면 철회는 「지울 게 없다」며
+/// 아무것도 안 쓰고 성공을 돌려줬고(다시 읽히면 그 주소가 자율 결제를 계속 통과), 학습은 깨진 파일을 한 줄로 덮었다.
+fn read_trusted_checked() -> Result<Vec<String>, String> {
+    let path = trusted_path()?;
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
 /// 주소 비교는 항상 소문자로 — EIP-55 대소문자 표기 차이로 같은 주소가 갈라지지 않게.
@@ -52,7 +62,9 @@ fn trusted_guard() -> std::sync::MutexGuard<'static, ()> {
 /// 사람이 비번으로 승인한 송금/서명의 받는 주소를 학습한다. 기록 실패가 결제를 막진 않는다.
 pub(crate) fn record_trusted(addr: &str) {
     let _g = trusted_guard();
-    let mut list = read_trusted();
+    let Ok(mut list) = read_trusted_checked() else {
+        return; // 못 읽는 목록을 한 줄로 덮지 않는다 — 학습을 한 번 건너뛸 뿐이다.
+    };
     if add_trusted(&mut list, addr) {
         if let Ok(p) = trusted_path() {
             let _ = write_json(p, &list);
@@ -88,7 +100,12 @@ fn remove_trusted(list: &mut Vec<String>, addr: &str) -> bool {
 #[tauri::command]
 pub(crate) fn remove_trusted_addr(to: String) -> Result<(), String> {
     let _g = trusted_guard();
-    let mut list = read_trusted();
+    let mut list = read_trusted_checked().map_err(|e| {
+        tf!(
+            "신뢰 주소 목록을 읽지 못해 지우지 못했어요: {e}",
+            "Couldn't read the trusted-address list, so nothing was removed: {e}"
+        )
+    })?;
     if remove_trusted(&mut list, &to) {
         write_json(trusted_path()?, &list)?;
     }

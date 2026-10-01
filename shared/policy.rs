@@ -664,6 +664,20 @@ pub struct AttemptRecord {
     pub x402: Option<serde_json::Value>,
 }
 
+/// 결제 시도 기록을 읽는다 — **없음과 못 읽음을 가른다**(개발 73, 코덱스 1차 P1). 없으면 Ok(None), 있는데 못 읽거나
+/// 깨졌으면 Err. 둘 다 None 으로 접으면 `sending`·`done` 이던 기록이 깨졌을 때 「기록 없음 = 다시 승인해도 됨」·
+/// 「아무것도 안 나감」이 되어 같은 요청이 두 번 나갈 수 있었다. id 가 이상하면(경로를 못 만들면) 없음이다.
+pub fn read_attempt_at(dir: &Path, id: &str) -> Result<Option<AttemptRecord>, ()> {
+    let Some(path) = attempt_path(dir, id) else {
+        return Ok(None);
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(t) => serde_json::from_str(&t).map(Some).map_err(|_| ()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
 /// 이 기록이 있는 id 로 **승인을 다시 시작해도 되는가**(GUI `begin_approval`).
 ///
 /// `failed` 와 기록 없음만 된다. `done`·`unknown` 은 돈이 나갔거나 나갔을 수 있다 — 같은 요청을 한 번 더
@@ -1250,6 +1264,17 @@ mod tests {
     }
 
     // id 가 경로를 벗어나지 못한다.
+    /// 🔴 개발 73(코덱스 1차 P1): 결제 시도 기록은 「없음」과 「있는데 깨짐」을 가른다.
+    #[test]
+    fn read_attempt_separates_missing_from_broken() {
+        let d = std::env::temp_dir().join(format!("kura-attempt-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(d.join(APPROVALS_DIR)).unwrap();
+        assert_eq!(read_attempt_at(&d, "1789"), Ok(None));
+        std::fs::write(attempt_path(&d, "1789").unwrap(), "{\"v\":1,\"id\":").unwrap();
+        assert!(read_attempt_at(&d, "1789").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn attempt_paths_refuse_odd_ids() {
         let d = Path::new("/h/.jigap");

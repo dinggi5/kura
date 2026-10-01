@@ -270,7 +270,8 @@ fn counts_as_paid(status: &str) -> bool {
 }
 
 /// 같은 토큰·받는 곳·금액의 결제가 `window` 안에 있었으면 몇 초 전인지 (순수 함수 — 테스트용).
-/// 금액은 숫자로 비교한다("0.01" 과 "0.010" 은 같다). `parse` 가 못 읽는 금액은 같지 않은 것으로 본다.
+/// 금액은 숫자로 비교한다("0.01" 과 "0.010" 은 같다). 기록 쪽 금액을 `parse` 가 못 읽으면 **같은 것으로 본다**
+/// (개발 73, 코덱스 1차 P1) — 「다르다」로 치면 깨진 금액 한 칸이 중복 검사를 연다. 모르면 사람에게.
 fn last_same_payment(
     list: &[HistoryEntry],
     token: &str,
@@ -285,7 +286,7 @@ fn last_same_payment(
         .filter(|e| counts_as_paid(&e.status))
         .filter(|e| e.token == token && e.to.trim().eq_ignore_ascii_case(to.trim()))
         .filter(|e| e.ts <= now && now - e.ts <= window)
-        .filter(|e| parse(&e.amount) == Some(want))
+        .filter(|e| parse(&e.amount).is_none_or(|a| a == want))
         .map(|e| now - e.ts)
         .min()
 }
@@ -1035,6 +1036,8 @@ mod tests {
             Some(600)
         );
         assert_eq!(hit(&[rec(now - 5, "sent", "0xabc", "0.02")], "0.01"), None);
+        // 🔴 개발 73: 기록 금액이 깨졌으면 같은 것으로 본다(모르면 사람에게).
+        assert_eq!(hit(&[rec(now - 5, "sent", "0xabc", "abc")], "0.01"), Some(5));
         assert_eq!(hit(&[rec(now - 5, "sent", "0xabd", "0.01")], "0.01"), None);
         let mut eth = rec(now - 5, "sent", "0xabc", "0.01");
         eth.token = "ETH".into();

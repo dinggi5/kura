@@ -184,6 +184,19 @@ impl Settings {
     /// ② 설정 파일은 없는데 **지갑 파일이 있는** 경우(개발 31 이전 설치는 저장 버튼을
     ///    눌러야만 settings.json 이 생겼다): 테스트넷 시절 사용자다 — 이 경우는
     ///    reconcile 이 이 값을 저장해 테스트넷을 명시적으로 못박는다(코덱스 개발 39 P1).
+    /// 한도 넷을 「모름」으로 (개발 73) — 결제 쪽 `limits::parse_limit_*` 가 이 값을 보면 막는다.
+    fn with_limits_unknown(mut self) -> Self {
+        for slot in [
+            &mut self.single_usdc,
+            &mut self.daily_usdc,
+            &mut self.single_eth,
+            &mut self.daily_eth,
+        ] {
+            *slot = crate::limits::LIMIT_UNKNOWN.into();
+        }
+        self
+    }
+
     fn conservative() -> Self {
         Settings {
             chain_id: BASE_SEPOLIA.chain_id,
@@ -235,7 +248,9 @@ pub(crate) fn read_settings() -> Settings {
 fn settings_for_read(file: &SettingsFile, wallet_exists: bool) -> Settings {
     let mut s = match file {
         SettingsFile::Missing if !wallet_exists => Settings::default(),
-        SettingsFile::Missing | SettingsFile::Unreadable => Settings::conservative(),
+        SettingsFile::Missing => Settings::conservative(),
+        // 있는데 못 읽음 — 사용자가 정한 한도를 모른다. 보수 기본(20)으로 채우면 낮춰 둔 한도가 **올라간다**(개발 73).
+        SettingsFile::Unreadable => Settings::conservative().with_limits_unknown(),
         SettingsFile::Text(text) => {
             serde_json::from_str(text).unwrap_or_else(|_| salvage_limits(text))
         }
@@ -255,8 +270,11 @@ fn settings_for_read(file: &SettingsFile, wallet_exists: bool) -> Settings {
 /// 가면 사용자가 1 USDC 로 낮춰 둔 일일 한도가 기본 20 으로 **올라가** 그만큼 더 나갈 수 있었다 — 체인·RPC 를 필드
 /// 단위로 살리는 것(개발 56·57)과 같은 처방을 돈의 상한에도. JSON 자체가 깨져 아무것도 못 읽으면 보수 기본값 그대로다.
 /// 자율 승인 한도는 살리지 않는다 — 보수 기본값이 「자율 꺼짐」이라 그쪽이 더 안전하다.
+/// **못 살린 한도 칸은 「모름」(`LIMIT_UNKNOWN`)** 이다(개발 73, 코덱스 1차 P1) — 72 까진 보수 기본 20 으로 채워, 1 로 낮춰 둔
+/// 한도의 칸이 빠지거나(`null`·숫자) JSON 이 통째로 깨지면 한도가 **올라갔다**. 모르는 한도로는 결제하지 않는다
+/// (`limits::parse_limit_*` 가 막고, 설정 화면에서 다시 저장하면 풀린다).
 fn salvage_limits(text: &str) -> Settings {
-    let mut s = Settings::conservative();
+    let mut s = Settings::conservative().with_limits_unknown();
     let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
         return s;
     };
@@ -525,8 +543,25 @@ mod tests {
             ("0.001", "0.002")
         );
         assert_eq!(s.auto_approve_usdc, "0");
+        // 🔴 개발 73(코덱스 1차 P1): 한도 칸을 못 살리면 「모름」 — 보수 기본 20 으로 올라가지 않는다.
         let junk = settings_for_read(&SettingsFile::Text("{ 깨짐".into()), true);
-        assert_eq!(junk.daily_usdc, Settings::conservative().daily_usdc);
+        assert_eq!(junk.daily_usdc, crate::limits::LIMIT_UNKNOWN);
+        for broken in [
+            r#"{"single_usdc":"0.5","daily_usdc":1,"single_eth":"0.001","daily_eth":"0.002"}"#,
+            r#"{"single_usdc":"0.5","daily_usdc":null,"single_eth":"0.001","daily_eth":"0.002"}"#,
+            r#"{"single_usdc":"0.5","single_eth":"0.001","daily_eth":"0.002"}"#,
+        ] {
+            let s = settings_for_read(&SettingsFile::Text(broken.into()), true);
+            assert_eq!(s.daily_usdc, crate::limits::LIMIT_UNKNOWN, "{broken}");
+            assert_eq!(s.single_usdc, "0.5", "{broken}");
+        }
+        let unreadable = settings_for_read(&SettingsFile::Unreadable, true);
+        assert_eq!(unreadable.single_eth, crate::limits::LIMIT_UNKNOWN);
+        // 파일이 없던 시절의 기존 사용자(없음 + 지갑)는 그 시절 한도 그대로 — 「모름」이 아니다.
+        assert_ne!(
+            settings_for_read(&SettingsFile::Missing, true).daily_usdc,
+            crate::limits::LIMIT_UNKNOWN
+        );
     }
 
     // 🔴 신규(파일 없음)와 깨진 파일(있는데 못 읽음)은 다른 답이어야 한다 (개발 39).
@@ -554,10 +589,10 @@ mod tests {
             settings_for_read(&SettingsFile::Unreadable, false).chain_id,
             BASE_SEPOLIA.chain_id
         );
-        // 깨진 JSON → 보수적(테스트넷). 나머지 값은 기본과 동일.
+        // 깨진 JSON → 보수적(테스트넷). 한도는 「모름」(개발 73), 나머지 값은 기본과 동일.
         let c = settings_for_read(&text("{ 이건 JSON 이 아니다"), true);
         assert_eq!(c.chain_id, BASE_SEPOLIA.chain_id);
-        assert_eq!(c.single_usdc, "5");
+        assert_eq!(c.single_usdc, crate::limits::LIMIT_UNKNOWN);
         assert!(!c.auto_check_update);
         // 정상 JSON 은 그대로.
         let ok = settings_for_read(
@@ -595,8 +630,8 @@ mod tests {
         // 한도 필드가 빠져 Settings 로는 못 읽는 파일 — 체인만은 살아 있어야 한다(개발 52 의 그 파일).
         let f = settings_for_read(&SettingsFile::Text(r#"{"chain_id":8453}"#.into()), true);
         assert_eq!(f.chain_id, BASE_MAINNET.chain_id);
-        // 나머지는 보수적 기본.
-        assert_eq!(f.single_usdc, "5");
+        // 못 살린 한도는 「모름」(개발 73) — 보수 기본 20 으로 올라가지 않게.
+        assert_eq!(f.single_usdc, crate::limits::LIMIT_UNKNOWN);
         // 파일 없음도 양쪽이 같은 함수를 타므로 같은 답이다.
         for wallet in [false, true] {
             assert_eq!(
@@ -637,8 +672,9 @@ mod tests {
         );
         assert_eq!(f.rpc_url, "http://127.0.0.1:8545");
         assert_eq!(f.chain_id, BASE_MAINNET.chain_id);
-        // 나머지는 보수적 기본.
-        assert_eq!(f.single_usdc, "5");
+        // 못 살린 한도는 「모름」(개발 73), 살린 칸은 그대로.
+        assert_eq!(f.single_usdc, crate::limits::LIMIT_UNKNOWN);
+        assert_eq!(f.daily_usdc, "20");
         // 파일 없음·못 읽음은 지정 RPC 없음(공식).
         assert!(settings_for_read(&SettingsFile::Missing, true)
             .rpc_url

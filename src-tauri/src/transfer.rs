@@ -16,7 +16,9 @@ use zeroize::Zeroizing;
 
 use crate::chain::{active_chain, with_pinned_chain, IERC20};
 use crate::history::log_attempt;
-use crate::limits::{parse_eth_nonneg, parse_usdc_nonneg, refund_spend, reserve_spend};
+use crate::limits::{
+    parse_eth_nonneg, parse_limit_eth, parse_limit_usdc, parse_usdc_nonneg, refund_spend, reserve_spend,
+};
 use crate::lock::read_lock;
 use crate::settings::{effective_rpc, read_settings, redact_urls};
 use crate::trusted::record_trusted;
@@ -426,6 +428,14 @@ async fn broadcast_via(
     {
         return Ok(hash);
     }
+    // 다시 내기 직전에도 긴급 잠금을 본다(개발 73, 코덱스 1차 P1) — 첫 제출이 노드에 안 닿았고 그 사이 사람이 잠갔으면,
+    // 이 재제출이 「처음으로 나가는」 제출이 된다. 첫 제출이 닿았을 수 있으니 결말은 실패가 아니라 불명이다.
+    if locked() {
+        return Err(SendError::Unknown {
+            msg: unknown_send_message(&hash, &why),
+            hash,
+        });
+    }
     match tokio::time::timeout(SEND_WAIT, provider.send_raw_transaction(&raw)).await {
         Ok(Ok(_)) => return Ok(hash),
         Ok(Err(e)) if classify_send_error(&e) == SendFault::AlreadyKnown => return Ok(hash),
@@ -574,8 +584,8 @@ async fn do_send_eth_inner(
     // 단일 + 일일 누적 한도 검사 + 예약(낙관적 선반영). 락은 이 빠른 파일 I/O 구간만 잡는다
     // (느린 RPC 가 모든 결제를 전역 정지시키지 않게). 한도 초과면 여기서 거부.
     let settings = read_settings();
-    let single = parse_eth_nonneg(&settings.single_eth)?;
-    let daily = parse_eth_nonneg(&settings.daily_eth)?;
+    let single = parse_limit_eth(&settings.single_eth)?;
+    let daily = parse_limit_eth(&settings.daily_eth)?;
     let reserved_day = match reserve_spend("ETH", value, single, daily, 18).await {
         Ok(d) => d,
         Err(e) => {
@@ -752,8 +762,8 @@ async fn do_send_usdc_inner(
 
     // 한도 검사 + 예약 (do_send_eth 와 동일 — 락은 빠른 파일 I/O 만, 네트워크 전송은 락 밖).
     let settings = read_settings();
-    let single: U256 = parse_usdc_nonneg(&settings.single_usdc, dec)?;
-    let daily: U256 = parse_usdc_nonneg(&settings.daily_usdc, dec)?;
+    let single: U256 = parse_limit_usdc(&settings.single_usdc, dec)?;
+    let daily: U256 = parse_limit_usdc(&settings.daily_usdc, dec)?;
     let reserved_day = match reserve_spend("USDC", value, single, daily, dec).await {
         Ok(d) => d,
         Err(e) => {
@@ -1021,6 +1031,24 @@ mod tests {
             .await
             .unwrap();
         assert_same_raw(&f, &hash, 2);
+    }
+
+    /// 🔴 개발 73(코덱스 1차 P1): 첫 제출이 모름(5xx)이고 그 사이 긴급 잠금이 켜지면 **다시 내지 않는다** — 결말은 불명.
+    /// 잠금 확인은 첫 제출 직전 한 번(풀림) → 재제출 직전 한 번(잠김) 순서로 불린다.
+    #[tokio::test]
+    async fn lock_between_submits_stops_the_resubmit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn locked_after_first() -> bool {
+            CALLS.fetch_add(1, Ordering::SeqCst) >= 1
+        }
+        let f = fake_rpc(vec![Act::Http(502), Act::Ok]);
+        let signer = PrivateKeySigner::random();
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC", locked_after_first).await {
+            Err(SendError::Unknown { .. }) => {}
+            other => panic!("불명이어야 한다: {other:?}"),
+        }
+        assert_eq!(f.raws.lock().unwrap().len(), 1, "재제출하면 안 된다");
     }
 
     /// 노드가 읽고 거절 → 확실한 실패, **다시 내지 않는다**(제출 1회).

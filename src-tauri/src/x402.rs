@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::chain::{active_chain, with_pinned_chain, TransferWithAuthorization};
 use crate::history::log_attempt;
-use crate::limits::{parse_usdc_nonneg, refund_spend, reserve_spend};
+use crate::limits::{parse_limit_usdc, parse_usdc_nonneg, refund_spend, reserve_spend};
 use crate::lock::read_lock;
 use crate::settings::read_settings;
 use crate::store::now_secs;
@@ -215,8 +215,8 @@ async fn do_sign_x402_inner(
     // 한도 검사 + 예약 (송금과 동일 — 서명도 USDC 인출 권한 부여라 누적에 보수적으로 선반영).
     // 락은 빠른 파일 I/O 구간만 잡는다. 한도 초과면 여기서 거부.
     let settings = read_settings();
-    let single: U256 = parse_usdc_nonneg(&settings.single_usdc, dec)?;
-    let daily: U256 = parse_usdc_nonneg(&settings.daily_usdc, dec)?;
+    let single: U256 = parse_limit_usdc(&settings.single_usdc, dec)?;
+    let daily: U256 = parse_limit_usdc(&settings.daily_usdc, dec)?;
     let reserved_day = match reserve_spend("USDC", value, single, daily, dec).await {
         Ok(d) => d,
         Err(e) => {
@@ -347,8 +347,8 @@ async fn do_x402_direct_inner(
     }
 
     let settings = read_settings();
-    let single: U256 = parse_usdc_nonneg(&settings.single_usdc, dec)?;
-    let daily: U256 = parse_usdc_nonneg(&settings.daily_usdc, dec)?;
+    let single: U256 = parse_limit_usdc(&settings.single_usdc, dec)?;
+    let daily: U256 = parse_limit_usdc(&settings.daily_usdc, dec)?;
     let reserved_day = match reserve_spend("USDC", value, single, daily, dec).await {
         Ok(d) => d,
         Err(e) => {

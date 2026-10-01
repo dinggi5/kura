@@ -117,10 +117,51 @@ fn apply_refund_once(spend: &mut Spend, token: &str, value: U256, day: u64, key:
     true
 }
 
+/// 설정에서 한도를 확인하지 못했다는 표시 (개발 73) — `settings::salvage_limits` 가 못 살린 칸에 넣는다. 빈 값이라 설정 화면의
+/// 칸이 비어 보이고, 저장하려면 숫자를 넣어야 한다(검증이 빈 값을 거부한다).
+pub(crate) const LIMIT_UNKNOWN: &str = "";
+
+/// 결제 직전 한도 읽기 — 「모름」이면 막는다. 금액 파서와 따로 두는 이유: 빈 **금액**은 형식 오류지만 빈 **한도**는
+/// 「설정을 못 읽었다」라 사람이 할 일이 다르다.
+pub(crate) fn parse_limit_usdc(s: &str, dec: u8) -> Result<U256, String> {
+    limit_known(s)?;
+    parse_usdc_nonneg(s, dec)
+}
+
+pub(crate) fn parse_limit_eth(s: &str) -> Result<U256, String> {
+    limit_known(s)?;
+    parse_eth_nonneg(s)
+}
+
+fn limit_known(s: &str) -> Result<(), String> {
+    if s.trim() == LIMIT_UNKNOWN {
+        return Err(ts!(
+            "설정에서 한도를 읽지 못해 결제를 막았어요. 설정에서 한도를 다시 저장해 주세요.",
+            "Payments are blocked because your limits couldn't be read. Save your limits again in Settings."
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// 토큰 자릿수보다 긴 소수는 거부한다 (개발 73, 코덱스 1차 P1). alloy `parse_units` 는 넘친 자리를 **조용히 버려서**
+/// 한도 「0.0000001 USDC」가 0 = 무제한이 됐고, 금액 「1.1234567」은 1.123456 으로 나갔다. 끝의 0 은 자리로 안 센다.
+fn check_decimals(s: &str, dec: u8) -> Result<(), String> {
+    let frac = s.trim().split_once('.').map(|(_, f)| f.trim_end_matches('0')).unwrap_or("");
+    if frac.len() > dec as usize {
+        return Err(tf!(
+            "소수점 아래는 {dec}자리까지만 쓸 수 있어요",
+            "Use at most {dec} digits after the decimal point"
+        ));
+    }
+    Ok(())
+}
+
 /// USDC 금액/한도 문자열을 base unit U256 로 파싱한다. **음수는 거부**한다.
 /// (alloy `parse_units` 는 "-1" 을 I256 으로 받아 `get_absolute()`=`into_raw()` 가 2의 보수
 ///  거대 U256 을 돌려준다 → 음수 한도가 "무제한"으로, 음수 금액이 거대 송금으로 둔갑하는 함정.)
 pub(crate) fn parse_usdc_nonneg(s: &str, dec: u8) -> Result<U256, String> {
+    check_decimals(s, dec)?;
     let pu = parse_units(s.trim(), dec).map_err(|e| {
         tf!(
             "금액 형식 오류: {e}",
@@ -148,6 +189,7 @@ pub(crate) fn parse_eth_nonneg(s: &str) -> Result<U256, String> {
         )
         .into());
     }
+    check_decimals(t, 18)?;
     parse_ether(t).map_err(|e| {
         tf!(
             "금액 형식 오류: {e}",
@@ -214,8 +256,10 @@ fn judge_spend(
     };
     // 금액 칸이 숫자가 아닌 장부도 「못 읽음」이다 (개발 72 코덱스 1차 P0) — JSON 모양만 맞으면 통과시키고
     // `spent_of` 가 그 칸을 0 으로 읽어, 오늘 쓴 돈이 지워진 채 한도를 검사했다(「못 읽으면 빈 값」 다섯 번째).
-    // 빈 칸은 옛 기본값이라 0 으로 친다.
-    let amount_ok = |v: &str| v.is_empty() || v.parse::<U256>().is_ok();
+    // 빈 칸도 못 읽음이다(개발 73, 코덱스 1차 P1) — 72 에선 「옛 기본값」이라 0 으로 쳤는데, 0.1.0 부터 장부를 쓰는 곳은
+    // 전부 숫자("0" 포함)를 쓴다. 오늘 장부의 빈 칸은 손상뿐이고, 0 으로 치면 오늘 쓴 돈이 지워진다.
+    // `U256::from_str("")` 은 Ok(0) 이다 — 빈 칸을 따로 거른다.
+    let amount_ok = |v: &str| !v.trim().is_empty() && v.parse::<U256>().is_ok();
     let parsed = match raw {
         None => return Some(fresh),
         Some(Ok(t)) => serde_json::from_str::<Spend>(&t)
@@ -362,8 +406,9 @@ mod tests {
         assert!(judge_spend(with("abc", "0"), Some(today), today).is_none());
         assert!(judge_spend(with("0", "1.5"), Some(today), today).is_none());
         assert!(judge_spend(with("-1", "0"), Some(today), today).is_none());
-        // 빈 칸은 옛 기본값 = 0.
-        assert!(judge_spend(with("", "0"), Some(today), today).is_some());
+        // 빈 칸도 못 읽음(개발 73) — 장부를 쓰는 곳은 늘 숫자를 쓴다.
+        assert!(judge_spend(with("", "0"), Some(today), today).is_none());
+        assert!(judge_spend(with("0", ""), Some(today), today).is_none());
         // 어제 파일이면 그래도 새 날로 간다(한 번 상한 장부가 영영 막지 않게).
         assert_eq!(
             judge_spend(with("abc", "0"), Some(today - 1), today)
@@ -417,6 +462,17 @@ mod tests {
     }
 
     // 단일·일일 모두 안쪽이면 통과.
+    /// 🔴 개발 73(코덱스 1차 P1): 자릿수를 넘는 소수는 잘리지 않고 거부 — 잘리면 양수 한도가 0(무제한)이 된다.
+    #[test]
+    fn excess_decimals_rejected_not_truncated() {
+        assert!(parse_usdc_nonneg("0.0000001", 6).is_err());
+        assert!(parse_usdc_nonneg("1.1234567", 6).is_err());
+        assert!(parse_eth_nonneg("0.0000000000000000001").is_err());
+        assert_eq!(parse_usdc_nonneg("1.123456", 6).unwrap(), U256::from(1_123_456u64));
+        assert_eq!(parse_usdc_nonneg("1.1000000", 6).unwrap(), U256::from(1_100_000u64));
+        assert_eq!(parse_usdc_nonneg("5", 6).unwrap(), U256::from(5_000_000u64));
+    }
+
     #[test]
     fn enforce_caps_allows_within_limits() {
         let r = enforce_caps(

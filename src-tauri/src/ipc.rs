@@ -391,7 +391,14 @@ pub(crate) fn begin_approval(req: &PaymentRequest) -> Result<ApprovalGuard, Stri
     // MCP 는 시간 초과 때 요청을 먼저 지우고 그다음 기록을 읽는다(shared/policy.rs 순서 규약) — 이 순서가
     // 둘 다 지켜져야 「GUI 는 요청을 보고 전송을 시작했는데 MCP 는 아무것도 못 보고 『응답 없음』이라
     // 답한다」가 불가능해진다. 두 프로세스 사이엔 잠금이 없어서, 닫는 것은 순서뿐이다.
-    let prev = read_attempt(&req.id);
+    // 기록이 있는데 못 읽으면 다시 승인하지 않는다(개발 73, 코덱스 1차 P1) — 깨진 게 `sending`·`done` 이었으면 두 번째 결제다.
+    let Ok(prev) = read_attempt(&req.id) else {
+        return Err(ts!(
+            "이 결제의 처리 기록을 읽지 못했어요. 이미 나갔을 수 있어 다시 승인하지 않습니다 — 내역을 확인하세요.",
+            "Couldn't read this payment's processing record. It may already have gone out, so it won't be approved again — check the history."
+        )
+        .into());
+    };
     if !crate::policy::attempt_allows_retry(prev.as_ref()) {
         // 이미 나갔거나(done·unknown) 앱이 전송 중에 죽은(sending) 요청 — 다시 승인하면 두 번째 결제다.
         return Err(ts!(
@@ -448,6 +455,8 @@ pub(crate) fn finish_approval(
     outcome: Result<PaymentResult, String>,
 ) -> Result<PaymentResult, String> {
     let started = read_attempt(&req.id)
+        .ok()
+        .flatten()
         .map(|r| r.started)
         .unwrap_or_else(now_secs);
     let mut rec = crate::policy::AttemptRecord {
@@ -521,9 +530,9 @@ pub(crate) fn result_from_send(
     }
 }
 
-fn read_attempt(id: &str) -> Option<crate::policy::AttemptRecord> {
-    let path = crate::policy::attempt_path(&jigap_dir().ok()?, id)?;
-    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+/// 결제 시도 기록 — 없으면 Ok(None), 있는데 못 읽으면 Err (개발 73). 홈을 못 정해도 Err.
+fn read_attempt(id: &str) -> Result<Option<crate::policy::AttemptRecord>, ()> {
+    crate::policy::read_attempt_at(&jigap_dir().map_err(|_| ())?, id)
 }
 
 fn write_attempt(rec: &crate::policy::AttemptRecord) -> Result<(), String> {
