@@ -17,6 +17,60 @@ pub(crate) fn jigap_dir() -> Result<PathBuf, String> {
     Ok(policy::jigap_dir_in(&home))
 }
 
+/// 데이터 폴더당 앱 하나 (개발 73, 코덱스 1차 P1). 승인·한도 장부·내역·지갑 파일의 잠금은 전부 **프로세스 안** `Mutex` 라,
+/// 같은 폴더를 쓰는 앱이 둘 뜨면(DMG 사본 + 설치본, 자동 시작 + 손으로 연 것) 둘 다 「첫 승인」으로 보고 같은 요청을
+/// 두 번 보내거나 장부를 서로 덮을 수 있었다. 폴더의 잠금 파일을 OS 잠금(flock)으로 쥐고, 프로세스가 끝나면 OS 가 푼다.
+static APP_LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum AppLock {
+    /// 이 프로세스가 쥐었다.
+    Held,
+    /// 다른 앱이 쥐고 있다 — 이 프로세스는 끝내야 한다.
+    Busy,
+    /// 잠금 파일을 못 만들었다(홈·권한) — 그 폴더라면 지갑도 못 연다. 막지 않고 진행한다.
+    Unavailable,
+}
+
+/// 잠금을 잡는다. 이미 잡혀 있으면 `wait` 동안 다시 해 본다 — 업데이트 재시작은 새 앱을 먼저 띄우고 옛 앱이 곧 끝나서
+/// 둘이 잠깐 겹친다. 바로 포기하면 업데이트 뒤 앱이 사라진다.
+pub(crate) fn hold_app_lock(wait: std::time::Duration) -> AppLock {
+    let Ok(dir) = jigap_dir() else {
+        return AppLock::Unavailable;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return AppLock::Unavailable;
+    }
+    let (verdict, file) = lock_at(&dir.join("app.lock"), wait);
+    if let Some(f) = file {
+        let _ = APP_LOCK.set(f);
+    }
+    verdict
+}
+
+/// `hold_app_lock` 의 몸통 — 경로를 받는다(테스트가 실지갑 폴더를 안 건드리게). 잡았으면 쥘 파일도 돌려준다.
+fn lock_at(path: &std::path::Path, wait: std::time::Duration) -> (AppLock, Option<std::fs::File>) {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+    else {
+        return (AppLock::Unavailable, None);
+    };
+    let until = std::time::Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return (AppLock::Held, Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return (AppLock::Busy, None),
+            Err(std::fs::TryLockError::Error(_)) => return (AppLock::Unavailable, None),
+        }
+    }
+}
+
 /// 현재 유닉스 시각(초).
 pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
@@ -154,6 +208,22 @@ pub(crate) fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 개발 73(코덱스 1차 P1): 잠금을 쥔 동안 두 번째는 Busy, 첫째가 놓으면(프로세스 끝) 잡힌다.
+    #[test]
+    fn second_app_lock_is_busy_until_the_first_lets_go() {
+        let dir = std::env::temp_dir().join(format!("kura-applock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.lock");
+        let (a, held) = lock_at(&path, std::time::Duration::ZERO);
+        assert_eq!(a, AppLock::Held);
+        let (b, _) = lock_at(&path, std::time::Duration::from_millis(300));
+        assert_eq!(b, AppLock::Busy);
+        drop(held);
+        let (c, _) = lock_at(&path, std::time::Duration::ZERO);
+        assert_eq!(c, AppLock::Held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 🔴 **동시에 같은 파일을 원자 쓰기해도 결과는 둘 중 하나의 온전한 내용이어야 한다** (개발 66, 코덱스 P0).
     /// 예전엔 임시 파일 이름이 대상마다 하나(`wallet.tmp`)라, 두 작성자가 그 한 파일을 번갈아 truncate·쓰기

@@ -495,14 +495,16 @@ pub async fn run_x402(
             "Couldn't parse the 402 response: {e}"
         )
     })?;
-    let req = x402::pick_requirement(&required)?;
+    // 체인을 **한 번** 읽어 고르기·대조·요청 각인을 모두 그 값으로 한다(개발 73, 코덱스 1차 P1).
+    let picked = active_chain();
+    let req = x402::pick_requirement_for(&required, &picked)?;
     // 🔴 **요구를 고른 그 순간의 체인을 붙잡는다** (개발 64 코덱스 P1). `pick_requirement` 는 활성
     // 체인으로 고르는데, 아래 ERC-8004 조회가 최대 10초를 먹는다 — 그 사이 사용자가 네트워크를
     // 바꾸면 요청 작성기가 **바뀐 체인**을 각인하고, GUI 는 그 각인과 현재가 같으니 그대로 승인한다.
     // 서명 갈래였으면 서버가 거절하고 끝이지만(돈 안 나감), 직접 제출은 **그 체인으로 진짜 송금이
     // 나간다** — Arc 두 체인은 USDC 주소까지 같아서 조용히 성공한다. 아래에서 다시 대조한다.
-    let picked_chain = active_chain().chain_id;
-    let picked_explorer = active_chain().explorer_tx_prefix;
+    let picked_chain = picked.chain_id;
+    let picked_explorer = picked.explorer_tx_prefix;
     let amount_usdc = x402::base_units_to_usdc(&req.amount)?;
     // 🔴 승인 창·내역·알림에 보이는 리소스 URL은 **우리가 실제로 요청한 최종 URL**이다 (개발 47 이월).
     // 예전엔 402 응답이 주장한 `resource` 문자열을 우선 썼다 — 그러면 evil.example 이
@@ -635,9 +637,17 @@ pub async fn run_x402(
             &resource,
             &nonce,
             agent,
+            picked_chain,
         )?
     } else {
-        payment::write_x402_request(req.pay_to.trim(), &amount_usdc, &memo, &resource, agent)?
+        payment::write_x402_request(
+            req.pay_to.trim(),
+            &amount_usdc,
+            &memo,
+            &resource,
+            agent,
+            picked_chain,
+        )?
     };
     // 🔴 **seed 모드면 승인 대기를 그 수명 안으로 줄인다** (개발 64 리뷰 P1). seed 는 서버가 수명을
     // 박아 발급한 챌린지라(상대 구현 기본 300초), 5분을 꽉 채워 기다렸다 승인받으면 **브로드캐스트는

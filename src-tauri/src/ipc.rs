@@ -532,7 +532,7 @@ pub(crate) fn result_from_send(
 
 /// 결제 시도 기록 — 없으면 Ok(None), 있는데 못 읽으면 Err (개발 73). 홈을 못 정해도 Err.
 fn read_attempt(id: &str) -> Result<Option<crate::policy::AttemptRecord>, ()> {
-    crate::policy::read_attempt_at(&jigap_dir().map_err(|_| ())?, id)
+    crate::policy::read_attempt_at(&jigap_dir().map_err(|_| ())?, id).map_err(|_| ())
 }
 
 fn write_attempt(rec: &crate::policy::AttemptRecord) -> Result<(), String> {
@@ -683,11 +683,40 @@ fn clear_dead_request() {
         return;
     };
     let req = read_request();
+    // 있는데 못 읽는 요청 파일(옛 MCP 가 쓰다 죽은 반쪽 등)도 늙었으면 옆으로 치운다(개발 73, 코덱스 1차 P2) — 안 치우면
+    // MCP 는 「대기 중」이라 새 요청을 영영 거절한다. 승인 창 시간 + 유예가 지나야만: 그 전엔 아직 쓰는 중일 수 있다.
+    if req.is_none() {
+        if let Ok(p) = request_path() {
+            set_aside_if_stale_unreadable(&p);
+        }
+    }
     if should_clear_request(req.as_ref(), approval_in_flight()) {
         if let (Ok(p), Some(r)) = (request_path(), req) {
             // 본 그 요청만(개발 71) — 판정한 뒤 MCP 가 새 요청을 썼으면 그건 살아 있는 요청이다.
             crate::policy::remove_request_if_mine(&p, &r.id);
         }
+    }
+}
+
+/// 못 읽는 요청 파일이 승인 창 시간 + 유예보다 늙었으면 `<이름>.broken.<초>` 로 치운다. 읽히는 파일·없는 파일은 그대로.
+fn set_aside_if_stale_unreadable(path: &std::path::Path) {
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
+    if serde_json::from_str::<PaymentRequest>(&text).is_ok() {
+        return;
+    }
+    let old = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() > APPROVAL_WINDOW_SECS + STALE_GRACE_SECS);
+    if old {
+        let name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let _ = fs::rename(path, path.with_file_name(format!("{name}.broken.{}", now_secs())));
     }
 }
 
@@ -1119,6 +1148,25 @@ pub(crate) fn get_agent_status() -> AgentStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 개발 73(코덱스 1차 P2): 못 읽는 요청 파일은 늙었을 때만 치운다 — 읽히는 것·새것은 그대로.
+    #[test]
+    fn stale_unreadable_request_is_set_aside() {
+        let dir = std::env::temp_dir().join(format!("kura-req-aside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("payment_request.json");
+        fs::write(&p, "{\"id\":").unwrap();
+        set_aside_if_stale_unreadable(&p);
+        assert!(p.exists(), "새것은 아직 쓰는 중일 수 있다");
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(APPROVAL_WINDOW_SECS + STALE_GRACE_SECS + 5);
+        fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        set_aside_if_stale_unreadable(&p);
+        assert!(!p.exists(), "늙은 반쪽은 치운다");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "지우지 않고 옆에 남긴다");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     fn tick_in(now: u64, front_alive: bool, live: bool) -> TickIn {
         TickIn {

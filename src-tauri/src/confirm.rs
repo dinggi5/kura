@@ -25,6 +25,25 @@ use crate::store::now_secs;
 
 /// 한 차례에 묻는 건수 상한 — 옛 기록이 많아도 RPC 를 몰아치지 않게.
 const MAX_PER_TICK: usize = 12;
+/// 돌려 가며 고를 후보의 상한 — 이만큼 모아 그중 `MAX_PER_TICK` 건을 차례로 묻는다.
+const MAX_CANDIDATES: usize = 512;
+
+/// 차례마다 MAX_PER_TICK 씩 밀리는 시작 자리.
+fn next_offset() -> usize {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    N.fetch_add(MAX_PER_TICK, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `list` 를 `offset` 자리부터 한 바퀴 돌며 `n` 건 (순수 — 테스트용).
+fn rotate_take<T>(mut list: Vec<T>, offset: usize, n: usize) -> Vec<T> {
+    if list.is_empty() {
+        return list;
+    }
+    let k = offset % list.len();
+    list.rotate_left(k);
+    list.truncate(n);
+    list
+}
 /// 이보다 오래된 기록은 묻지 않는다(한도 환불은 어차피 같은 날만, 상태 표시는 일주일이면 충분).
 const LOOKBACK_SECS: u64 = 7 * 86_400;
 /// 보낸 직후엔 아직 채굴 전이다 — 이만큼 지난 뒤부터 영수증을 묻는다.
@@ -67,7 +86,8 @@ fn ask_for(e: &HistoryEntry, now: u64) -> Option<Ask> {
         "sent" | "unknown" if now - e.ts >= MINE_GRACE_SECS => {
             e.detail.parse().ok().map(Ask::Receipt)
         }
-        "signed" if now - e.ts > SIGN_VALID_SECS + SIGN_EXPIRY_MARGIN_SECS => {
+        // 「정산 실패」도 묻는다(개발 73, 코덱스 1차 P1) — 서버가 실패라고 해도 서명은 유효 시간 동안 살아 있어 누가 정산할 수 있다.
+        "signed" | "settle_failed" if now - e.ts > SIGN_VALID_SECS + SIGN_EXPIRY_MARGIN_SECS => {
             e.detail.parse().ok().map(Ask::AuthUsed)
         }
         _ => None,
@@ -93,8 +113,8 @@ pub(crate) fn apply_verdict(e: &mut HistoryEntry, v: Verdict) -> (bool, bool) {
     let (from, refund): (&[&str], bool) = match v {
         Verdict::Mined => (&["sent", "unknown"], false),
         Verdict::Reverted => (&["sent", "unknown"], true),
-        Verdict::AuthUsed => (&["signed"], false),
-        Verdict::AuthExpired => (&["signed"], true),
+        Verdict::AuthUsed => (&["signed", "settle_failed"], false),
+        Verdict::AuthExpired => (&["signed", "settle_failed"], true),
     };
     if !from.contains(&e.status.as_str()) {
         return (false, false);
@@ -110,6 +130,35 @@ pub(crate) fn apply_verdict(e: &mut HistoryEntry, v: Verdict) -> (bool, bool) {
 fn refund_day(ts: u64, now: u64) -> Option<u64> {
     let day = ts / 86_400;
     (day == now / 86_400 && ts.saturating_sub(300) / 86_400 == day).then_some(day)
+}
+
+/// 이 서명이 **체인 시각으로** 이 시각을 넘긴 블록에서만 「안 쓰였다 = 만료」를 확정한다 (개발 73, 코덱스 1차 P1).
+/// `validBefore` = 서명 시각 + 유효 시간이고 서명 시각 ≤ 기록 시각이라, 기록 시각 + 유효 시간 + 여유는 그보다 늦다.
+/// 내 시계만 보면 시계가 앞서거나 RPC 가 뒤처졌을 때 아직 쓰일 수 있는 서명을 「안 나감」으로 적고 한도를 돌려줬다.
+fn auth_deadline(e: &HistoryEntry) -> u64 {
+    e.ts + SIGN_VALID_SECS + SIGN_EXPIRY_MARGIN_SECS
+}
+
+/// 판단 (순수 — 테스트용): 이 블록 시각에서 인가 상태를 물어도 되는가.
+fn auth_settled_by(block_ts: u64, e: &HistoryEntry) -> bool {
+    block_ts > auth_deadline(e)
+}
+
+/// 최신 블록의 번호·시각 — 원시 JSON 으로(Base 블록의 OP 예치 거래는 이더리움 타입으로 안 풀린다, deposits.rs 와 같다).
+async fn latest_block<P: Provider>(provider: &P) -> Option<(u64, u64)> {
+    let v: serde_json::Value = tokio::time::timeout(
+        CALL_WAIT,
+        provider.raw_request("eth_getBlockByNumber".into(), ("latest", false)),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let hex = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .and_then(|x| u64::from_str_radix(x.trim_start_matches("0x"), 16).ok())
+    };
+    Some((hex("number")?, hex("timestamp")?))
 }
 
 /// 한 차례 — 활성 체인의 모든 계정 내역에서 물을 것을 모아 묻고 적는다. 반환 = 고친 기록 수.
@@ -148,12 +197,15 @@ async fn tick_with(chain_id: u64, url: String) -> Result<usize, String> {
                     entry: e,
                     ask,
                 });
-                if jobs.len() >= MAX_PER_TICK {
+                if jobs.len() >= MAX_CANDIDATES {
                     break 'outer;
                 }
             }
         }
     }
+    // 한 차례에 묻는 건 MAX_PER_TICK 건 — 시작 자리를 차례마다 돌린다(개발 73, 코덱스 1차 P2). 늘 앞에서부터 고르면 영수증이
+    // 끝내 안 나오는 앞쪽 12건이 매번 자리를 차지해 뒤쪽 기록은 영영 확인되지 않았다(환불도 없이).
+    let jobs = rotate_take(jobs, next_offset(), MAX_PER_TICK);
     // 환불은 RPC 없이 장부만 본다 — 체인 확인보다 먼저, 매 차례(지난 차례에 결말만 적고 못 준 것까지).
     let refunded = refund_pass(&accounts, now).await;
     if jobs.is_empty() {
@@ -172,6 +224,12 @@ async fn tick_with(chain_id: u64, url: String) -> Result<usize, String> {
         return Err(format!("RPC 체인 {got} ≠ {chain_id}"));
     }
     let usdc = crate::chain::active_chain().usdc_address;
+    // 인가 상태는 한 블록에 못박아 묻는다 — 시각을 본 블록과 상태를 읽은 블록이 같아야 「그 시각에 안 쓰였다」가 성립한다.
+    let head = if jobs.iter().any(|j| matches!(j.ask, Ask::AuthUsed(_))) {
+        latest_block(&provider).await
+    } else {
+        None
+    };
     let mut fixed = 0usize;
     for job in jobs {
         let verdict = match job.ask {
@@ -189,9 +247,20 @@ async fn tick_with(chain_id: u64, url: String) -> Result<usize, String> {
                 }
             }
             Ask::AuthUsed(nonce) => {
+                let Some((block, block_ts)) = head else {
+                    continue; // 체인 시각을 모르면 만료를 확정하지 않는다 — 다음 차례에 다시
+                };
+                if !auth_settled_by(block_ts, &job.entry) {
+                    continue; // 체인 시각으로는 아직 유효 시간 안(내 시계가 앞섰거나 RPC 가 뒤처짐)
+                }
                 let c = IEIP3009::new(usdc, &provider);
-                match tokio::time::timeout(CALL_WAIT, c.authorizationState(job.owner, nonce).call())
-                    .await
+                match tokio::time::timeout(
+                    CALL_WAIT,
+                    c.authorizationState(job.owner, nonce)
+                        .call()
+                        .block(alloy::eips::BlockId::number(block)),
+                )
+                .await
                 {
                     Ok(Ok(true)) => Verdict::AuthUsed,
                     Ok(Ok(false)) => Verdict::AuthExpired,
@@ -313,6 +382,11 @@ mod tests {
             Some(Ask::AuthUsed(h))
         );
         assert_eq!(ask_for(&rec(expired + 2, "signed", HASH), now), None); // 아직 쓰일 수 있다
+        // 🔴 개발 73: 서버가 「정산 실패」라고 한 서명도 체인에서 묻는다 — 서명은 살아 있다.
+        assert_eq!(
+            ask_for(&rec(expired, "settle_failed", HASH), now),
+            Some(Ask::AuthUsed(h))
+        );
         let mut done = rec(now - 20, "sent", HASH);
         done.checked = true;
         assert_eq!(ask_for(&done, now), None);
@@ -327,6 +401,31 @@ mod tests {
             assert_eq!(ask_for(&rec(now - 20_000, s, HASH), now), None, "{s}");
         }
         assert_eq!(ask_for(&rec(now + 60, "sent", HASH), now), None); // 미래 시각
+    }
+
+    // 🔴 개발 73(코덱스 1차 P1): 만료는 **체인 블록 시각**이 기록 시각 + 유효 + 여유를 넘긴 뒤에만.
+    #[test]
+    fn expiry_judged_by_chain_time() {
+        let e = rec(1_000, "signed", HASH);
+        let d = 1_000 + SIGN_VALID_SECS + SIGN_EXPIRY_MARGIN_SECS;
+        assert!(!auth_settled_by(d, &e));
+        assert!(!auth_settled_by(d - 100, &e)); // RPC 가 뒤처짐
+        assert!(auth_settled_by(d + 1, &e));
+    }
+
+    // 🔴 개발 73(코덱스 1차 P2): 차례마다 시작 자리를 돌려, 앞쪽이 끝내 안 풀려도 뒤쪽이 언젠가 확인된다.
+    #[test]
+    fn rotation_reaches_every_candidate() {
+        let list: Vec<u32> = (0..30).collect();
+        let mut seen = std::collections::HashSet::new();
+        for t in 0..3 {
+            for x in rotate_take(list.clone(), t * 12, 12) {
+                seen.insert(x);
+            }
+        }
+        assert_eq!(seen.len(), 30);
+        assert_eq!(rotate_take(list.clone(), 0, 12), (0..12).collect::<Vec<_>>());
+        assert_eq!(rotate_take(Vec::<u32>::new(), 5, 12), Vec::<u32>::new());
     }
 
     // 결말 적기: 기대한 상태에서만, 한 번만. 환불 여부는 「돈이 안 나간 것으로 확정」일 때만.
@@ -345,6 +444,14 @@ mod tests {
         assert_eq!(apply_verdict(&mut e, Verdict::AuthUsed), (true, false));
         assert_eq!(e.status, "settled");
         let mut e = rec(0, "signed", HASH);
+        assert_eq!(apply_verdict(&mut e, Verdict::AuthExpired), (true, true));
+        assert_eq!(e.status, "expired");
+
+        // 🔴 개발 73: 「정산 실패」도 체인 결말로 바뀐다.
+        let mut e = rec(0, "settle_failed", HASH);
+        assert_eq!(apply_verdict(&mut e, Verdict::AuthUsed), (true, false));
+        assert_eq!(e.status, "settled");
+        let mut e = rec(0, "settle_failed", HASH);
         assert_eq!(apply_verdict(&mut e, Verdict::AuthExpired), (true, true));
         assert_eq!(e.status, "expired");
 

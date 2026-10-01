@@ -197,11 +197,61 @@ pub(crate) fn log_attempt(token: &str, to: &str, amount: &str, status: &str, det
             .unwrap_or_default(),
         ..Default::default()
     };
+    // 디스크와 따로 메모리에도 — 저장이 실패해도 10분 중복 검사가 방금 나간 결제를 본다(개발 73).
+    remember_recent(&entry);
     let _g = history_guard();
     let Ok(path) = history_path() else {
         return;
     };
-    let _ = record_at(&path, entry, HISTORY_CAP);
+    if let Err(e) = record_at(&path, entry, HISTORY_CAP) {
+        eprintln!("[history] 기록 실패: {e}");
+    }
+}
+
+/// 이 프로세스가 최근에 적으려 한 「나갔거나 나갔을 수 있는」 기록 — (체인, 기록). 10분 창만큼만 든다 (개발 73, 코덱스 1차 P1).
+/// 중복 검사는 디스크 내역만 봤다 — 송금 뒤 내역 저장이 실패하면(디스크 꽉 참 등) 방금 나간 결제가 없는 셈이 되어
+/// 같은 결제가 다시 자율로 나갔다. 자율 결제는 이 프로세스에서만 나가므로 메모리 사본이면 그 구멍을 닫는다.
+static RECENT_PAID: std::sync::Mutex<Vec<(u64, HistoryEntry)>> = std::sync::Mutex::new(Vec::new());
+
+fn remember_recent(entry: &HistoryEntry) {
+    if !counts_as_paid(&entry.status) {
+        return;
+    }
+    let chain = crate::chain::active_chain().chain_id;
+    let mut list = RECENT_PAID.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_secs();
+    list.retain(|(_, e)| now.saturating_sub(e.ts) <= REPEAT_WINDOW_SECS);
+    list.push((chain, entry.clone()));
+}
+
+fn recent_in_memory() -> Vec<HistoryEntry> {
+    let chain = crate::chain::active_chain().chain_id;
+    RECENT_PAID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(c, _)| *c == chain)
+        .map(|(_, e)| e.clone())
+        .collect()
+}
+
+/// 깨진 내역을 `window` 안에 옆으로 치웠나 (개발 73, 코덱스 1차 P1) — 치운 파일에 방금 나간 결제가 있었을 수 있는데
+/// 새로 시작한 본 파일엔 없다. 치운 시각은 이름(`<본 이름>.broken.<초>.json`)에 있다.
+fn set_aside_recently(hot: &std::path::Path, now: u64, window: u64) -> bool {
+    let (Some(dir), Some(stem)) = (hot.parent(), hot.file_stem().and_then(|s| s.to_str())) else {
+        return true; // 경로를 못 풀면 증명 못 함 — 사람에게
+    };
+    let Ok(rd) = fs::read_dir(dir) else {
+        return true;
+    };
+    let prefix = format!("{stem}.broken.");
+    rd.flatten().any(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        name.strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(".json"))
+            .and_then(|secs| secs.parse::<u64>().ok())
+            .is_some_and(|at| now.saturating_sub(at) <= window)
+    })
 }
 
 /// 기록 고유 번호 — 나노초 시각 + 프로세스 + 프로세스 안 순번(같은 나노초·재시작에도 겹치지 않게).
@@ -266,7 +316,8 @@ pub(crate) const REPEAT_WINDOW_SECS: u64 = 600;
 
 /// 「돈이 나갔거나 나갔을 수 있는」 기록인가 — 차단·실패·되돌려짐·만료는 아니다.
 fn counts_as_paid(status: &str) -> bool {
-    matches!(status, "sent" | "signed" | "settled" | "unknown")
+    // 「정산 실패」도 넣는다(개발 73, 코덱스 1차 P1) — 서버 말만으로는 서명이 죽지 않는다. 체인 확인이 결말을 적을 때까지는 나갔을 수 있다.
+    matches!(status, "sent" | "signed" | "settled" | "unknown" | "settle_failed")
 }
 
 /// 같은 토큰·받는 곳·금액의 결제가 `window` 안에 있었으면 몇 초 전인지 (순수 함수 — 테스트용).
@@ -347,7 +398,7 @@ pub(crate) fn autopay_needs_human_for_repeat(token: &str, to: &str, amount: &str
     let Ok(hot) = history_path() else {
         return true;
     };
-    if history_unreadable(&hot) {
+    if history_unreadable(&hot) || set_aside_recently(&hot, now_secs(), REPEAT_WINDOW_SECS) {
         return true;
     }
     let Ok((tail, whole)) = archive_tail_checked(&crate::policy::history_archive_path(&hot)) else {
@@ -358,6 +409,7 @@ pub(crate) fn autopay_needs_human_for_repeat(token: &str, to: &str, amount: &str
     }
     let mut list = read_history_at(&hot);
     list.extend(tail);
+    list.extend(recent_in_memory());
     same_payment_in(list, token, to, amount).is_some()
 }
 
@@ -1005,7 +1057,7 @@ mod tests {
             hit(&[rec(now - 30, "sent", "0xabc", "0.01")], "0.010"),
             Some(30)
         );
-        for s in ["signed", "settled", "unknown"] {
+        for s in ["signed", "settled", "unknown", "settle_failed"] {
             assert_eq!(
                 hit(&[rec(now - 5, s, "0xabc", "0.01")], "0.01"),
                 Some(5),
@@ -1018,7 +1070,6 @@ mod tests {
             "failed",
             "reverted",
             "expired",
-            "settle_failed",
             "received",
         ] {
             assert_eq!(
@@ -1103,6 +1154,21 @@ mod tests {
     }
 
     /// 🔴 개발 70: 깨진 본 파일을 빈 목록으로 읽고 덮어쓰지 않는다 — 옆으로 치우고 새로 시작.
+    /// 🔴 개발 73(코덱스 1차 P1): 깨진 내역을 10분 안에 치웠으면 중복 검사는 증명 못 한다 — 치운 파일에 방금 결제가 있었을 수 있다.
+    #[test]
+    fn recently_set_aside_history_needs_a_human() {
+        let hot = temp_hot("aside");
+        let dir = hot.parent().unwrap().to_path_buf();
+        let stem = hot.file_stem().unwrap().to_string_lossy().into_owned();
+        let now = 100_000;
+        assert!(!set_aside_recently(&hot, now, 600));
+        fs::write(dir.join(format!("{stem}.broken.{}.json", now - 700)), "x").unwrap();
+        assert!(!set_aside_recently(&hot, now, 600)); // 창 밖
+        fs::write(dir.join(format!("{stem}.broken.{}.json", now - 30)), "x").unwrap();
+        assert!(set_aside_recently(&hot, now, 600));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn broken_history_is_set_aside_not_overwritten() {
         let hot = temp_hot("broken");

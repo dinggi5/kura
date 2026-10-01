@@ -100,6 +100,11 @@ fn release_main_window(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 같은 데이터 폴더를 쓰는 앱은 하나만(개발 73) — 트레이·창을 만들기 전에 정한다.
+    if let store::AppLock::Busy = store::hold_app_lock(std::time::Duration::from_secs(8)) {
+        eprintln!("[kura] 같은 지갑 폴더를 쓰는 Kura 가 이미 떠 있어요 — 이 실행은 끝냅니다");
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(

@@ -251,10 +251,22 @@ pub fn record_settlement(nonce: &str, tx: &str, success: bool) -> Result<(), Str
             "Couldn't lock the settlement record: {e}"
         )
     })?;
-    let mut list: Vec<Settlement> = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    // 있는데 못 읽는 파일은 빈 목록으로 덮지 않는다(개발 73, 코덱스 1차 P2) — GUI 가 아직 안 가져간 정산(nonce·tx)이 사라진다.
+    // 옆으로 치워 바이트를 남기고 새로 시작한다(서명의 결말은 GUI 체인 확인이 따로 찾는다). 치우지도 못하면 기록을 포기한다.
+    let mut list: Vec<Settlement> = match fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => {
+                set_aside(&path)?;
+                Vec::new()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => {
+            set_aside(&path)?;
+            Vec::new()
+        }
+    };
     list.push(Settlement {
         nonce: nonce.to_string(),
         tx: tx.to_string(),
@@ -267,6 +279,21 @@ pub fn record_settlement(nonce: &str, tx: &str, success: bool) -> Result<(), Str
         )
     })?;
     write_atomic(&path, json.as_bytes())
+}
+
+/// 못 읽는 정산 파일을 `<이름>.broken.<초>.<pid>` 로 치운다 — GUI 는 이 이름을 안 가져간다.
+fn set_aside(path: &Path) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let aside = path.with_file_name(format!("{name}.broken.{}.{}", now_secs(), std::process::id()));
+    fs::rename(path, aside).map_err(|e| {
+        tf!(
+            "정산 기록을 읽지 못했고 옆으로 치우지도 못했어요: {e}",
+            "Couldn't read the settlement record or set it aside: {e}"
+        )
+    })
 }
 
 /// MCP(=AI 클라이언트) 생존 표시를 쓴다. GUI가 이걸 보고 "AI 연결됨" 배지를 띄운다.
@@ -358,6 +385,7 @@ pub fn write_request_agent(
         "",
         "",
         agent,
+        None,
     )
 }
 
@@ -369,6 +397,7 @@ pub fn write_x402_request(
     memo: &str,
     resource: &str,
     agent: Option<AgentTrust>,
+    picked_chain: u64,
 ) -> Result<(String, Option<AgentTrust>), String> {
     write_request_kind(
         "USDC",
@@ -379,6 +408,7 @@ pub fn write_x402_request(
         resource,
         "",
         agent,
+        Some(picked_chain),
     )
     .map(|(id, agent, _)| (id, agent))
 }
@@ -392,6 +422,7 @@ pub fn write_x402_direct_request(
     resource: &str,
     nonce: &str,
     agent: Option<AgentTrust>,
+    picked_chain: u64,
 ) -> Result<(String, Option<AgentTrust>), String> {
     write_request_kind(
         "USDC",
@@ -402,6 +433,7 @@ pub fn write_x402_direct_request(
         resource,
         nonce,
         agent,
+        Some(picked_chain),
     )
     .map(|(id, agent, _)| (id, agent))
 }
@@ -423,10 +455,21 @@ fn write_request_kind(
     resource: &str,
     nonce: &str,
     agent: Option<AgentTrust>,
+    pin: Option<u64>,
 ) -> Result<(String, Option<AgentTrust>, &'static str), String> {
     let id = new_id();
     let chain = crate::chain::active_chain();
     let chain_id = chain.chain_id;
+    // 🔴 x402 는 **요구를 고른 체인**과 지금 각인할 체인이 같아야 한다(개발 73, 코덱스 1차 P1) — 각인하는 값과 대조하는 값이
+    // 같은 한 번의 읽기다. 호출자가 따로 대조하고 여기서 다시 읽으면, 그 사이 전환된 체인이 각인되어 테스트넷 요구가
+    // 메인넷 요청으로 나갈 수 있었다(Arc 두 체인은 USDC 주소가 같아 GUI 검사도 통과한다).
+    if pin.is_some_and(|p| p != chain_id) {
+        return Err(ts!(
+            "결제를 준비하는 사이 네트워크가 바뀌었어요. 아무것도 결제하지 않았습니다 — 다시 시도하세요.",
+            "The network changed while this payment was being prepared. Nothing was paid — try again."
+        )
+        .into());
+    }
     // 활성 계정 각인 (개발 54). 여기서 못 읽으면(지갑 파일 없음·깨짐) 요청을 만들지 않는다 —
     // 어느 계정에서 나갈지 모르는 결제를 사람 앞에 띄우지 않는다.
     let account = crate::wallet::active_account()?;
@@ -469,6 +512,18 @@ fn write_request_kind(
 /// 이미 존재하면(다른 요청이 대기 중) AlreadyExists → 사용자에게 안내.
 fn claim_request_file(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
+    // 🔴 **다 쓴 뒤에 등록한다**(개발 73, 코덱스 1차 P2). 예전엔 자리(create_new)를 먼저 잡고 그 안에 썼다 — 쓰는 도중
+    // 강제 종료되면 반쪽 파일이 자리에 남아, MCP 는 「대기 중」이라 새 요청을 계속 거절하고 GUI 는 못 읽어 안 치웠다.
+    // 이제 옆의 임시 파일에 다 쓰고 `hard_link` 로 자리에 건다 — 링크는 자리가 차 있으면 실패하니(O_EXCL 과 같다)
+    // single-flight 는 그대로이고, 자리에 놓이는 건 언제나 완성된 파일이다.
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        std::process::id(),
+        new_id()
+    ));
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -476,29 +531,29 @@ fn claim_request_file(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = match opts.open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(ts!("이미 승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 다시 요청하세요.", "A payment is already waiting for approval. Let the user handle it, then ask again.").into());
-        }
-        Err(e) => {
-            return Err(tf!(
-                "요청 파일 생성 실패: {e}",
-                "Couldn't create the request file: {e}"
-            ))
-        }
-    };
-    // 쓰기 실패 시 부분 파일을 반드시 치운다 — 안 그러면 has_pending()=true 인데 GUI 는 파싱 못 해
-    // None 으로 보는 영구 wedge(single-flight 가 영영 막힘)가 된다.
-    if let Err(e) = f.write_all(bytes) {
-        drop(f);
-        let _ = fs::remove_file(path);
+    let written = opts.open(&tmp).and_then(|mut f| {
+        f.write_all(bytes)?;
+        f.sync_all()
+    });
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
         return Err(tf!(
             "요청 파일 저장 실패: {e}",
             "Couldn't write the request file: {e}"
         ));
     }
-    Ok(())
+    let linked = fs::hard_link(&tmp, path);
+    let _ = fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(ts!("이미 승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 다시 요청하세요.", "A payment is already waiting for approval. Let the user handle it, then ask again.").into())
+        }
+        Err(e) => Err(tf!(
+            "요청 파일 생성 실패: {e}",
+            "Couldn't create the request file: {e}"
+        )),
+    }
 }
 
 /// 내 요청 파일을 거둔다(파일 안의 id 가 내 것일 때만) — 경로를 받는다. **경로를 안에서 구하면 테스트가 실지갑
@@ -630,7 +685,7 @@ async fn await_result_in(
                 let v = crate::policy::after_timeout(rec.as_ref());
                 (rec, v)
             }
-            Err(()) => (None, crate::policy::AfterTimeout::StillSending),
+            Err(_) => (None, crate::policy::AfterTimeout::StillSending),
         };
         match verdict {
             crate::policy::AfterTimeout::NothingSent => {
@@ -771,6 +826,15 @@ pub const PROOF_BODY_CAP: usize = 64 * 1024;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 개발 73(코덱스 1차 P1): 요구를 고른 체인과 지금 체인이 다르면 요청을 **쓰기 전에** 멈춘다.
+    /// 어떤 실제 체인도 id 0 이 아니라 활성 체인이 무엇이든 어긋난다 — 파일을 안 건드리고 돌아온다.
+    #[test]
+    fn x402_request_refuses_when_chain_moved() {
+        let err = write_request_kind("USDC", "0xabc", "0.01", "", crate::policy::KIND_X402, "", "", None, Some(0))
+            .expect_err("체인이 다르면 거절");
+        assert!(err.contains("네트워크") || err.contains("network"), "{err}");
+    }
 
     /// 🔴 개발 71 — 재제출은 **GUI 기록이 그 tx 를 가리키는** 요청의 증거만 찾는다. 증거 파일만 있고 기록의 tx 가
     /// 다르면(남의 tx) 못 찾는다.
@@ -975,6 +1039,10 @@ mod tests {
         // 처리 후(파일 제거) 다시 획득 가능.
         let _ = fs::remove_file(&path);
         assert!(claim_request_file(&path, b"third").is_ok());
+        // 🔴 개발 73: 임시 파일이 남지 않는다(성공·거절 모두) — 자리엔 완성된 파일 하나뿐.
+        assert!(claim_request_file(&path, b"fourth").is_err());
+        let left: Vec<_> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 1, "{left:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 

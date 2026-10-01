@@ -237,14 +237,20 @@ pub fn parse_required(header: Option<&str>, body: &str) -> Result<PaymentRequire
 /// accepts[] 중 우리가 처리할 수 있는 요구(exact·Base Sepolia·USDC)를 고른다.
 /// 대소문자·체크섬·네트워크 표기(V1/V2) 차이를 흡수해 비교한다. (예: solana 옵션은 건너뜀)
 pub fn pick_requirement(pr: &PaymentRequired) -> Result<Requirement, String> {
-    let usdc_lower = active_chain().usdc_address.to_string().to_lowercase();
+    pick_requirement_for(pr, &active_chain())
+}
+
+/// `pick_requirement` 를 **정한 체인으로** (개발 73, 코덱스 1차 P1) — 결제 흐름은 체인을 한 번 읽어 고르기부터 요청 각인까지
+/// 그 값 하나로 간다. 고르는 안에서 활성 체인을 다시 읽으면, 고른 뒤에 읽은 체인과 갈릴 틈이 생긴다.
+pub fn pick_requirement_for(pr: &PaymentRequired, chain: &crate::chain::ChainConfig) -> Result<Requirement, String> {
+    let usdc_lower = chain.usdc_address.to_string().to_lowercase();
     let accepts = pr.raw.get("accepts").and_then(Value::as_array);
     if let Some(list) = accepts {
         for entry in list {
             let scheme = str_field(entry, "scheme").unwrap_or("");
             let network = str_field(entry, "network").unwrap_or("");
             let asset = str_field(entry, "asset").unwrap_or("");
-            let Some(method) = transfer_method(entry, active_chain().native_is_usdc) else {
+            let Some(method) = transfer_method(entry, chain.native_is_usdc) else {
                 continue; // 우리가 못 내는 방식 — 서명해 봐야 서버가 못 쓴다
             };
             if scheme.eq_ignore_ascii_case(SCHEME)

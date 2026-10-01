@@ -477,12 +477,12 @@ impl<P: Provider> EthView for Rpc<P> {
             .and_then(hex_u64)
             .ok_or_else(|| format!("블록 {n} 시각 없음"))?;
         let mut out = Vec::new();
-        for tx in v
+        // 응답이 모자라면 「입금 없음」이 아니라 오류다(개발 73, 코덱스 1차 P2) — 빈 것으로 넘기면 커서가 지나가 그 입금을 영영 못 찾는다.
+        let txs = v
             .get("transactions")
             .and_then(|t| t.as_array())
-            .into_iter()
-            .flatten()
-        {
+            .ok_or_else(|| format!("블록 {n} 거래 목록 없음"))?;
+        for tx in txs {
             let to = tx
                 .get("to")
                 .and_then(|t| t.as_str())
@@ -491,7 +491,7 @@ impl<P: Provider> EthView for Rpc<P> {
                 .get("from")
                 .and_then(|t| t.as_str())
                 .and_then(|s| s.parse::<Address>().ok());
-            let value = tx.get("value").and_then(hex_u256).unwrap_or_default();
+            let value = tx.get("value").and_then(hex_u256);
             let hash = tx
                 .get("hash")
                 .and_then(|h| h.as_str())
@@ -500,8 +500,17 @@ impl<P: Provider> EthView for Rpc<P> {
             let (Some(to), Some(from)) = (to, from) else {
                 continue;
             };
-            if to != self.me || from == self.me || value.is_zero() || hash.is_empty() {
+            if to != self.me || from == self.me {
                 continue;
+            }
+            let Some(value) = value else {
+                return Err(format!("블록 {n} 거래 금액을 못 읽음"));
+            };
+            if value.is_zero() {
+                continue;
+            }
+            if hash.is_empty() {
+                return Err(format!("블록 {n} 거래 해시 없음"));
             }
             // 실패한 거래의 value 는 옮겨지지 않는다 — 영수증 상태로 거른다.
             self.pace().await;
@@ -510,8 +519,11 @@ impl<P: Provider> EthView for Rpc<P> {
                 .raw_request("eth_getTransactionReceipt".into(), (hash.clone(),))
                 .await
                 .map_err(|e| e.to_string())?;
-            if r.get("status").and_then(hex_u64) != Some(1) {
-                continue;
+            // 영수증이 없거나 상태 칸이 없으면 모름 — 실패로 치고 건너뛰지 않는다(다음 차례에 이 구간을 다시).
+            match r.get("status").and_then(hex_u64) {
+                Some(1) => {}
+                Some(_) => continue, // 실패한 거래 — value 가 옮겨지지 않았다
+                None => return Err(format!("거래 {hash} 영수증 상태를 모름")),
             }
             out.push(DirectIn {
                 tx: hash,

@@ -254,8 +254,8 @@ export function PaymentApprovalModal({
             <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-500">
               <AlertTriangle size={11} />
               {t(
-                `${Math.max(1, Math.round(repeatSecs / 60))}분 전에 같은 곳으로 같은 금액을 보냈어요`,
-                `You sent the same amount here ${Math.max(1, Math.round(repeatSecs / 60))} min ago`,
+                `${Math.max(1, Math.round(repeatSecs / 60))}분 전에도 같은 곳에 같은 금액 결제가 있었어요`,
+                `A payment of the same amount to this address was made ${Math.max(1, Math.round(repeatSecs / 60))} min ago`,
               )}
             </p>
           )}

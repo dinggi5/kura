@@ -667,14 +667,14 @@ pub struct AttemptRecord {
 /// 결제 시도 기록을 읽는다 — **없음과 못 읽음을 가른다**(개발 73, 코덱스 1차 P1). 없으면 Ok(None), 있는데 못 읽거나
 /// 깨졌으면 Err. 둘 다 None 으로 접으면 `sending`·`done` 이던 기록이 깨졌을 때 「기록 없음 = 다시 승인해도 됨」·
 /// 「아무것도 안 나감」이 되어 같은 요청이 두 번 나갈 수 있었다. id 가 이상하면(경로를 못 만들면) 없음이다.
-pub fn read_attempt_at(dir: &Path, id: &str) -> Result<Option<AttemptRecord>, ()> {
+pub fn read_attempt_at(dir: &Path, id: &str) -> Result<Option<AttemptRecord>, String> {
     let Some(path) = attempt_path(dir, id) else {
         return Ok(None);
     };
     match std::fs::read_to_string(&path) {
-        Ok(t) => serde_json::from_str(&t).map(Some).map_err(|_| ()),
+        Ok(t) => serde_json::from_str(&t).map(Some).map_err(|e| e.to_string()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(()),
+        Err(e) => Err(e.to_string()),
     }
 }
 

@@ -248,11 +248,11 @@ pub fn pending_notice(tx: &str, explorer: &str) -> String {
     };
     tf!(
         "결제 트랜잭션을 보냈는데(tx {tx}{link}) 제때 확인되지 않아 서버에 증거를 내지 못했습니다. \
-         지금은 이 증거를 **나중에 다시 낼 방법이 없습니다**. \
-         **다시 요청하면 또 결제될 수 있습니다** — 다시 시도하기 전에 사용자에게 알리세요.",
+         채굴이 끝난 뒤 `x402_resubmit` 에 이 tx 를 주면 새 돈 없이 같은 증거를 다시 낼 수 있습니다. \
+         **새로 요청하면 또 결제될 수 있습니다** — 다시 시도하기 전에 사용자에게 알리세요.",
         "The payment transaction was sent (tx {tx}{link}) but didn't confirm in time, so the \
-         server wasn't given the proof, and there is currently **no way to present it later**. \
-         **Asking again may pay again** — tell the user before retrying."
+         server wasn't given the proof. Once it is mined, call `x402_resubmit` with this tx to present \
+         the same proof again without paying. **Asking again may pay again** — tell the user before retrying."
     )
 }
 
@@ -267,11 +267,12 @@ pub fn undelivered_notice(tx: &str, explorer: &str, err: &str) -> String {
     };
     tf!(
         "결제는 체인에서 완료됐는데(tx {tx}{link}) 그 증거를 서버에 보내지 못했어요({err}). \
-         서버는 이 결제를 모릅니다. **다시 요청하면 또 결제됩니다** — 사용자에게 알리고, 필요하면 \
-         판매자에게 이 tx 를 보여 주세요.",
+         서버는 이 결제를 모릅니다. `x402_resubmit` 에 이 tx 를 주면 새 돈 없이 같은 증거를 다시 낼 수 있어요. \
+         **새로 요청하면 또 결제됩니다** — 사용자에게 알리고, 필요하면 판매자에게 이 tx 를 보여 주세요.",
         "The payment completed on-chain (tx {tx}{link}) but the proof never reached the server ({err}), \
-         so the server does not know about it. **Asking again will pay again** — tell the user, and show \
-         the seller this tx if you need the resource."
+         so the server does not know about it. Call `x402_resubmit` with this tx to present the same proof \
+         again without paying. **Asking again will pay again** — tell the user, and show the seller this tx \
+         if you need the resource."
     )
 }
 
@@ -283,11 +284,12 @@ pub fn undelivered_notice(tx: &str, explorer: &str, err: &str) -> String {
 pub fn reverted_notice(tx: &str) -> String {
     tf!(
         "결제 트랜잭션이 체인에서 실패했어요(tx {tx}). **결제액은 나가지 않았고** 가스만 소모됐습니다 — \
-         다시 시도해도 됩니다. 다만 이 시도는 **오늘 한도에는 이미 반영됐습니다**(지갑이 체인의 실패를 \
-         되돌려 적지는 않아요) — 한도에 걸리면 사용자에게 알리세요.",
+         다시 시도해도 됩니다. 이 시도는 오늘 한도에 일단 반영됐고, 지갑 앱이 체인에서 실패를 확인하면 같은 날(UTC)엔 \
+         돌려줍니다 — 그 전에 한도에 걸리면 사용자에게 알리세요.",
         "The payment transaction reverted on-chain (tx {tx}). **The amount was not paid** — only gas was \
-         spent, so it is safe to try again. Note that this attempt still counted against today's limit \
-         (the wallet does not un-count a chain failure) — tell the user if the limit blocks the retry."
+         spent, so it is safe to try again. This attempt counted against today's limit for now; the wallet \
+         app gives it back on the same (UTC) day once it confirms the failure on-chain — tell the user if \
+         the limit blocks the retry before then."
     )
 }
 

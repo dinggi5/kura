@@ -70,7 +70,14 @@ async fn main() {
         }
     };
     let (id, _agent) =
-        payment::write_x402_request(req.pay_to.trim(), &amount, &memo, &resource, None)
+        payment::write_x402_request(
+            req.pay_to.trim(),
+            &amount,
+            &memo,
+            &resource,
+            None,
+            kura_mcp::chain::active_chain().chain_id,
+        )
             .expect("요청 작성 실패");
     println!("→ 지갑 앱에 서명 요청 보냄. 팝업에서 비번으로 승인하세요(최대 5분)…\n");
 
