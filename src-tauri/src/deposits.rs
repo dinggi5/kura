@@ -483,22 +483,33 @@ impl<P: Provider> EthView for Rpc<P> {
             .and_then(|t| t.as_array())
             .ok_or_else(|| format!("블록 {n} 거래 목록 없음"))?;
         for tx in txs {
-            let to = tx
-                .get("to")
-                .and_then(|t| t.as_str())
-                .and_then(|s| s.parse::<Address>().ok());
+            // 거래 객체여야 하고(해시 문자열만 오면 full 요청이 무시된 것), `to` 는 null(컨트랙트 생성)만 정상 —
+            // 빠졌거나 못 읽는 주소는 모름이다(코덱스 2차 P2). 건너뛰면 그 블록의 입금을 영영 놓친다.
+            if !tx.is_object() {
+                return Err(format!("블록 {n} 거래가 객체가 아님"));
+            }
+            let to = match tx.get("to") {
+                Some(serde_json::Value::Null) => None,
+                Some(t) => Some(
+                    t.as_str()
+                        .and_then(|s| s.parse::<Address>().ok())
+                        .ok_or_else(|| format!("블록 {n} 거래 받는 주소를 못 읽음"))?,
+                ),
+                None => return Err(format!("블록 {n} 거래 받는 주소 없음")),
+            };
             let from = tx
                 .get("from")
                 .and_then(|t| t.as_str())
-                .and_then(|s| s.parse::<Address>().ok());
+                .and_then(|s| s.parse::<Address>().ok())
+                .ok_or_else(|| format!("블록 {n} 거래 보낸 주소를 못 읽음"))?;
             let value = tx.get("value").and_then(hex_u256);
             let hash = tx
                 .get("hash")
                 .and_then(|h| h.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let (Some(to), Some(from)) = (to, from) else {
-                continue;
+            let Some(to) = to else {
+                continue; // 컨트랙트 생성 — 받는 쪽이 아니다
             };
             if to != self.me || from == self.me {
                 continue;

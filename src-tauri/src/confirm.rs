@@ -25,8 +25,6 @@ use crate::store::now_secs;
 
 /// 한 차례에 묻는 건수 상한 — 옛 기록이 많아도 RPC 를 몰아치지 않게.
 const MAX_PER_TICK: usize = 12;
-/// 돌려 가며 고를 후보의 상한 — 이만큼 모아 그중 `MAX_PER_TICK` 건을 차례로 묻는다.
-const MAX_CANDIDATES: usize = 512;
 
 /// 차례마다 MAX_PER_TICK 씩 밀리는 시작 자리.
 fn next_offset() -> usize {
@@ -182,7 +180,7 @@ async fn tick_with(chain_id: u64, url: String) -> Result<usize, String> {
     let now = now_secs();
     let accounts = crate::wallet::read_encrypted()?.accounts();
     let mut jobs: Vec<Job> = Vec::new();
-    'outer: for a in &accounts {
+    for a in &accounts {
         let Ok(owner) = a.address.parse::<Address>() else {
             continue;
         };
@@ -197,12 +195,11 @@ async fn tick_with(chain_id: u64, url: String) -> Result<usize, String> {
                     entry: e,
                     ask,
                 });
-                if jobs.len() >= MAX_CANDIDATES {
-                    break 'outer;
-                }
             }
         }
     }
+    // 후보는 **전부** 모은다(코덱스 2차 P2 — 상한을 두면 그 앞쪽이 끝내 안 풀릴 때 뒤가 순환에 못 든다). 최근 일주일의
+    // 미확정 기록뿐이라 많아야 몇백 건이다.
     // 한 차례에 묻는 건 MAX_PER_TICK 건 — 시작 자리를 차례마다 돌린다(개발 73, 코덱스 1차 P2). 늘 앞에서부터 고르면 영수증이
     // 끝내 안 나오는 앞쪽 12건이 매번 자리를 차지해 뒤쪽 기록은 영영 확인되지 않았다(환불도 없이).
     let jobs = rotate_take(jobs, next_offset(), MAX_PER_TICK);

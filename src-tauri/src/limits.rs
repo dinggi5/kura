@@ -48,6 +48,15 @@ pub(crate) async fn reserve_spend(
     daily: U256,
     decimals: u8,
 ) -> Result<u64, String> {
+    // 같은 지갑 폴더의 앱이 하나뿐임을 쥐지 못했으면 돈을 내보내지 않는다(개발 73, 코덱스 2차 P1) — 이 잠금(SPEND_LOCK 등)은
+    // 프로세스 안에서만 통해, 잠금 파일을 못 만든 채(권한 등) 앱이 둘 뜨면 장부를 서로 덮고 같은 요청을 두 번 보낼 수 있다.
+    if !crate::store::app_lock_held() {
+        return Err(ts!(
+            "다른 Kura 가 같은 지갑을 쓰고 있지 않은지 확인하지 못해 결제를 막았어요. ~/.jigap/app.lock 을 만들 수 있는지(권한) 확인하고 앱을 다시 시작해 주세요.",
+            "Payments are blocked because Kura couldn't confirm it's the only copy using this wallet. Check that ~/.jigap/app.lock can be created (permissions), then restart the app."
+        )
+        .into());
+    }
     let _g = SPEND_LOCK.lock().await;
     let mut spend = spend_for_reserve().ok_or_else(|| {
         ts!(

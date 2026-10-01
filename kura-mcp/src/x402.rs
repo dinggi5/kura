@@ -117,8 +117,7 @@ pub struct Submission {
 /// 네트워크 표기가 우리가 지원하는 활성 체인인지 (V1 단축명/V2 CAIP-2 둘 다 허용).
 /// V1 단축명이 없는 체인(Arc)은 CAIP-2 로만 매칭한다. 빈 표기는 항상 불일치 — `network` 를
 /// 아예 안 준 요구가 "빈 문자열끼리 같다"로 통과하면 체인 검사가 통째로 무력해진다.
-fn network_supported(raw: &str) -> bool {
-    let chain = active_chain();
+fn network_supported(raw: &str, chain: &crate::chain::ChainConfig) -> bool {
     let n = raw.trim();
     if n.is_empty() {
         return false;
@@ -144,11 +143,10 @@ fn network_supported(raw: &str) -> bool {
 ///
 /// 판정은 **있는 필드만** 본다(없으면 우리 기본 도메인이라는 뜻으로 받아들인다) — 여태 잘 돌던
 /// `extra` 없는 서버·`extra` 에 다른 것만 담은 서버를 새로 깨뜨리지 않으려고.
-fn extra_domain_ok(entry: &Value) -> bool {
+fn extra_domain_ok(entry: &Value, chain: &crate::chain::ChainConfig) -> bool {
     let Some(extra) = entry.get("extra") else {
         return true;
     };
-    let chain = active_chain();
     // name/version 은 EIP-712 도메인 문자열이라 대소문자까지 정확히 같아야 서명이 맞는다
     // ("USDC" vs "USD Coin" 이 체인마다 다른 것과 같은 이유 — 한 글자 다르면 다른 도메인이다).
     if let Some(name) = str_field(extra, "name") {
@@ -254,9 +252,9 @@ pub fn pick_requirement_for(pr: &PaymentRequired, chain: &crate::chain::ChainCon
                 continue; // 우리가 못 내는 방식 — 서명해 봐야 서버가 못 쓴다
             };
             if scheme.eq_ignore_ascii_case(SCHEME)
-                && network_supported(network)
+                && network_supported(network, chain)
                 && asset.to_lowercase() == usdc_lower
-                && extra_domain_ok(entry)
+                && extra_domain_ok(entry, chain)
             {
                 let amount = str_field(entry, "amount")
                     .or_else(|| str_field(entry, "maxAmountRequired"))
@@ -304,7 +302,7 @@ pub fn pick_requirement_for(pr: &PaymentRequired, chain: &crate::chain::ChainCon
                         str_field(e, "network").unwrap_or("?"),
                         str_field(e, "asset").unwrap_or("?")
                     );
-                    if transfer_method(e, active_chain().native_is_usdc).is_none() {
+                    if transfer_method(e, chain.native_is_usdc).is_none() {
                         let m = e
                             .get("extra")
                             .and_then(|x| str_field(x, "assetTransferMethod"))
@@ -315,7 +313,7 @@ pub fn pick_requirement_for(pr: &PaymentRequired, chain: &crate::chain::ChainCon
                             "{base} (전송 방식 {m} — 이 체인에선 우리가 낼 수 없어요)",
                             "{base} (asset transfer method {m} — Kura can't pay that on this chain)"
                         )
-                    } else if extra_domain_ok(e) {
+                    } else if extra_domain_ok(e, chain) {
                         base
                     } else {
                         let name = e
@@ -331,7 +329,6 @@ pub fn pick_requirement_for(pr: &PaymentRequired, chain: &crate::chain::ChainCon
                 .collect()
         })
         .unwrap_or_default();
-    let chain = active_chain();
     Err(tf!(
         "지원하는 결제 요구가 없어요. 우리는 exact 스킴 · {} · 그 체인의 USDC · USDC 자체 서명(EIP-3009)만 지원합니다. 서버 제시: [{}]",
         "No supported payment requirement. Kura supports the exact scheme on {} with that chain's USDC, signed against USDC itself (EIP-3009). Server offered: [{}]",
@@ -712,10 +709,10 @@ mod tests {
     /// network 를 아예 안 준 요구가 통과하면 체인 검사가 통째로 무력해진다 (Option 전환 시 실수하기 쉬운 곳).
     #[test]
     fn empty_network_is_not_supported() {
-        assert!(!network_supported(""));
-        assert!(!network_supported("   "));
-        assert!(network_supported("base-sepolia")); // 테스트 기본 체인
-        assert!(network_supported("eip155:84532"));
+        assert!(!network_supported("", &active_chain()));
+        assert!(!network_supported("   ", &active_chain()));
+        assert!(network_supported("base-sepolia", &active_chain())); // 테스트 기본 체인
+        assert!(network_supported("eip155:84532", &active_chain()));
     }
 
     /// V1: 본문 파싱(헤더 없음) + 요구 선택 + 표시 정보.

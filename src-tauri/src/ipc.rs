@@ -700,10 +700,11 @@ fn clear_dead_request() {
 
 /// 못 읽는 요청 파일이 승인 창 시간 + 유예보다 늙었으면 `<이름>.broken.<초>` 로 치운다. 읽히는 파일·없는 파일은 그대로.
 fn set_aside_if_stale_unreadable(path: &std::path::Path) {
-    let Ok(text) = fs::read_to_string(path) else {
+    // 바이트로 읽는다(코덱스 2차 P2) — `read_to_string` 은 깨진 UTF-8 에서 실패해 그런 파일을 영영 못 치웠다.
+    let Ok(bytes) = fs::read(path) else {
         return;
     };
-    if serde_json::from_str::<PaymentRequest>(&text).is_ok() {
+    if serde_json::from_slice::<PaymentRequest>(&bytes).is_ok() {
         return;
     }
     let old = fs::metadata(path)
@@ -1165,6 +1166,11 @@ mod tests {
         set_aside_if_stale_unreadable(&p);
         assert!(!p.exists(), "늙은 반쪽은 치운다");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "지우지 않고 옆에 남긴다");
+        // 깨진 UTF-8 도 같다(코덱스 2차 P2).
+        fs::write(&p, [0xff, 0xfe, b'{']).unwrap();
+        fs::File::options().write(true).open(&p).unwrap().set_modified(old).unwrap();
+        set_aside_if_stale_unreadable(&p);
+        assert!(!p.exists(), "깨진 UTF-8 도 치운다");
         let _ = fs::remove_dir_all(&dir);
     }
 

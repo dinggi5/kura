@@ -101,9 +101,16 @@ fn release_main_window(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 같은 데이터 폴더를 쓰는 앱은 하나만(개발 73) — 트레이·창을 만들기 전에 정한다.
-    if let store::AppLock::Busy = store::hold_app_lock(std::time::Duration::from_secs(8)) {
-        eprintln!("[kura] 같은 지갑 폴더를 쓰는 Kura 가 이미 떠 있어요 — 이 실행은 끝냅니다");
-        return;
+    // 못 쥔 채(Unavailable — 권한 등) 뜨면 화면·잔액은 보이되 결제는 `limits::reserve_spend` 가 막는다(코덱스 2차 P1).
+    match store::hold_app_lock(std::time::Duration::from_secs(8)) {
+        store::AppLock::Busy => {
+            eprintln!("[kura] 같은 지갑 폴더를 쓰는 Kura 가 이미 떠 있어요 — 이 실행은 끝냅니다");
+            return;
+        }
+        store::AppLock::Unavailable => {
+            eprintln!("[kura] 지갑 폴더 잠금을 못 잡았어요 — 결제는 막힌 채로 뜹니다");
+        }
+        store::AppLock::Held => {}
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

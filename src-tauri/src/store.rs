@@ -32,6 +32,11 @@ pub(crate) enum AppLock {
     Unavailable,
 }
 
+/// 이 프로세스가 지갑 폴더 잠금을 쥐고 있나 — 결제의 문(`limits::reserve_spend`)이 묻는다.
+pub(crate) fn app_lock_held() -> bool {
+    APP_LOCK.get().is_some()
+}
+
 /// 잠금을 잡는다. 이미 잡혀 있으면 `wait` 동안 다시 해 본다 — 업데이트 재시작은 새 앱을 먼저 띄우고 옛 앱이 곧 끝나서
 /// 둘이 잠깐 겹친다. 바로 포기하면 업데이트 뒤 앱이 사라진다.
 pub(crate) fn hold_app_lock(wait: std::time::Duration) -> AppLock {
