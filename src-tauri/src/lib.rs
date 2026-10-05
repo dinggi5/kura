@@ -129,6 +129,8 @@ pub fn run() {
             // 업데이트가 자동 시작 설정을 지우고 갔는지 확인해 되살린다(개발 31).
             // 트레이보다 뒤, 창을 띄우기 전 — 실패해도 앱은 그대로 뜬다.
             autostart::reconcile(app.handle());
+            // Claude Code 등록이 이 설치본을 가리키는지 보고 어긋났으면 고친다(개발 74). 새 등록은 안 만든다.
+            connect::spawn_heal();
             // 생존 감시(개발 49) — 하트비트를 러스트가 찍고, 프론트가 잠든 사이 온 결제 요청에
             // 창을 깨운다. 트레이가 만들어진 뒤여야 창을 트레이 아래로 배치할 수 있다.
             ipc::spawn_watchdog(app.handle());
@@ -210,6 +212,7 @@ pub fn run() {
             update::check_update,
             update::install_update,
             connect::get_connect_status,
+            connect::get_connect_ready,
             connect::connect_claude_desktop,
             connect::connect_claude_code
         ])

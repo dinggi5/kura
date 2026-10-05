@@ -26,6 +26,9 @@ pub(crate) struct ConnectStatus {
     /// Claude 데스크톱에 Kura 확장이 설치돼 있는지 — 확장 폴더의 manifest 를 읽는
     /// 최선 노력 감지. 폴더 구조가 바뀌면 false 로 남을 수 있다(연결 배지가 보완).
     pub(crate) desktop_ext_installed: bool,
+    /// 확장은 깔려 있는데 Claude 데스크톱 설정에서 **꺼 둔** 상태 (개발 74). 이때는 「준비됨」이 아니다 —
+    /// Claude 를 켜도 우리를 안 띄운다. 설정 파일을 못 읽으면 false(꺼졌다고 단정하지 않는다).
+    pub(crate) desktop_ext_disabled: bool,
     /// 찾아낸 claude CLI 절대경로. 없으면 None → 프론트가 수동 명령 복사로 안내.
     pub(crate) cli_path: Option<String>,
     /// ~/.claude.json 사용자 범위(mcpServers)에 kura 가 등록돼 있고, 그 command 가
@@ -197,21 +200,47 @@ fn manifest_is_kura(json: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Claude 데스크톱 확장 폴더에서 kura 확장을 찾는다. 폴더가 없으면(확장을 하나도
-/// 안 깔았으면 안 생긴다) 그냥 false.
-fn desktop_ext_installed() -> bool {
-    let Some(home) = dirs::home_dir() else {
-        return false;
-    };
-    let dir = home.join("Library/Application Support/Claude/Claude Extensions");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    entries.flatten().any(|e| {
-        std::fs::read_to_string(e.path().join("manifest.json"))
+fn claude_support_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join("Library/Application Support/Claude"))
+}
+
+/// Claude 데스크톱 확장 폴더에서 kura 확장의 폴더를 찾는다. 폴더가 없으면(확장을 하나도
+/// 안 깔았으면 안 생긴다) None. 폴더 이름(예: `local.mcpb.dinggi5.kura`)이 곧 확장 id 다.
+fn kura_ext_dir() -> Option<PathBuf> {
+    let entries = std::fs::read_dir(claude_support_dir()?.join("Claude Extensions")).ok()?;
+    entries.flatten().map(|e| e.path()).find(|p| {
+        std::fs::read_to_string(p.join("manifest.json"))
             .map(|s| manifest_is_kura(&s))
             .unwrap_or(false)
     })
+}
+
+fn desktop_ext_installed() -> bool {
+    kura_ext_dir().is_some()
+}
+
+/// 확장 설정 JSON 이 「꺼 둠」인가 — 순수 심장부(테스트 대상). `isEnabled` 가 **명시적으로 false** 일 때만.
+/// 파일이 없거나 깨졌거나 칸이 없으면 꺼졌다고 단정하지 않는다(실측: 켜 둔 확장 = `{"isEnabled": true}`).
+fn ext_settings_disabled(json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("isEnabled").and_then(|b| b.as_bool()))
+        == Some(false)
+}
+
+/// kura 확장이 깔려 있고 Claude 데스크톱 설정에서 꺼 둔 상태인가 (개발 74).
+fn desktop_ext_disabled() -> bool {
+    let (Some(dir), Some(support)) = (kura_ext_dir(), claude_support_dir()) else {
+        return false;
+    };
+    let Some(id) = dir.file_name() else {
+        return false;
+    };
+    let mut name = id.to_os_string();
+    name.push(".json");
+    std::fs::read_to_string(support.join("Claude Extensions Settings").join(name))
+        .map(|s| ext_settings_disabled(&s))
+        .unwrap_or(false)
 }
 
 /// claude CLI 를 찾는다. GUI 앱의 PATH 는 셸과 달라(로그인 셸 rc 를 안 읽는다)
@@ -300,6 +329,7 @@ pub(crate) fn get_connect_status() -> ConnectStatus {
     ConnectStatus {
         desktop_installed: desktop_installed(),
         desktop_ext_installed: desktop_ext_installed(),
+        desktop_ext_disabled: desktop_ext_disabled(),
         cli_path: find_claude_cli().map(|p| p.to_string_lossy().into_owned()),
         cli_registered: matches,
         cli_registered_other: registered_cmd.is_some() && !matches,
@@ -404,22 +434,42 @@ pub(crate) fn connect_claude_code() -> Result<(), ConnectError> {
             .into(),
         ));
     };
-    // 멱등 재등록: 같은 이름이 이미 있으면 add 가 "already exists" 로 거부하는데,
-    // 그걸 성공으로 치면 옛 경로를 가리키는 등록이 영영 안 고쳐진다(코덱스 개발35 1차).
-    // 지우기 전에 옛 항목을 통째로 떠 둔다 — remove 만 성공하고 add 가 실패하면 멀쩡하던
-    // 등록마저 사라지므로(코덱스 개발35 3차), 그때 add-json 으로 원복한다.
-    // remove 는 스냅숏 유무와 무관하게 **무조건** 돌린다(코덱스 개발38 1차): 우리가
-    // .claude.json 을 못 읽는 환경에서도 CLI 는 항목을 볼 수 있고, 그때 remove 를
-    // 건너뛰면 add 가 "already exists" 로 죽는다. 없어서 실패하는 remove 는 정상.
+    reregister(&cli, AddWith::Path(&mcp))
+}
+
+/// 새 kura 등록을 무엇으로 만드는가.
+enum AddWith<'a> {
+    /// `claude mcp add --scope user kura -- <경로>` — 사람이 「연결」을 누른 경우.
+    Path(&'a std::path::Path),
+    /// `claude mcp add-json --scope user kura <json>` — 자가 복구(개발 74). 옛 항목의 args·env 를
+    /// 그대로 두고 command 만 바꾼 JSON 이다(사용자가 손으로 붙인 env 를 복구가 지우지 않게).
+    Json(String),
+}
+
+/// 옛 kura 등록을 지우고 새로 만든다. 실패하면 옛 항목을 되살린다.
+///
+/// 멱등 재등록: 같은 이름이 이미 있으면 add 가 "already exists" 로 거부하는데,
+/// 그걸 성공으로 치면 옛 경로를 가리키는 등록이 영영 안 고쳐진다(코덱스 개발35 1차).
+/// 지우기 전에 옛 항목을 통째로 떠 둔다 — remove 만 성공하고 add 가 실패하면 멀쩡하던
+/// 등록마저 사라지므로(코덱스 개발35 3차), 그때 add-json 으로 원복한다.
+/// remove 는 스냅숏 유무와 무관하게 **무조건** 돌린다(코덱스 개발38 1차): 우리가
+/// .claude.json 을 못 읽는 환경에서도 CLI 는 항목을 볼 수 있고, 그때 remove 를
+/// 건너뛰면 add 가 "already exists" 로 죽는다. 없어서 실패하는 remove 는 정상.
+fn reregister(cli: &std::path::Path, add: AddWith) -> Result<(), ConnectError> {
     let old_entry = registered_cli_entry();
-    let _ = Command::new(&cli)
+    let _ = Command::new(cli)
         .args(["mcp", "remove", "--scope", "user", "kura"])
         .output();
-    let failure = match Command::new(&cli)
-        .args(["mcp", "add", "--scope", "user", "kura", "--"])
-        .arg(&mcp)
-        .output()
-    {
+    let mut cmd = Command::new(cli);
+    match &add {
+        AddWith::Path(mcp) => cmd
+            .args(["mcp", "add", "--scope", "user", "kura", "--"])
+            .arg(mcp),
+        AddWith::Json(json) => cmd
+            .args(["mcp", "add-json", "--scope", "user", "kura"])
+            .arg(json),
+    };
+    let failure = match cmd.output() {
         Ok(out) if out.status.success() => return Ok(()),
         Ok(out) => tf!(
             "등록 실패: {}",
@@ -431,7 +481,7 @@ pub(crate) fn connect_claude_code() -> Result<(), ConnectError> {
     let (restore_note, restore_command) = match old_entry {
         Some(old) => {
             let old_json = old.to_string();
-            let restored = Command::new(&cli)
+            let restored = Command::new(cli)
                 .args(["mcp", "add-json", "--scope", "user", "kura"])
                 .arg(&old_json)
                 .output()
@@ -459,6 +509,93 @@ pub(crate) fn connect_claude_code() -> Result<(), ConnectError> {
     Err(ConnectError {
         message: format!("{failure}{restore_note}"),
         restore_command,
+    })
+}
+
+/// 배지의 「준비됨」 (개발 74) — Claude 를 켜면 **이 앱으로** 붙는 등록이 하나라도 있는가.
+///
+/// 배지가 하트비트(MCP 가 지금 떠 있나)만 보던 시절엔 등록이 멀쩡해도 Claude 를 안 켠 동안 내내
+/// 「AI 연결 안 됨」이었다 — 사장도 매일 「연결」을 다시 누르고 있었다. MCP 엔 상주 연결이 없으니
+/// 「연결돼 있다」의 정직한 뜻은 「켜면 붙는다」다.
+///   · Claude Code: 사용자 범위 등록이 **이 빌드의** kura-mcp 를 가리킨다(다른 경로면 아니다 — 옛 설치일 수 있다).
+///   · Claude 데스크톱: kura 확장이 깔려 있고 꺼 두지 않았다. 확장 런처는 설치된 Kura 를 스스로 찾는다.
+/// 전부 로컬 파일 읽기다(mdfind 같은 느린 감지는 안 탄다) — 배지가 몇 초마다 묻는다.
+#[tauri::command]
+pub(crate) fn get_connect_ready() -> bool {
+    let cli = match (registered_cli_command(), registerable_mcp_path().0) {
+        (Some(cmd), Some(ours)) => std::path::Path::new(&cmd) == ours,
+        _ => false,
+    };
+    cli || (desktop_ext_installed() && !desktop_ext_disabled())
+}
+
+/// 정식 설치본(…/X.app/Contents/MacOS/kura)에서 도는가. dev(`target/debug`)는 아니다.
+fn is_app_bundle_exe(exe: &std::path::Path) -> bool {
+    let Some(macos) = exe.parent() else { return false };
+    let Some(contents) = macos.parent() else { return false };
+    let Some(app) = contents.parent() else { return false };
+    macos.file_name().is_some_and(|n| n == "MacOS")
+        && contents.file_name().is_some_and(|n| n == "Contents")
+        && app.extension().is_some_and(|e| e == "app")
+}
+
+/// 옛 Claude Code 등록을 이 설치본으로 고쳐도 되는가 — 자가 복구의 순수 심장부(테스트 대상, 개발 74).
+///
+/// 고치는 건 **틀림없이 우리 것이었고, 그대로 두면 Claude 가 Kura 를 못 띄우거나 옛 사본을 띄우는** 등록뿐이다:
+///   · 파일이 없다(앱을 옮김·지움 — 죽은 등록).
+///   · 임시 위치다(디스크 이미지·Translocation — 마운트가 풀리면 죽는다).
+///   · 다른 Kura.app 사본 안의 kura-mcp 다(옛 설치·복사본 — 지금 쓰는 건 이 앱이다).
+/// 살아 있는 번들 밖 경로(개발자의 `target/debug` 등)는 사람이 일부러 고른 것이라 안 건드린다. 파일 이름이
+/// kura-mcp 가 아니면(래퍼 스크립트 등) 우리 것인지조차 모른다 — 안 건드린다.
+fn should_heal(
+    old: &str,
+    ours: &std::path::Path,
+    exists: impl Fn(&std::path::Path) -> bool,
+    is_temp: impl Fn(&std::path::Path) -> bool,
+) -> bool {
+    let old = std::path::Path::new(old);
+    if old == ours || old.file_name().is_none_or(|n| n != "kura-mcp") {
+        return false;
+    }
+    !exists(old) || is_temp(old) || is_app_bundle_exe(old)
+}
+
+/// 켤 때 한 번 — Claude Code 등록이 이 설치본을 가리키는지 보고, 어긋났으면 조용히 고친다 (개발 74).
+///
+/// 🔴 **동의 없이 새 등록을 만들지는 않는다.** kura 항목이 아예 없으면 아무것도 안 한다 — 처음 한 번은
+/// 사람이 고른다(환영 투어의 「연결」·연결 화면의 버튼). 여기는 그 사람이 이미 한 선택을 앱을 옮기거나
+/// 업데이트한 뒤에도 살아 있게 하는 자리다.
+///
+/// 정식 설치본에서만 돈다 — dev 빌드가 켜질 때마다 사용자의 진짜 등록을 `target/debug` 로 끌고 가면 안 된다.
+/// claude CLI 를 부르는 데 1~2초 걸려서 스레드로 뺀다(창이 그동안 멈추지 않게).
+pub(crate) fn spawn_heal() {
+    std::thread::spawn(|| {
+        if let Some(msg) = heal_cli_registration() {
+            eprintln!("[kura] {msg}");
+        }
+    });
+}
+
+fn heal_cli_registration() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    if !is_app_bundle_exe(&exe) || path_is_temp_location(&exe) {
+        return None;
+    }
+    let ours = exe.parent()?.join("kura-mcp");
+    if !ours.is_file() {
+        return None;
+    }
+    let entry = registered_cli_entry()?;
+    let old = entry.get("command")?.as_str()?.to_string();
+    if !should_heal(&old, &ours, |p| p.exists(), path_is_temp_location) {
+        return None;
+    }
+    let cli = find_claude_cli()?;
+    let mut next = entry.clone();
+    next["command"] = serde_json::Value::String(ours.to_string_lossy().into_owned());
+    Some(match reregister(&cli, AddWith::Json(next.to_string())) {
+        Ok(()) => format!("Claude Code 등록을 이 앱으로 고쳤어요: {old} → {}", ours.display()),
+        Err(e) => format!("Claude Code 등록 고치기 실패(옛 등록 유지 시도): {}", e.message),
     })
 }
 
@@ -613,6 +750,106 @@ mod tests {
                 "버전 같지 않은 값: {v}"
             );
         }
+    }
+
+    // 확장 꺼 둠 감지 (개발 74): isEnabled 가 **명시적으로 false** 일 때만. 모르면 꺼졌다고 단정하지 않는다.
+    #[test]
+    fn ext_disabled_detection() {
+        assert!(ext_settings_disabled(r#"{"isEnabled": false}"#));
+        assert!(!ext_settings_disabled(r#"{"isEnabled": true}"#)); // 실측 모양
+        assert!(!ext_settings_disabled(r#"{}"#));
+        assert!(!ext_settings_disabled(r#"{"isEnabled": "false"}"#));
+        assert!(!ext_settings_disabled(""));
+        assert!(!ext_settings_disabled("broken"));
+    }
+
+    // 자가 복구 대상 (개발 74): 우리 것이었고 그대로 두면 죽거나 옛 사본을 띄우는 등록만 고친다.
+    #[test]
+    fn heal_only_dead_temp_or_other_bundle() {
+        use std::path::Path;
+        let ours = Path::new("/Applications/Kura.app/Contents/MacOS/kura-mcp");
+        let alive = |_: &Path| true;
+        let dead = |_: &Path| false;
+        let not_temp = |_: &Path| false;
+        let temp = |_: &Path| true;
+
+        // 이미 이 앱 → 할 일 없음.
+        assert!(!should_heal(ours.to_str().unwrap(), ours, alive, not_temp));
+        // 앱을 옮기거나 지워 죽은 등록 → 고친다(번들 밖 경로라도 — 죽었으면 누구에게도 쓸모없다).
+        assert!(should_heal("/Users/a/Desktop/Kura.app/Contents/MacOS/kura-mcp", ours, dead, not_temp));
+        assert!(should_heal("/Users/a/old/target/release/kura-mcp", ours, dead, not_temp));
+        // 디스크 이미지에서 등록해 둔 것 → 고친다.
+        assert!(should_heal("/Volumes/Kura 0.4.3/Kura.app/Contents/MacOS/kura-mcp", ours, alive, temp));
+        // 살아 있는 다른 Kura.app 사본 → 지금 쓰는 이 앱으로.
+        assert!(should_heal("/Users/a/Applications/Kura.app/Contents/MacOS/kura-mcp", ours, alive, not_temp));
+        // 살아 있는 dev 빌드 → 개발자가 일부러 고른 것. 안 건드린다.
+        assert!(!should_heal("/Users/a/지갑지갑/target/debug/kura-mcp", ours, alive, not_temp));
+        // 이름이 kura-mcp 가 아니면(래퍼 등) 우리 것인지 모른다 — 죽었어도 안 건드린다.
+        assert!(!should_heal("/usr/local/bin/my-kura-wrapper", ours, dead, not_temp));
+        assert!(!should_heal("", ours, dead, not_temp));
+    }
+
+    // 실물 claude CLI 로 자가 복구의 add-json 경로를 돈다 (개발 74). 사용자의 ~/.claude.json 대신 임시
+    // CLAUDE_CONFIG_DIR 을 쓴다 — 환경 변수를 바꾸므로 혼자 돌린다:
+    //   cargo test reregister_json_real -- --ignored --test-threads=1
+    // 보는 것: command 만 바뀌고 사용자가 붙인 env·args 는 그대로 남는다.
+    #[test]
+    #[ignore]
+    fn reregister_json_real() {
+        let Some(cli) = find_claude_cli() else {
+            eprintln!("claude CLI 없음 — 건너뜀");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("kura-heal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        let old = r#"{"type":"stdio","command":"/gone/Kura.app/Contents/MacOS/kura-mcp","args":["--x"],"env":{"KURA_X":"1"}}"#;
+        let seeded = Command::new(&cli)
+            .args(["mcp", "add-json", "--scope", "user", "kura", old])
+            .output()
+            .unwrap();
+        assert!(seeded.status.success(), "{}", String::from_utf8_lossy(&seeded.stderr));
+        let entry = registered_cli_entry().expect("심은 항목이 읽혀야 한다");
+        let mut next = entry.clone();
+        next["command"] = serde_json::Value::String("/Applications/Kura.app/Contents/MacOS/kura-mcp".into());
+        if let Err(e) = reregister(&cli, AddWith::Json(next.to_string())) {
+            panic!("{}", e.message);
+        }
+        let after = registered_cli_entry().expect("다시 등록된 항목");
+        assert_eq!(after["command"], "/Applications/Kura.app/Contents/MacOS/kura-mcp");
+        assert_eq!(after["env"]["KURA_X"], "1");
+        assert_eq!(after["args"][0], "--x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 실물 스모크: 이 맥에 kura 확장이 깔려 있으면 그 폴더를 찾고, 설정 파일 이름(<폴더명>.json)으로
+    // 켬/끔을 읽을 수 있어야 한다. 안 깔린 맥에선 둘 다 「없음·안 꺼짐」.
+    #[test]
+    fn desktop_ext_smoke() {
+        match kura_ext_dir() {
+            Some(dir) => {
+                assert!(desktop_ext_installed());
+                let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+                let settings = claude_support_dir()
+                    .unwrap()
+                    .join("Claude Extensions Settings")
+                    .join(format!("{id}.json"));
+                if let Ok(json) = std::fs::read_to_string(settings) {
+                    assert_eq!(desktop_ext_disabled(), ext_settings_disabled(&json));
+                }
+            }
+            None => assert!(!desktop_ext_disabled()),
+        }
+    }
+
+    #[test]
+    fn app_bundle_exe_detection() {
+        use std::path::Path;
+        assert!(is_app_bundle_exe(Path::new("/Applications/Kura.app/Contents/MacOS/kura")));
+        assert!(!is_app_bundle_exe(Path::new("/a/target/debug/kura")));
+        assert!(!is_app_bundle_exe(Path::new("/Applications/Kura.app/Contents/Resources/kura")));
+        assert!(!is_app_bundle_exe(Path::new("/kura")));
     }
 
     // 원복 명령의 셸 인용: JSON 은 따옴표를 반드시 물고 있고, 값 안에 작은따옴표가

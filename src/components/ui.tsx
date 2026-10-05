@@ -1,6 +1,6 @@
 // 공용 UI 프리미티브 — 셸/카드/버튼 스타일 + 작은 컴포넌트 (디자인 시스템의 실체).
 
-import { Bot, X } from "lucide-react";
+import { Bot, ChevronRight, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 
@@ -261,49 +261,78 @@ function prettyClient(c: string): string {
   return c;
 }
 
-/** AI(MCP 클라이언트)가 지갑에 연결됐는지 보여주는 배지 — 제품 컨셉(AI 전용 지갑)의 시각화.
+/** AI 연결 배지 — 제품 컨셉(AI 전용 지갑)의 시각화. 상태는 셋이다 (개발 74).
+ *
+ *   쓰는 중  — MCP 가 지금 떠 있다(하트비트). Claude 가 켜져 있고 Kura 를 물고 있다.
+ *   준비됨   — 등록이 살아 있다. Claude 를 켜면 Claude 가 우리를 띄운다 — 사람이 할 일이 없다.
+ *   연결 필요 — 등록이 없거나 다른 곳을 가리킨다. 이때만 「할 일」처럼 보인다.
+ *
+ *  🔴 예전엔 하트비트만 봐서 둘째를 셋째로 그렸다 — 등록이 멀쩡한데 Claude 를 안 켠 동안 내내
+ *  「AI 연결 안 됨」. MCP 엔 상주 연결이 없으니 사람들은 매일 「연결」을 다시 누르게 됐다.
+ *  ready 가 null 이면(첫 조회 전) 그 자리만 비워 둔다 — 「연결 필요」가 번쩍였다 사라지지 않게.
  *  onClick 을 주면 버튼이 된다 — AI 연결 화면(개발 35) 진입점. */
 export function AgentBadge({
   connected,
+  ready,
   client,
   onClick,
 }: {
   connected: boolean;
+  ready: boolean | null;
   client: string;
   onClick?: () => void;
 }) {
   const name = prettyClient(client);
-  const title = connected
-    ? t(
-        `${name}가 이 지갑에 연결돼 있어요. 결제를 요청하면 승인 팝업이 떠요.`,
-        `${name} is connected to this wallet. When it asks to pay, an approval window opens.`,
-      )
-    : t(
-        "연결된 AI 에이전트가 없어요. 누르면 연결 방법이 열려요.",
-        "No AI agent is connected. Tap to see how to connect one.",
-      );
+  if (!connected && ready === null) return <span className="h-[26px]" aria-hidden />;
+  const state = connected ? "live" : ready ? "ready" : "needs";
+  const title =
+    state === "live"
+      ? t(
+          `${name}가 지금 이 지갑을 쓰고 있어요. 결제를 요청하면 승인 창이 떠요.`,
+          `${name} is using this wallet right now. When it asks to pay, an approval window opens.`,
+        )
+      : state === "ready"
+        ? t(
+            "연결은 끝나 있어요. Claude를 켜면 알아서 붙고, Kura가 꺼져 있어도 결제를 요청할 때 깨워요.",
+            "You're connected. Open Claude and it attaches on its own — it even wakes Kura when it needs to pay.",
+          )
+        : t(
+            "아직 이 앱과 연결된 AI가 없어요. 누르면 한 번에 연결할 수 있어요.",
+            "No AI is connected to this app yet. Tap to connect in one step.",
+          );
   const className = cn(
     "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full",
     "text-[11px] tracking-tight border select-none",
+    "bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-800)]",
     "transition-colors duration-[var(--duration-base)]",
-    connected
-      ? "border-[var(--color-accent)] bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-800)] text-[var(--color-accent)]"
-      : "border-[var(--color-ivory-400)] dark:border-[var(--color-night-700)] bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-800)] text-[var(--color-ink-300)]",
+    state === "live"
+      ? "border-[var(--color-accent)] text-[var(--color-accent)]"
+      : state === "ready"
+        ? "border-[var(--color-ivory-400)] dark:border-[var(--color-night-700)] text-[var(--color-ink-500)]"
+        : "border-[var(--color-ivory-400)] dark:border-[var(--color-night-700)] text-[var(--color-ink-300)]",
     onClick && "cursor-pointer hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]",
   );
   const inner = (
     <>
       <Bot size={12} />
-      {connected ? (
+      {state === "live" ? (
         <>
-          <span>{t(`${name} 연결됨`, `${name} connected`)}</span>
+          <span>{t(`${name} 쓰는 중`, `${name} in use`)}</span>
           <span className="relative flex w-1.5 h-1.5" aria-hidden>
             <span className="absolute inline-flex w-full h-full rounded-full bg-[var(--color-accent)] opacity-60 animate-ping" />
             <span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-[var(--color-accent)]" />
           </span>
         </>
+      ) : state === "ready" ? (
+        <>
+          <span className="inline-flex w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] opacity-70" aria-hidden />
+          <span>{t("준비됨 · Claude를 켜면 자동으로 붙어요", "Ready · attaches when you open Claude")}</span>
+        </>
       ) : (
-        <span>{t("AI 연결 안 됨", "No AI connected")}</span>
+        <>
+          <span>{t("AI 연결 필요", "Connect an AI")}</span>
+          <ChevronRight size={12} aria-hidden />
+        </>
       )}
     </>
   );
@@ -317,3 +346,39 @@ export function AgentBadge({
     </span>
   );
 }
+
+/** 공용 on/off 스위치 — 설정의 ToggleRow·업데이트 블록, 환영 투어의 연결 단계(개발 74)가 같은 스위치를 쓴다(개발 39 정리 전엔
+ *  같은 마크업이 두 벌 복사돼 있었다). 접근성 라벨은 행 제목을 그대로 받는다. */
+export function Switch({
+  checked,
+  onToggle,
+  label,
+}: {
+  checked: boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={onToggle}
+      className={cn(
+        "shrink-0 relative w-10 h-6 rounded-full transition-colors duration-[var(--duration-base)]",
+        checked
+          ? "bg-[var(--color-accent)]"
+          : "bg-[var(--color-ivory-400)] dark:bg-[var(--color-night-700)]",
+      )}
+    >
+      <span
+        className={cn(
+          "absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all duration-[var(--duration-base)]",
+          checked ? "left-5" : "left-1",
+        )}
+      />
+    </button>
+  );
+}
+

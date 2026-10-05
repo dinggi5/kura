@@ -352,6 +352,73 @@ pub fn ui_stalled() -> bool {
     read_heartbeat().is_some_and(|h| !h.ui_ok)
 }
 
+/// 이 실행 파일이 든 앱 번들 — `…/Kura.app/Contents/MacOS/kura-mcp` 면 `…/Kura.app` (개발 74).
+/// 번들 밖(dev 의 `target/debug`, 손으로 옮긴 바이너리)이면 None — 깨울 앱을 모른다.
+fn bundle_of(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let app = contents.parent()?;
+    let is_bundle = macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && app.extension().is_some_and(|e| e == "app");
+    is_bundle.then(|| app.to_path_buf())
+}
+
+/// 앱을 깨운 뒤 하트비트를 기다리는 상한. 앱은 창 없이 트레이로 뜨고 러스트 감시 스레드가 1초마다
+/// 하트비트를 찍는다(WebView 를 기다리지 않는다) — 콜드 스타트가 몇 초면 끝나니 넉넉히 잡은 값이다.
+const WAKE_WAIT: Duration = Duration::from_secs(20);
+
+/// 🔴 **승인할 앱이 꺼져 있으면 깨운다** (개발 74 「깔면 늘 붙어 있다」).
+///
+/// MCP 엔 상주 연결이 없다 — Claude 가 켤 때 우리를 띄운다. 그런데 결제는 앱(승인 창)이 있어야 한다.
+/// 예전엔 앱이 꺼져 있으면 「앱을 켠 뒤 다시 시도하세요」로 끝났고, 사람은 Kura 를 켜고 AI 에게 다시
+/// 말해야 했다. 자동 시작을 꺼 둔 사람·종료해 둔 사람에게 「연결」은 매번 끊겨 있는 셈이었다.
+/// 이제는 **우리가 든 그 번들**을 `open -g`(앞으로 안 가져옴)로 띄우고 하트비트를 기다린다.
+///
+/// 깨우지 않는 경우 — 깨워 봐야 승인할 수 없거나, 깨울 대상을 모른다:
+///   · 이미 살아 있다 → 할 일 없음.
+///   · 화면이 죽었다(`ui_stalled`) → 이미 떠 있는 앱이다. `open` 은 그걸 고치지 못한다.
+///   · 지갑이 아직 없다(none·legacy) → 앱은 하트비트를 일부러 안 찍는다 — 20초를 헛기다린다.
+///   · 번들 밖에서 돈다(dev) → 어느 앱을 띄울지 모른다. 엉뚱한 설치본을 깨우지 않는다.
+///
+/// 돌려주는 값 = 지금 승인할 앱이 있는가(`app_alive`). false 면 호출자가 `app_unavailable` 로 안내한다.
+pub async fn ensure_app_alive() -> bool {
+    if app_alive() {
+        return true;
+    }
+    if ui_stalled() {
+        return false;
+    }
+    if !crate::wallet::wallet_status().is_ok_and(|s| s.state == "encrypted") {
+        return false;
+    }
+    let Some(app) = std::env::current_exe().ok().as_deref().and_then(bundle_of) else {
+        return false;
+    };
+    // /usr/bin/open 절대경로 — PATH 의 가짜 open 을 타지 않게(mcpb 런처와 같은 원칙). stdout 은 MCP 의
+    // stdio 채널이라 자식에게 물려주면 JSON-RPC 가 깨진다 → 셋 다 닫는다.
+    let spawned = std::process::Command::new("/usr/bin/open")
+        .arg("-g")
+        .arg(&app)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !spawned {
+        return false;
+    }
+    eprintln!("[kura] 지갑 앱이 꺼져 있어 깨웠어요: {}", app.display());
+    let deadline = std::time::Instant::now() + WAKE_WAIT;
+    while std::time::Instant::now() < deadline {
+        if app_alive() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    app_alive()
+}
+
 /// 이미 대기 중인 요청이 있는지 (single-flight 가드).
 pub fn has_pending() -> bool {
     request_path().map(|p| p.exists()).unwrap_or(false)
@@ -826,6 +893,24 @@ pub const PROOF_BODY_CAP: usize = 64 * 1024;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 개발 74: 깨울 앱은 **우리가 든 번들**뿐이다. 번들 밖(dev·옮긴 바이너리)이면 아무것도 안 깨운다 —
+    /// 엉뚱한 설치본을 띄우면 화면과 실제로 승인하는 앱이 갈린다.
+    #[test]
+    fn bundle_of_only_inside_an_app_bundle() {
+        assert_eq!(
+            bundle_of(Path::new("/Applications/Kura.app/Contents/MacOS/kura-mcp")),
+            Some(PathBuf::from("/Applications/Kura.app"))
+        );
+        assert_eq!(
+            bundle_of(Path::new("/Users/a/Applications/Kura 2.app/Contents/MacOS/kura-mcp")),
+            Some(PathBuf::from("/Users/a/Applications/Kura 2.app"))
+        );
+        assert_eq!(bundle_of(Path::new("/Users/a/지갑지갑/target/debug/kura-mcp")), None);
+        assert_eq!(bundle_of(Path::new("/Applications/Kura/Contents/MacOS/kura-mcp")), None);
+        assert_eq!(bundle_of(Path::new("/Applications/Kura.app/Contents/Resources/kura-mcp")), None);
+        assert_eq!(bundle_of(Path::new("/kura-mcp")), None);
+    }
 
     /// 🔴 개발 73(코덱스 1차 P1): 요구를 고른 체인과 지금 체인이 다르면 요청을 **쓰기 전에** 멈춘다.
     /// 어떤 실제 체인도 id 0 이 아니라 활성 체인이 무엇이든 어긋난다 — 파일을 안 건드리고 돌아온다.

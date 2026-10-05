@@ -98,6 +98,19 @@ export function WalletScreen({
   const [pending, setPending] = useState<PaymentRequest | null>(null);
   // AI(MCP 클라이언트)가 지금 이 지갑에 연결돼 있는지 — 메인 화면 배지용.
   const [agent, setAgent] = useState<AgentStatus>({ connected: false, client: "" });
+  // 「준비됨」 — Claude 를 켜면 이 앱으로 붙는 등록이 있는가 (개발 74). null = 아직 모름.
+  // 하트비트(1초)와 따로 5초마다 — 설정 파일 읽기라 싸지만 매초 볼 만큼 자주 바뀌지 않는다.
+  const [ready, setReady] = useState<boolean | null>(null);
+  const loadReady = useCallback(() => {
+    invoke<boolean>("get_connect_ready")
+      .then(setReady)
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    loadReady();
+    const h = setInterval(loadReady, 5000);
+    return () => clearInterval(h);
+  }, [loadReady]);
   // 자율 결제 세션 상태(메모리의 잠금 해제 키). 잠금 해제 시 한도 이하는 비번 없이 자동 승인.
   const [session, setSession] = useState<SessionStatus>({ unlocked: false, remaining_secs: 0, auto_limit: "0" });
   const [showUnlock, setShowUnlock] = useState(false);
@@ -430,6 +443,7 @@ export function WalletScreen({
             onDone={() => {
               clearWelcomePending(address);
               setShowTour(false);
+              loadReady(); // 투어의 연결 단계에서 등록했으면 배지가 곧바로 「준비됨」으로.
             }}
           />
         )}
@@ -505,7 +519,16 @@ export function WalletScreen({
 
   // AI 연결 화면 (개발 35) — 연결 배지가 진입점.
   if (showConnect) {
-    return withModal(<ConnectScreen agent={agent} onClose={() => setShowConnect(false)} />);
+    return withModal(
+      <ConnectScreen
+        agent={agent}
+        ready={ready}
+        onClose={() => {
+          setShowConnect(false);
+          loadReady();
+        }}
+      />,
+    );
   }
 
   return withModal(
@@ -585,6 +608,7 @@ export function WalletScreen({
         <div className="flex">
           <AgentBadge
             connected={agent.connected}
+            ready={ready}
             client={agent.client}
             onClick={() => setShowConnect(true)}
           />

@@ -143,6 +143,8 @@ export type AgentStatus = { connected: boolean; client: string };
 export type ConnectStatus = {
   desktop_installed: boolean;
   desktop_ext_installed: boolean;
+  /** 확장은 깔려 있는데 Claude 데스크톱 설정에서 꺼 둠(개발 74) — 「준비됨」이 아니다. */
+  desktop_ext_disabled: boolean;
   cli_path: string | null;
   /** kura 등록이 있고 command 가 이 빌드의 kura-mcp 경로와 일치. */
   cli_registered: boolean;

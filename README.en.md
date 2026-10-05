@@ -101,7 +101,7 @@ If you run that last `rm -rf ~/.jigap` without your 12 words, **nobody can recov
 
 1. **Create a wallet** — choose the password (8 characters or more) you'll type for every payment. Your key is stored encrypted with it (`~/.jigap/wallet.enc`).
 2. **Back up your words** — twelve words appear. They are **the real proof the funds are yours**, so write them on paper or keep them in a password manager. Even if you forget your password they bring the funds back: quit the app, **check that you have the twelve words**, delete `~/.jigap/wallet.enc`, relaunch, and use **Import** on the first screen (any standard BIP-39 wallet works too). Delete that file without the twelve words and the funds are gone for good.
-3. **Welcome tour** — it walks through topping up, connecting an AI, and the safety rails. The **ⓘ Help** button in the header shows it again any time.
+3. **Welcome tour** — it walks through topping up and the safety rails, and asks once: **"Connect Claude?"** One **Connect** press hooks up the Claude apps it finds on this Mac (desktop and Code) and turns on start at login. The **ⓘ Help** button in the header shows it again any time.
 
 ---
 
@@ -119,11 +119,19 @@ To pay for anything, the wallet needs **USDC** — a digital dollar.
 
 ## Connecting an AI (Claude)
 
-Register the Kura server in your AI app's **MCP settings** and they're connected — the main screen then shows a **"Claude connected"** badge. The **MCP server ships inside the app**, so there's no repo to clone and no Rust to install.
+**Connect once and you're done.** MCP has no always-on connection of its own — Claude starts Kura when you open Claude. So once it's registered there's nothing to press again, and if Kura isn't running when Claude needs to pay, Claude wakes it. The **MCP server ships inside the app**, so there's no repo to clone and no Rust to install.
+
+The badge at the top of the main screen tells you where things stand:
+
+- **Claude in use** — Claude has this wallet open right now.
+- **Ready · attaches when you open Claude** — you're connected. Nothing to do.
+- **Connect an AI** — not connected yet. This is the only time you need to tap it.
+
+If you move or update the app and the Claude Code entry ends up pointing at an old path, Kura fixes it to the current app when it starts. (If there's no entry at all, it never creates one — the first time is your call.)
 
 ### The easy way — the app's "Connect an AI" screen
 
-Tap the **"No AI connected" badge** at the top of the main screen.
+If you skipped it in the first-run tour, tap the **"Connect an AI" badge** at the top of the main screen.
 
 - **Claude desktop** — press "Connect" and Claude opens its extension installer. Press Install and you're done.
 - **Claude Code** — one button registers it (the app runs `claude mcp add` for you). From the next `claude` run on, it works in any folder.

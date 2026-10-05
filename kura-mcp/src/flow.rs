@@ -204,8 +204,8 @@ pub async fn run_payment(
         )
         .into());
     }
-    // 앱이 안 켜져 있으면 승인할 사람이 없다 → 즉시 안내(5분 대기 안 함).
-    if !payment::app_alive() {
+    // 앱이 안 켜져 있으면 승인할 사람이 없다 → 깨워 보고(개발 74), 그래도 없으면 즉시 안내(5분 대기 안 함).
+    if !payment::ensure_app_alive().await {
         return Err(app_unavailable());
     }
     // single-flight: 이미 대기 중인 요청이 있으면 거절.
@@ -527,8 +527,8 @@ pub async fn run_x402(
 
     // 3) 승인할 앱이 켜져 있는지 + single-flight. **조회보다 먼저** 본다 — 어차피 못 띄울
     // 요청이면 레지스트리를 4번 읽어 봐야 결과를 버릴 뿐이고, 느린 RPC 만큼 즉시 줘야 할
-    // 안내가 늦어진다(코덱스 개발47 1차 P2).
-    if !payment::app_alive() {
+    // 안내가 늦어진다(코덱스 개발47 1차 P2). 꺼져 있으면 먼저 깨운다(개발 74).
+    if !payment::ensure_app_alive().await {
         return Err(app_unavailable());
     }
     if payment::has_pending() {

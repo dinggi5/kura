@@ -2,8 +2,8 @@
 // 있던 연결을 앱 안으로 들인다: 설치 → 지갑 생성 → 연결이 이 창 안에서 끝난다.
 //
 // 감지(설치·등록)는 3초 폴링 — 전부 로컬 파일 읽기라 싸고, 사용자가 Claude 쪽에서
-// '설치'를 누르고 돌아오면 화면이 스스로 따라잡는다. 연결의 최종 진실은 상단의
-// 연결 배지(AgentStatus·1초 폴링)다.
+// '설치'를 누르고 돌아오면 화면이 스스로 따라잡는다. 맨 위 상태 카드는 배지와 같은 셋이다
+// (개발 74): 쓰는 중(하트비트) / 준비됨(등록이 살아 있음) / 연결 필요.
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -113,7 +113,16 @@ function ClientCard({
   );
 }
 
-export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose: () => void }) {
+export function ConnectScreen({
+  agent,
+  ready,
+  onClose,
+}: {
+  agent: AgentStatus;
+  /** 「준비됨」(개발 74) — 배지와 같은 값. 이 화면은 3초마다 자기 감지를 따로 돌린다. */
+  ready: boolean | null;
+  onClose: () => void;
+}) {
   const [status, setStatus] = useState<ConnectStatus | null>(null);
   const [copied, copy] = useCopy();
   const [pathCopied, copyPath] = useCopy();
@@ -195,6 +204,11 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
   // 대행 실패 때 백엔드가 준 "옛 등록 되살리기" 명령. 지역 const 로 받아야 JSX 안에서
   // 좁혀진다(상태 변수는 콜백 안에서 다시 null 일 수 있다고 본다).
   const restoreCmd = cliError?.restore_command ?? null;
+  // 「준비됨」은 배지 값을 쓰되, 이 화면에서 방금 등록했으면 3초 감지가 먼저 안다 — 둘 중 하나면 참.
+  const isReady =
+    !!ready ||
+    !!status?.cli_registered ||
+    (!!status?.desktop_ext_installed && !status.desktop_ext_disabled);
 
   return (
     <main className={shell}>
@@ -233,6 +247,25 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
                 )}
               </p>
             </div>
+          ) : isReady ? (
+            <div className="flex items-start gap-2.5">
+              <span
+                className="mt-[7px] inline-flex w-2 h-2 shrink-0 rounded-full bg-[var(--color-accent)] opacity-70"
+                aria-hidden
+              />
+              <p className="text-[12px] leading-relaxed text-[var(--color-ink-500)]">
+                {t(
+                  <>
+                    <b className={em}>준비돼 있어요.</b> 다시 누를 건 없어요 — Claude를 켜면 알아서
+                    붙고, Kura가 꺼져 있어도 결제를 요청할 때 깨워요.
+                  </>,
+                  <>
+                    <b className={em}>You're set.</b> Nothing to press again — open Claude and it
+                    attaches on its own, and it wakes Kura when it needs to pay.
+                  </>,
+                )}
+              </p>
+            </div>
           ) : (
             <p className="text-[12px] leading-relaxed text-[var(--color-ink-500)]">
               {t(
@@ -262,7 +295,9 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
           title={t("Claude 데스크톱", "Claude desktop")}
           tag={
             status &&
-            (status.desktop_ext_installed ? (
+            (status.desktop_ext_installed && status.desktop_ext_disabled ? (
+              <StateTag label={t("확장 꺼져 있음", "Extension turned off")} />
+            ) : status.desktop_ext_installed ? (
               <StateTag ok label={t("확장 설치됨", "Extension installed")} />
             ) : status.desktop_installed ? undefined : (
               <StateTag label={t("앱 미설치", "App not installed")} />
@@ -288,10 +323,15 @@ export function ConnectScreen({ agent, onClose }: { agent: AgentStatus; onClose:
           ) : (
             <div className="space-y-2.5">
               <p>
-                {t(
-                  "버튼을 누르면 Claude에 확장 설치 창이 떠요. 거기서 '설치'만 누르면 돼요.",
-                  "Press the button and Claude opens its extension installer. Press Install there.",
-                )}
+                {status?.desktop_ext_disabled
+                  ? t(
+                      "확장은 깔려 있는데 꺼져 있어요. Claude 설정 → 확장 프로그램에서 Kura를 켜면 돼요.",
+                      "The extension is installed but turned off. Turn Kura on in Claude's Settings → Extensions.",
+                    )
+                  : t(
+                      "버튼을 누르면 Claude에 확장 설치 창이 떠요. 거기서 '설치'만 누르면 돼요.",
+                      "Press the button and Claude opens its extension installer. Press Install there.",
+                    )}
               </p>
               <button
                 type="button"

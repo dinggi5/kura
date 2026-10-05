@@ -29,7 +29,7 @@ import { fmtAmount, shortenAddress } from "@/lib/format";
 import { GITHUB_URL } from "@/lib/helpContent";
 import type { Settings, SpendView } from "@/lib/types";
 import type { UpdateHook } from "@/lib/useUpdate";
-import { cardBase, enter, inputBase, modalCard, modalOverlay, primaryBtn, shell } from "@/components/ui";
+import { cardBase, enter, inputBase, modalCard, modalOverlay, primaryBtn, shell, Switch } from "@/components/ui";
 import { chooseLang, lang, t, type Lang } from "@/lib/i18n";
 
 const RPC_CUSTOM = "__custom__";
@@ -974,41 +974,6 @@ function RowGroup({ children }: { children: ReactNode }) {
     >
       {children}
     </div>
-  );
-}
-
-/** 공용 on/off 스위치 — ToggleRow 와 업데이트 블록이 같은 스위치를 쓴다(개발 39 정리 전엔
- *  같은 마크업이 두 벌 복사돼 있었다). 접근성 라벨은 행 제목을 그대로 받는다. */
-function Switch({
-  checked,
-  onToggle,
-  label,
-}: {
-  checked: boolean;
-  onToggle: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={onToggle}
-      className={cn(
-        "shrink-0 relative w-10 h-6 rounded-full transition-colors duration-[var(--duration-base)]",
-        checked
-          ? "bg-[var(--color-accent)]"
-          : "bg-[var(--color-ivory-400)] dark:bg-[var(--color-night-700)]",
-      )}
-    >
-      <span
-        className={cn(
-          "absolute top-1 w-4 h-4 rounded-full bg-white shadow-sm transition-all duration-[var(--duration-base)]",
-          checked ? "left-5" : "left-1",
-        )}
-      />
-    </button>
   );
 }
 

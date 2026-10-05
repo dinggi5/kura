@@ -120,8 +120,9 @@ export const HELP_SECTIONS: HelpSection[] = [
           연결이에요.)
         </p>
         <p>
-          메인 화면 위쪽의 <b className={em}>"AI 연결 안 됨" 배지를 누르면</b> 연결 화면이
-          열려요. 거기서 버튼 한 번이면 돼요:
+          처음 지갑을 만들 때 투어가 한 번 물어봐요. 건너뛰었다면 메인 화면 위쪽의{" "}
+          <b className={em}>"AI 연결 필요" 배지를 누르면</b> 연결 화면이 열려요. 버튼 한 번이면
+          돼요:
         </p>
         <ul className="space-y-1.5">
           <li>
@@ -134,8 +135,10 @@ export const HELP_SECTIONS: HelpSection[] = [
           </li>
         </ul>
         <p>
-          연결되면 배지가 <b className={em}>"Claude 연결됨"</b>으로 바뀌어요. 그때부터 AI가
-          결제를 요청하면 승인 팝업이 떠요.
+          <b className={em}>한 번 연결하면 끝이에요.</b> 배지가{" "}
+          <b className={em}>"준비됨"</b>이면 할 일이 없어요 — Claude를 켜면 알아서 붙고(그땐{" "}
+          <b className={em}>"Claude 쓰는 중"</b>), Kura가 꺼져 있어도 결제를 요청할 때 Claude가
+          깨워요. 앱을 옮기거나 업데이트해도 Kura가 등록을 스스로 바로잡아요.
         </p>
         <p className="text-[var(--color-ink-300)]">
           Cursor 같은 다른 앱도 연결 화면의 서버 경로로 붙일 수 있어요. 자세한 건 GitHub 문서에.
@@ -148,8 +151,9 @@ export const HELP_SECTIONS: HelpSection[] = [
           tools like a wallet.)
         </p>
         <p>
-          Tap the <b className={em}>"No AI connected" badge</b> at the top of the main screen to
-          open the connect screen. One button is all it takes:
+          The first-run tour asks once. If you skipped it, tap the{" "}
+          <b className={em}>"Connect an AI" badge</b> at the top of the main screen to open the
+          connect screen. One button is all it takes:
         </p>
         <ul className="space-y-1.5">
           <li>
@@ -162,8 +166,11 @@ export const HELP_SECTIONS: HelpSection[] = [
           </li>
         </ul>
         <p>
-          Once connected, the badge reads <b className={em}>"Claude connected"</b>. From then on,
-          an approval window opens whenever the AI asks to pay.
+          <b className={em}>Connect once and you're done.</b> When the badge says{" "}
+          <b className={em}>"Ready"</b> there's nothing to do — open Claude and it attaches (the
+          badge then reads <b className={em}>"Claude in use"</b>), and if Kura isn't running when
+          Claude needs to pay, Claude wakes it. Move or update the app and Kura fixes the entry
+          itself.
         </p>
         <p className="text-[var(--color-ink-300)]">
           Other apps like Cursor can use the server path shown on the connect screen. The GitHub
