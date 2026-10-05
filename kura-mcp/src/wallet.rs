@@ -223,6 +223,17 @@ pub struct Balances {
     pub usdc: String,
 }
 
+/// RPC 가 답한 체인 id 가 고른 체인과 같은가 — 다르면 사람이 읽는 오류 (개발 74 코덱스 1차 P1).
+fn rpc_chain_matches(got: u64, want: u64) -> Result<(), String> {
+    if got == want {
+        return Ok(());
+    }
+    Err(tf!(
+        "지정한 RPC 가 다른 체인(id {got})에 붙어 있어요 — 고른 네트워크(id {want})와 달라서 잔액을 보여주지 않아요. 설정에서 RPC 를 비우거나 맞는 주소로 바꾸세요.",
+        "The custom RPC is on a different chain (id {got}) than the network you picked (id {want}), so the balance isn't shown. Clear the RPC in Settings or point it at the right chain."
+    ))
+}
+
 /// 지갑 주소의 네이티브(가스) + USDC(결제) 잔액을 활성 체인에서 조회한다.
 pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
     let addr: Address = addr_hex
@@ -241,7 +252,20 @@ pub async fn get_balances(addr_hex: &str) -> Result<Balances, String> {
         })?;
 
     let usdc_contract = IERC20::new(active_chain().usdc_address, &provider);
-    let (wei, raw): (Option<U256>, U256) = tokio::try_join!(
+    // 🔴 지정 RPC 가 다른 체인이면 잔액을 내지 않는다(개발 74 코덱스 1차 P1) — 앱 `transfer::get_balances` 와 같은 대조.
+    // Arc 테스트넷·메인넷은 USDC 주소가 같아 조회가 「성공」하며 남의 체인 잔액을 AI 에게 말하게 된다.
+    let want = active_chain().chain_id;
+    let (_, wei, raw): ((), Option<U256>, U256) = tokio::try_join!(
+        async {
+            let got = provider.get_chain_id().await.map_err(|e| {
+                tf!(
+                    "RPC 체인 확인 실패: {}",
+                    "Couldn't check the RPC's chain: {}",
+                    redact_urls(&e.to_string())
+                )
+            })?;
+            rpc_chain_matches(got, want)
+        },
         async {
             // 네이티브가 곧 USDC 인 체인(Arc)에선 네이티브 조회를 아예 건너뛴다 — 같은 잔액이다.
             if active_chain().native_is_usdc {
@@ -318,6 +342,14 @@ fn read_deposits() -> Vec<crate::policy::Deposit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 개발 74 코덱스 1차 P1: 지정 RPC 의 체인이 고른 체인과 다르면 잔액을 내지 않는다(Arc 테스트넷·메인넷은 USDC 주소가 같다).
+    #[test]
+    fn balance_refuses_other_chain_rpc() {
+        assert!(rpc_chain_matches(5042002, 5042002).is_ok());
+        assert!(rpc_chain_matches(5042, 5042002).is_err());
+        assert!(rpc_chain_matches(8453, 84532).is_err());
+    }
 
     // RPC 선택(pick_rpc)·rpc_url 읽기 테스트는 policy::tests 가 본다(정본이 그쪽으로 갔다, 개발 57).
 

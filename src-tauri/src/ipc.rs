@@ -387,6 +387,14 @@ pub(crate) fn begin_approval(req: &PaymentRequest) -> Result<ApprovalGuard, Stri
     if approval_in_flight() {
         return Err(in_flight_message());
     }
+    // 업데이트 설치가 시작됐으면 새 승인을 체인으로 내보내지 않는다(개발 74 코덱스 1차 P0) — 곧 재시작한다.
+    if crate::update::installing() {
+        return Err(ts!(
+            "업데이트를 설치하는 중이에요. 앱이 다시 켜진 뒤 승인하세요.",
+            "An update is installing. Approve once the app has restarted."
+        )
+        .into());
+    }
     // 🔴 **결제 시도 기록을 먼저 쓰고, 그다음 요청이 아직 있는지 본다** (개발 66).
     // MCP 는 시간 초과 때 요청을 먼저 지우고 그다음 기록을 읽는다(shared/policy.rs 순서 규약) — 이 순서가
     // 둘 다 지켜져야 「GUI 는 요청을 보고 전송을 시작했는데 MCP 는 아무것도 못 보고 『응답 없음』이라
@@ -602,7 +610,7 @@ fn admit_approval(pending_id: Option<&str>, id: &str, in_flight: bool) -> Result
     Ok(())
 }
 
-fn approval_in_flight() -> bool {
+pub(crate) fn approval_in_flight() -> bool {
     APPROVALS_IN_FLIGHT.load(Ordering::SeqCst) > 0
 }
 

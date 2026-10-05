@@ -37,6 +37,7 @@ function StepRow({
   desc,
   done,
   doneLabel,
+  hint,
   checked,
   onToggle,
 }: {
@@ -44,6 +45,8 @@ function StepRow({
   desc: string;
   done: boolean;
   doneLabel?: string;
+  /** 앱이 대신 해 줄 수 없는 일 — 스위치 대신 할 일을 적는다(예: 꺼 둔 확장). */
+  hint?: string;
   checked: boolean;
   onToggle: () => void;
 }) {
@@ -55,7 +58,11 @@ function StepRow({
         </p>
         <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-ink-300)]">{desc}</p>
       </div>
-      {done ? (
+      {hint && !done ? (
+        <span className="shrink-0 text-right text-[11px] leading-snug text-[var(--color-ink-500)]">
+          {hint}
+        </span>
+      ) : done ? (
         <span className="shrink-0 inline-flex items-center gap-1 text-[11px] text-[var(--color-accent)]">
           <Check size={12} /> {doneLabel ?? t("돼 있어요", "Done")}
         </span>
@@ -119,10 +126,13 @@ function ConnectStep({ onSettled }: { onSettled: () => void }) {
   const tempNoPath = status.temp_location && !status.mcp_path;
   const codeDone = status.cli_registered;
   const codeShown = codeDone || (!!status.cli_path && !tempNoPath);
-  const desktopDone = status.desktop_ext_installed;
+  // 깔려 있어도 Claude 설정에서 꺼 뒀으면 Claude 를 켜도 우리를 안 띄운다 — 「돼 있어요」가 아니다(코덱스 개발74 1차 P2).
+  // 다시 설치 창을 여는 건 답이 아니라(켜고 끄는 건 Claude 쪽 스위치) 할 일을 적는다.
+  const desktopOff = status.desktop_ext_installed && status.desktop_ext_disabled;
+  const desktopDone = status.desktop_ext_installed && !status.desktop_ext_disabled;
   const desktopShown = status.desktop_installed;
   const doCode = codeShown && !codeDone && pickCode;
-  const doDesktop = desktopShown && !desktopDone && pickDesktop;
+  const doDesktop = desktopShown && !status.desktop_ext_installed && pickDesktop;
   const doAutostart = !autostartOn && pickAutostart;
   const nothingToDo = !doCode && !doDesktop && !doAutostart;
 
@@ -186,6 +196,7 @@ function ConnectStep({ onSettled }: { onSettled: () => void }) {
             desc={t("Claude에 설치 창이 떠요 — '설치'를 누르세요", "Claude shows an installer — press Install")}
             done={desktopDone || !!result?.desktopOpened}
             doneLabel={desktopDone ? undefined : t("설치 창 열림", "Installer open")}
+            hint={desktopOff ? t("Claude 설정에서 켜 주세요", "Turn it on in Claude") : undefined}
             checked={pickDesktop}
             onToggle={() => setPickDesktop((v) => !v)}
           />

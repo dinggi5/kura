@@ -18,6 +18,7 @@
 //      요청이 있으면 그대로 죽는다 — MCP 쪽은 응답을 영영 못 받는다.
 
 use crate::i18n::{tf, ts};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -102,6 +103,32 @@ pub(crate) async fn check_update(
     }
 }
 
+/// 설치가 「되돌릴 수 없는 구간」에 들어갔다 — 최종 확인을 통과한 뒤 재시작까지 (개발 74 코덱스 1차 P0).
+/// 수동 송금·승인은 이 값이 서 있으면 시작하지 않는다.
+static INSTALLING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn installing() -> bool {
+    INSTALLING.load(Ordering::SeqCst)
+}
+
+/// 돈이 나가는 중이거나 나갈 차례인 게 있으면 그 이유. 설치는 재시작으로 끝나므로 이 동안엔 안 깐다.
+/// 예전엔 MCP 요청 파일만 봤다 — 화면에서 직접 보낸 송금과 진행 중인 승인이 빠져 있었다(개발 74 코덱스 1차 P0).
+fn money_busy() -> Option<&'static str> {
+    if crate::ipc::has_pending() || crate::ipc::approval_in_flight() {
+        return Some(ts!(
+            "처리 중인 결제가 있어요. 먼저 끝낸 뒤 업데이트하세요.",
+            "A payment is being handled. Let it finish, then update."
+        ));
+    }
+    if crate::transfer::manual_send_in_flight() {
+        return Some(ts!(
+            "보내는 중인 송금이 있어요. 끝난 뒤 업데이트하세요.",
+            "A transfer is going out. Update once it's done."
+        ));
+    }
+    None
+}
+
 /// 담아 둔 업데이트를 내려받아 설치하고 앱을 재시작한다.
 /// 진행률은 `update://progress` 이벤트로 나간다.
 #[tauri::command]
@@ -111,12 +138,8 @@ pub(crate) async fn install_update(
 ) -> Result<(), String> {
     // 🔴 설치는 재시작으로 끝난다. 승인 대기 중인 결제가 있으면 그 요청은 응답 없이 죽고,
     // MCP 쪽은 타임아웃까지 매달린다. 사람이 결정할 게 남아 있는 동안엔 앱을 안 내린다.
-    if crate::ipc::has_pending() {
-        return Err(ts!(
-            "승인 대기 중인 결제가 있어요. 먼저 처리한 뒤 업데이트하세요.",
-            "A payment is waiting for your approval. Handle it first, then update."
-        )
-        .into());
+    if let Some(why) = money_busy() {
+        return Err(why.into());
     }
 
     // 객체를 꺼내 온다(락을 await 너머로 안 들고 가려고). 실패하면 아래에서 되돌려 놓는다 —
@@ -166,19 +189,23 @@ pub(crate) async fn install_update(
 
     // 🔴 다시 확인한다. 여기까지가 되돌릴 수 있는 마지막 지점이다 — 아직 앱을 안 건드렸고,
     // 받아 둔 바이트는 메모리에만 있다. 요청을 처리한 뒤 다시 누르면 된다.
-    if crate::ipc::has_pending() {
+    // 「설치 중」을 **먼저** 세우고 본다 — 송금 쪽은 수를 먼저 올리고 이 값을 본다(transfer::ManualSend). 순서가
+    // 엇갈려야 둘 중 하나는 반드시 상대를 본다. 막히면 내린다(다시 누를 수 있게).
+    INSTALLING.store(true, Ordering::SeqCst);
+    if let Some(why) = money_busy() {
+        INSTALLING.store(false, Ordering::SeqCst);
         return Err(restore_slot(
             &state,
             update,
-            ts!(
-                "내려받는 사이에 결제 승인 요청이 들어왔어요. 먼저 처리한 뒤 다시 시도하세요.",
-                "A payment request came in while downloading. Handle it first, then try again."
-            )
-            .into(),
+            tf!(
+                "내려받는 사이에 결제가 시작됐어요 — {why}",
+                "A payment started while downloading — {why}"
+            ),
         ));
     }
 
     if let Err(e) = update.install(bytes) {
+        INSTALLING.store(false, Ordering::SeqCst);
         return Err(restore_slot(
             &state,
             update,

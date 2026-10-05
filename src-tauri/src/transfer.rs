@@ -12,6 +12,7 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroizing;
 
 use crate::chain::{active_chain, with_pinned_chain, IERC20};
@@ -112,6 +113,17 @@ pub(crate) fn humanize_chain_error(raw: &str, token: &str) -> String {
     }
 }
 
+/// RPC 가 답한 체인 id 가 고른 체인과 같은가 — 다르면 사람이 읽는 오류 (개발 74 코덱스 1차 P1).
+fn rpc_chain_matches(got: u64, want: u64) -> Result<(), String> {
+    if got == want {
+        return Ok(());
+    }
+    Err(tf!(
+        "지정한 RPC 가 다른 체인(id {got})에 붙어 있어요 — 고른 네트워크(id {want})와 달라서 잔액을 보여주지 않아요. 설정에서 RPC 를 비우거나 맞는 주소로 바꾸세요.",
+        "The custom RPC is on a different chain (id {got}) than the network you picked (id {want}), so the balance isn't shown. Clear the RPC in Settings or point it at the right chain."
+    ))
+}
+
 /// 지갑 주소의 네이티브(가스용) + USDC(결제용) 잔액을 활성 체인에서 조회한다.
 #[tauri::command]
 pub(crate) async fn get_balances(addr_hex: String) -> Result<Balances, String> {
@@ -135,7 +147,20 @@ pub(crate) async fn get_balances(addr_hex: String) -> Result<Balances, String> {
     // 쓸 데가 없고, RPC 왕복도 하나 준다.
     let chain = active_chain();
     let usdc_contract = IERC20::new(chain.usdc_address, &provider);
-    let (wei, raw): (Option<U256>, U256) = tokio::try_join!(
+    // 🔴 지정 RPC 가 **다른 체인**이면 잔액을 내지 않는다(개발 74 코덱스 1차 P1). Arc 테스트넷·메인넷은 USDC 주소가
+    // 같아(0x3600…) 테스트넷을 고르고 메인넷 RPC 를 적으면 조회가 「성공」하며 남의 체인 잔액을 이 체인 것으로 보인다.
+    // 입금 찾기(deposits)·체인 확인(confirm)은 이미 이 대조를 한다 — 잔액만 빠져 있었다. 왕복은 병렬이라 늘지 않는다.
+    let (_, wei, raw): ((), Option<U256>, U256) = tokio::try_join!(
+        async {
+            let got = provider.get_chain_id().await.map_err(|e| {
+                tf!(
+                    "RPC 체인 확인 실패: {}",
+                    "Couldn't check the RPC's chain: {}",
+                    redact_urls(&e.to_string())
+                )
+            })?;
+            rpc_chain_matches(got, chain.chain_id)
+        },
         async {
             if chain.native_is_usdc {
                 return Ok(None);
@@ -455,6 +480,42 @@ pub(crate) fn unknown_send_message(hash: &str, why: &str) -> String {
     )
 }
 
+/// 화면의 보내기(수동 송금)가 지금 체인으로 나가는 중인 수 (개발 74 코덱스 1차 P0).
+///
+/// 업데이트 설치는 재시작으로 끝난다. 예전엔 설치가 MCP 요청 파일만 봤다 — 화면에서 직접 보낸 송금이 RPC 응답을
+/// 기다리는 사이 설정에서 업데이트를 누르면 앱이 죽어, 체인엔 나갔는데 내역·해시가 안 남는다. 사람은 실패로 알고
+/// 다시 보낸다(이중 송금). 설치(`update::install_update`)가 이 수를 보고 멈춘다.
+static MANUAL_SENDS: AtomicU64 = AtomicU64::new(0);
+
+/// 수동 송금 구간 표시. 설치가 이미 시작됐으면 **송금을 시작하지 않는다** — 설치 쪽은 「설치 중」을 먼저 세우고
+/// 이 수를 보며, 이쪽은 수를 먼저 올리고 「설치 중」을 본다(둘 다 SeqCst). 그래서 둘 중 하나는 반드시 상대를 본다.
+struct ManualSend;
+
+impl ManualSend {
+    fn begin() -> Result<Self, String> {
+        MANUAL_SENDS.fetch_add(1, Ordering::SeqCst);
+        let g = ManualSend;
+        if crate::update::installing() {
+            return Err(ts!(
+                "업데이트를 설치하는 중이에요. 앱이 다시 켜진 뒤 보내세요.",
+                "An update is installing. Send once the app has restarted."
+            )
+            .into());
+        }
+        Ok(g)
+    }
+}
+
+impl Drop for ManualSend {
+    fn drop(&mut self) {
+        MANUAL_SENDS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn manual_send_in_flight() -> bool {
+    MANUAL_SENDS.load(Ordering::SeqCst) > 0
+}
+
 /// 비번으로 키를 복호화해 활성 체인에서 ETH(가스 토큰)를 송금한다. tx 해시를 돌려준다.
 /// 가스가 곧 USDC 인 체인(Arc)에선 이 경로가 막혀 있다 — do_send_eth_inner 주석 참고.
 #[tauri::command]
@@ -463,6 +524,7 @@ pub(crate) async fn send_eth(
     to: String,
     amount_eth: String,
 ) -> Result<String, String> {
+    let _sending = ManualSend::begin()?;
     let password = Zeroizing::new(password);
     // 진입 시 계정을 한 번 고정 (개발 54) — 비번 검증·서명·내역이 모두 같은 계정을 본다.
     // 체인도 진입 때 고정(개발 71, 코덱스 1차) — 비번 복호화 사이 설정에서 체인을 바꾸면 안쪽 do_* 가 **바뀐** 체인을
@@ -656,6 +718,7 @@ pub(crate) async fn send_usdc(
     to: String,
     amount_usdc: String,
 ) -> Result<String, String> {
+    let _sending = ManualSend::begin()?;
     let password = Zeroizing::new(password);
     // 진입 시 계정을 한 번 고정 (개발 54) — send_eth 와 같은 이유.
     // 체인도 진입 때 고정(개발 71, 코덱스 1차) — 비번 복호화 사이 설정에서 체인을 바꾸면 안쪽 do_* 가 **바뀐** 체인을
@@ -796,6 +859,14 @@ async fn do_send_usdc_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 개발 74 코덱스 1차 P1: 지정 RPC 의 체인이 고른 체인과 다르면 잔액을 내지 않는다(Arc 테스트넷·메인넷은 USDC 주소가 같다).
+    #[test]
+    fn balance_refuses_other_chain_rpc() {
+        assert!(rpc_chain_matches(5042002, 5042002).is_ok());
+        assert!(rpc_chain_matches(5042, 5042002).is_err());
+        assert!(rpc_chain_matches(8453, 84532).is_err());
+    }
     use alloy::primitives::address;
 
     // USDC 송금 calldata 가 표준 ERC20 transfer(address,uint256) 인코딩과 일치해야 한다.
