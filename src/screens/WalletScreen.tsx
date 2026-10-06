@@ -265,6 +265,12 @@ export function WalletScreen({
     void refreshBalances();
     loadHistory();
   }, [chainId, refreshBalances, loadHistory]);
+  // 다른 창(개발 75)에서 네트워크를 바꾸면 이 창의 받기·보내기 카드는 옛 체인 기준이다 — 잔액 카드로 돌린다.
+  // (보내기 확인 화면이 남아 있어도 백엔드가 체인을 대조해 거절하지만, 옛 체인 주소·금액을 보여 줄 이유가 없다.)
+  // 첫 로드(undefined → 값)에서도 돌지만 그땐 어차피 잔액 카드다.
+  useEffect(() => {
+    setMode("balance");
+  }, [chainId]);
 
   // 입금 자동 반영(개발 35): 잔액이 시작·체인 전환·결제 직후·수동 ↻에서만 갱신돼서 외부
   // 입금은 재시작해야 보이던 문제(실사용 발견). 창이 보일 때만 30초 폴링 + 창이 다시
@@ -704,6 +710,7 @@ export function WalletScreen({
               ethBalance={balances?.eth}
               settings={settings}
               spend={spend}
+              account={active}
               onClose={() => setMode("balance")}
               onSent={() => {
                 setMode("balance");

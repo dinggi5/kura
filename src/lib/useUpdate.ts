@@ -30,6 +30,9 @@ export type UpdateHook = {
 
 export function useUpdate(): UpdateHook {
   const [info, setInfo] = useState<UpdateInfo | null>(null);
+  // 설치는 화면에 보인 버전으로 묶는다(개발 75) — 백엔드의 후보는 앱에 하나라 다른 창이 바꿔 둘 수 있다.
+  const shownVersion = useRef<string | null>(null);
+  shownVersion.current = info?.version ?? null;
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
@@ -78,7 +81,7 @@ export function useUpdate(): UpdateHook {
     setProgress(null);
     try {
       // 성공하면 백엔드가 앱을 재시작하므로 이 await 는 돌아오지 않는다.
-      await invoke("install_update");
+      await invoke("install_update", { version: shownVersion.current });
     } catch (e) {
       if (!alive.current) return;
       setError(String(e));

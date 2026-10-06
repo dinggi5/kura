@@ -352,6 +352,15 @@ pub(crate) async fn broadcast(
     tx: TransactionRequest,
     token: &str,
 ) -> Result<String, SendError> {
+    // 🔴 **앱 안의 제출은 한 줄로 선다** (개발 75, 코덱스 1차 P1). nonce 는 채우기 때 노드의 「대기 포함 다음 번호」를
+    // 묻는다 — 두 송금이 동시에 채우면 **같은 번호**를 받고, 하나는 거절되거나 다른 하나를 덮어쓴다(덮인 쪽은 내역에
+    // 「보냄」으로 남는다). 창이 둘이 되면서 두 창의 보내기, 또는 보내기와 결제 승인이 겹치기 쉬워졌다.
+    // 첫 제출이 끝난 뒤 다음이 채우면 노드가 앞 tx 를 대기열에 넣은 뒤라 번호가 갈린다. 계정·체인이 달라도 같이
+    // 줄을 서는데, 사람 손으로 내는 송금이라 기다림(최대 한 건의 채우기+제출)은 문제가 안 된다.
+    // (첫 제출이 「불명」으로 끝난 갈래는 노드가 그 tx 를 모를 수 있어 여전히 같은 번호가 나올 수 있다 — 그땐
+    // 둘 중 하나만 들어가고, 불명 쪽은 체인 확인(confirm.rs)이 결말을 고친다.)
+    static SUBMIT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _turn = SUBMIT.lock().await;
     broadcast_via(&effective_rpc(), signer, tx, token, read_lock).await
 }
 
@@ -512,6 +521,29 @@ impl Drop for ManualSend {
     }
 }
 
+/// 화면이 보고 있던 체인·계정이 지금도 활성인가 (개발 75, 코덱스 1차 P0).
+///
+/// 창이 둘이 되면서 생긴 갈래: 한 창의 보내기 확인 화면(테스트넷)을 둔 채 다른 창에서 메인넷으로 바꾸면,
+/// 예전 명령은 체인을 안 받아 **지금 활성인 체인**으로 보냈다 — 연습용으로 고른 금액이 진짜 돈으로 나간다.
+/// 한 창일 땐 설정 화면이 보내기 카드를 내려 이 길이 없었다. 계정도 같은 이유.
+fn ensure_seen_target(chain_id: u64, account: u32) -> Result<(), String> {
+    if chain_id != active_chain().chain_id {
+        return Err(ts!(
+            "보내기 화면을 연 뒤 네트워크가 바뀌었어요. 아무것도 보내지 않았습니다 — 다시 열어 확인하세요.",
+            "The network changed after you opened Send. Nothing was sent — open it again and check."
+        )
+        .into());
+    }
+    if account != active_account_index() {
+        return Err(ts!(
+            "보내기 화면을 연 뒤 계정이 바뀌었어요. 아무것도 보내지 않았습니다 — 다시 열어 확인하세요.",
+            "The account changed after you opened Send. Nothing was sent — open it again and check."
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub(crate) fn manual_send_in_flight() -> bool {
     MANUAL_SENDS.load(Ordering::SeqCst) > 0
 }
@@ -523,18 +555,19 @@ pub(crate) async fn send_eth(
     password: String,
     to: String,
     amount_eth: String,
+    chain_id: u64,
+    account: u32,
 ) -> Result<String, String> {
     let _sending = ManualSend::begin()?;
+    ensure_seen_target(chain_id, account)?;
     let password = Zeroizing::new(password);
     // 진입 시 계정을 한 번 고정 (개발 54) — 비번 검증·서명·내역이 모두 같은 계정을 본다.
     // 체인도 진입 때 고정(개발 71, 코덱스 1차) — 비번 복호화 사이 설정에서 체인을 바꾸면 안쪽 do_* 가 **바뀐** 체인을
     // 고정했다(승인 경로는 approve_payment 가 이미 바깥에서 고정한다 — 그땐 같은 값이라 무해).
+    // 고정하는 값은 **화면이 확인한 값**이다(개발 75) — 바로 위에서 지금 값과 같다는 걸 봤다.
     with_pinned_chain(
-        active_chain().chain_id,
-        with_pinned_account(
-            active_account_index(),
-            send_eth_pinned(password, to, amount_eth),
-        ),
+        chain_id,
+        with_pinned_account(account, send_eth_pinned(password, to, amount_eth)),
     )
     .await
     .map_err(SendError::into_message)
@@ -717,18 +750,16 @@ pub(crate) async fn send_usdc(
     password: String,
     to: String,
     amount_usdc: String,
+    chain_id: u64,
+    account: u32,
 ) -> Result<String, String> {
     let _sending = ManualSend::begin()?;
+    ensure_seen_target(chain_id, account)?;
     let password = Zeroizing::new(password);
-    // 진입 시 계정을 한 번 고정 (개발 54) — send_eth 와 같은 이유.
-    // 체인도 진입 때 고정(개발 71, 코덱스 1차) — 비번 복호화 사이 설정에서 체인을 바꾸면 안쪽 do_* 가 **바뀐** 체인을
-    // 고정했다(승인 경로는 approve_payment 가 이미 바깥에서 고정한다 — 그땐 같은 값이라 무해).
+    // 진입 시 계정·체인 고정 — send_eth 와 같은 이유. 고정하는 값은 화면이 확인한 값(개발 75).
     with_pinned_chain(
-        active_chain().chain_id,
-        with_pinned_account(
-            active_account_index(),
-            send_usdc_pinned(password, to, amount_usdc),
-        ),
+        chain_id,
+        with_pinned_account(account, send_usdc_pinned(password, to, amount_usdc)),
     )
     .await
     .map_err(SendError::into_message)

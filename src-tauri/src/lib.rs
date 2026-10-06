@@ -98,7 +98,9 @@ fn raise_main_window(app: tauri::AppHandle) {
 #[tauri::command]
 fn hide_main_window(app: tauri::AppHandle, window: tauri::WebviewWindow) {
     if window.label() == appwin::LABEL {
-        let _ = window.close();
+        if !appwin::busy_sending() {
+            let _ = window.close();
+        }
         return;
     }
     tray::hide_by_user(&app);
@@ -166,6 +168,9 @@ pub fn run() {
                 use tauri::Manager;
                 // 큰 창(개발 75)은 정말 닫는다 — 결제 요청은 팝오버가 받는다(appwin.rs 머리).
                 if window.label() == appwin::LABEL {
+                    if appwin::busy_sending() {
+                        api.prevent_close();
+                    }
                     return;
                 }
                 api.prevent_close();

@@ -30,7 +30,7 @@ import { GITHUB_URL } from "@/lib/helpContent";
 import type { Settings, SpendView } from "@/lib/types";
 import type { UpdateHook } from "@/lib/useUpdate";
 import { cardBase, enter, inputBase, modalCard, modalOverlay, primaryBtn, shell, Switch } from "@/components/ui";
-import { chooseLang, lang, t, type Lang } from "@/lib/i18n";
+import { chooseLang, holdLangReload, lang, t, type Lang } from "@/lib/i18n";
 
 const RPC_CUSTOM = "__custom__";
 
@@ -76,6 +76,10 @@ export function SettingsScreen({
   onClose: () => void;
 }) {
   const [s, setS] = useState<Settings | null>(current);
+  // 폼을 채운 원본 (개발 75, 코덱스 1차 P1) — 저장할 때 「이 창에서 바꾼 칸」만 골라내는 기준.
+  // 창이 둘이면 다른 창이 그 사이 저장했을 수 있다. 예전처럼 폼 전체를 보내면, 손대지도 않은 자율 결제·한도·
+  // 네트워크가 이 창이 열릴 때의 옛 값으로 **조용히 되돌아갔다**.
+  const base = useRef<Settings | null>(current);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -138,8 +142,22 @@ export function SettingsScreen({
   // 설정이 늦게 로드되면 동기화. rpcCustom 은 마운트 시 한 번만 초기화되므로(useState),
   // current 가 null 로 시작해 늦게 로드되는 경우 여기서 RPC 모드도 함께 재계산해야
   // 커스텀 RPC 가 "직접 입력"으로 안 뜨는 문제를 막는다 (개발 18 코덱스 리뷰 P3).
+  // 저장 안 한 변경이 있는 동안엔 다른 창의 언어 변경이 이 창을 다시 읽지 않게(개발 75).
+  useEffect(() => (dirty ? holdLangReload() : undefined), [dirty]);
+
+  // 다른 창(개발 75)이 저장해 current 가 바뀌었고 이 폼은 손대지 않았다면 새 값으로 갈아 끼운다.
+  useEffect(() => {
+    if (current && s && !dirty && !busy && current !== base.current) {
+      base.current = current;
+      setS(current);
+      const c = chainFromId(current.chain_id);
+      setRpcCustom(!rpcPresets(c).some((p) => p.url === presetUrl(current.rpc_url, c)));
+    }
+  }, [current, s, dirty, busy]);
+
   useEffect(() => {
     if (current && !s) {
+      base.current = current;
       setS(current);
       const c = chainFromId(current.chain_id);
       setRpcCustom(!rpcPresets(c).some((p) => p.url === presetUrl(current.rpc_url, c)));
@@ -187,7 +205,18 @@ export function SettingsScreen({
     setBusy(true);
     setError(null);
     try {
-      await invoke("set_settings", { settings: s });
+      // 바꾼 칸만 지금 저장된 값 위에 얹는다. 지금 값을 못 읽으면 폼 전체로(예전 동작) — 저장을 막는 것보단 낫다.
+      let merged: Settings = s;
+      const from = base.current;
+      const latest = await invoke<Settings>("get_settings").catch(() => null);
+      if (from && latest) {
+        const patch: Partial<Settings> = {};
+        for (const k of Object.keys(s) as (keyof Settings)[]) {
+          if (s[k] !== from[k]) (patch as Record<string, unknown>)[k] = s[k];
+        }
+        merged = { ...latest, ...patch };
+      }
+      await invoke("set_settings", { settings: merged });
       if (closed.current) return; // 저장 도중 닫혔으면 늦은 setState·자동 닫기 타이머 생성을 막는다
       setSaved(true);
       setDirty(false);

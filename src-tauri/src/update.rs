@@ -135,6 +135,7 @@ fn money_busy() -> Option<&'static str> {
 pub(crate) async fn install_update(
     app: AppHandle,
     state: State<'_, PendingUpdate>,
+    version: Option<String>,
 ) -> Result<(), String> {
     // 🔴 설치는 재시작으로 끝난다. 승인 대기 중인 결제가 있으면 그 요청은 응답 없이 죽고,
     // MCP 쪽은 타임아웃까지 매달린다. 사람이 결정할 게 남아 있는 동안엔 앱을 안 내린다.
@@ -148,6 +149,17 @@ pub(crate) async fn install_update(
         let mut slot = state.0.lock().map_err(|_| {
             ts!("업데이트 상태가 깨졌어요", "The update state is broken").to_string()
         })?;
+        // 화면이 보여 준 버전과 담긴 후보가 같을 때만 (개발 75, 코덱스 1차 P2). 후보는 앱에 하나인데 창은 둘이라,
+        // 다른 창이 그 사이 다시 확인해 더 새 버전(또는 빈 칸)으로 바꿔 놨을 수 있다 — 노트를 읽고 누른 버전이 승인이다.
+        if let (Some(want), Some(have)) = (version.as_deref(), slot.as_ref()) {
+            if have.version != want {
+                return Err(ts!(
+                    "그 사이 새 버전을 다시 확인했어요. 업데이트 정보를 다시 확인한 뒤 설치하세요.",
+                    "The update was re-checked in the meantime. Check the update details again, then install."
+                )
+                .into());
+            }
+        }
         slot.take().ok_or_else(|| {
             ts!(
                 "설치할 업데이트가 없어요. 다시 확인해 주세요.",

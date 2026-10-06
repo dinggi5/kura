@@ -1,6 +1,6 @@
 // 보내기 카드 — 입력 → 비번 승인(도장 찍듯 확정) → 전송 → 완료.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "framer-motion";
@@ -19,7 +19,7 @@ import {
   FieldHint,
   PwInput,
 } from "@/components/ui";
-import { t } from "@/lib/i18n";
+import { holdLangReload, t } from "@/lib/i18n";
 
 type SendStep = "form" | "confirm" | "sending" | "done";
 type SendToken = "USDC" | "ETH";
@@ -29,6 +29,7 @@ export function SendCard({
   ethBalance,
   settings,
   spend,
+  account,
   onClose,
   onSent,
 }: {
@@ -36,11 +37,17 @@ export function SendCard({
   ethBalance: string | undefined;
   settings: Settings | null;
   spend: SpendView | null;
+  /** 이 화면이 보고 있는 계정 번호 — 체인과 함께 보내기 명령에 실어, 그 사이 다른 창에서 바뀌었으면
+   *  백엔드가 거절한다(개발 75, transfer.rs `ensure_seen_target`). */
+  account: number;
   onClose: () => void;
   onSent: () => void;
 }) {
   const chain = useChain();
   const [step, setStep] = useState<SendStep>("form");
+  // 확인·보내는 중·결과 화면에선 다른 창의 언어 변경이 이 창을 다시 읽지 않게(개발 75) — 보내는 중에 다시 읽으면
+  // 결과(해시·「불명」 경고)를 못 보고 다시 보내게 된다.
+  useEffect(() => (step === "form" ? undefined : holdLangReload()), [step]);
   const [token, setToken] = useState<SendToken>("USDC");
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("");
@@ -112,6 +119,8 @@ export function SendCard({
         password: pw,
         to: to.trim(),
         [cfg.argKey]: amount.trim(),
+        chainId: chain.id,
+        account,
       });
       setTxHash(hash);
       setPw(""); // 전송 성공 후 비번 즉시 비움 (완료 화면 동안 메모리에 남기지 않게)

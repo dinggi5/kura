@@ -83,6 +83,23 @@ export function locale(): string {
  * 어긋나는 경우는 드물다 — 캐시가 지워졌는데 설정에는 시스템과 다른 언어를 골라 둔 때뿐.
  * 다시 읽은 뒤에는 캐시=백엔드라 두 번 반복되지 않는다. 실패하면 그냥 지금 언어로 간다.
  */
+/** 지금 창을 다시 읽으면 잃는 게 있는 화면의 수 (개발 75, 코덱스 1차 P2). 다른 창에서 언어를 바꾸면 이 창은
+ *  돌아올 때 `initLang` 으로 다시 읽는데, 저장 안 한 설정 폼이나 나가는 중인 송금 화면이 그대로 사라졌다.
+ *  잡혀 있는 동안엔 미루고, 다음 복귀(포커스) 때 다시 본다. */
+let reloadHolds = 0;
+
+/** 다시 읽기를 미룬다. 돌려받은 함수를 부르면 푼다(두 번 불러도 한 번만 푼다). */
+export function holdLangReload(): () => void {
+  reloadHolds += 1;
+  let done = false;
+  return () => {
+    if (!done) {
+      done = true;
+      reloadHolds -= 1;
+    }
+  };
+}
+
 export async function initLang(): Promise<void> {
   document.documentElement.lang = current;
   let backend: Lang;
@@ -95,6 +112,7 @@ export async function initLang(): Promise<void> {
     remember(current);
     return;
   }
+  if (reloadHolds > 0) return;
   if (remember(backend)) {
     window.location.reload();
     return;

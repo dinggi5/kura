@@ -956,8 +956,18 @@ pub(crate) fn spawn_watchdog(app: &tauri::AppHandle) {
 /// 그동안 MCP 가 결제를 「앱이 실행 중이 아니에요」로 거절했다 — 앱은 멀쩡히 떠 있는데도.
 /// 지금은 러스트 스레드(watchdog)가 찍고, 이 커맨드는 **프론트가 아직 깨어 있다는 표식**만
 /// 남긴다. watchdog 이 그 표식을 보고 "WebView 가 잠들었는지"를 판단한다.
+///
+/// **표식은 팝오버(`main`)가 부를 때만 남긴다**(개발 75, 코덱스 1차 P1). 큰 창도 「승인 창 열기」 띠 때문에
+/// 이 커맨드를 부르는데, 큰 창은 승인을 안 한다 — 그 폴링이 표식을 갱신하면 팝오버 웹뷰가 잠든 동안에도
+/// watchdog 이 「프론트가 깨어 있다」고 보고 팝오버를 안 깨워, 결제가 아무도 안 보는 채로 5분을 흘려보낸다.
 #[tauri::command]
-pub(crate) fn get_pending_request(app: tauri::AppHandle) -> Option<PaymentRequest> {
+pub(crate) fn get_pending_request(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Option<PaymentRequest> {
+    if window.label() != "main" {
+        return live_request();
+    }
     LAST_POLL.store(now_secs(), Ordering::Relaxed);
     // 파일은 한 번만 읽고 그 값으로 둘 다 정한다 — 두 번 읽으면 그 사이에 요청이
     // 생기거나 사라질 때 한 폴링 안에서 "모달은 뜨는데 고정은 꺼진" 상태가 나온다.

@@ -71,6 +71,15 @@ pub(crate) fn any_focused<R: Runtime>(app: &AppHandle<R>) -> bool {
         .any(|w| w.is_focused().unwrap_or(false))
 }
 
+/// 큰 창을 지금 닫으면 안 되는가 — 화면에서 직접 보낸 송금이 나가는 중이다 (개발 75, 코덱스 1차 P1).
+///
+/// 송금은 백엔드에서 끝까지 가지만 결과(해시·「불명」 경고)를 받을 화면은 이 창의 보내기 카드뿐이다. 닫으면
+/// 사람은 결과를 못 보고 다시 보낸다 — 이중 송금. 그래서 송금이 끝날 때까지(최대 한 건의 채우기+제출) 안 닫힌다.
+/// 어느 창이 보낸 건지는 가리지 않는다 — 다른 창의 송금 때문에 잠깐 안 닫히는 건 손해가 작다.
+pub(crate) fn busy_sending() -> bool {
+    crate::transfer::manual_send_in_flight()
+}
+
 /// 팝오버의 확장 아이콘이 부른다.
 #[tauri::command]
 pub(crate) fn open_app_window(app: AppHandle) {
