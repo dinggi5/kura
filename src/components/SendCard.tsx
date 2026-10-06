@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "framer-motion";
-import { ArrowLeft, ArrowUpRight, Check, ExternalLink, Loader2, Lock } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, AlertTriangle, Check, ExternalLink, Loader2, Lock } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChain } from "@/lib/chain";
 import { MAX_ETH, MAX_USDC, fmtAmount, isAddressLike, shortenAddress } from "@/lib/format";
@@ -21,7 +21,19 @@ import {
 } from "@/components/ui";
 import { holdLangReload, t } from "@/lib/i18n";
 
-type SendStep = "form" | "confirm" | "sending" | "done";
+type SendStep = "form" | "confirm" | "sending" | "done" | "unknown";
+
+/** 보내기 커맨드의 오류 모양 (transfer.rs `ManualSendError`). `unknownHash` 가 있으면 나갔을 수 있다. */
+type SendFail = { msg: string; unknownHash: string | null };
+
+function asSendFail(e: unknown): SendFail {
+  if (e && typeof e === "object" && "msg" in e) {
+    const f = e as Partial<SendFail>;
+    return { msg: String(f.msg), unknownHash: typeof f.unknownHash === "string" ? f.unknownHash : null };
+  }
+  // Tauri 자체 오류(인자 오류 등)는 문자열 — 커맨드가 돌기 전이라 아무것도 안 나갔다.
+  return { msg: String(e), unknownHash: null };
+}
 type SendToken = "USDC" | "ETH";
 
 export function SendCard({
@@ -51,12 +63,14 @@ export function SendCard({
   // 다른 창에서 네트워크를 바꾸면 useChain() 은 새 체인을 돌려주는데, 그걸 실으면 백엔드 대조(ensure_seen_target)를
   // 통과해 테스트넷에서 입력한 금액이 메인넷으로 나간다. 바뀌었으면: 입력·확인 중이면 카드를 닫고, 보내는 중·결과
   // 화면이면 그대로 둔다(결과를 못 보면 다시 보낸다 — 이미 연 값으로 고정돼 나가는 중이다).
-  const seen = useRef({ chainId: chain.id, account });
+  // 체인 설정 통째도 연 때 값으로 — 결과 화면의 익스플로러 링크가 다른 창에서 바꾼 체인을 가리키지 않게(개발 75 3차 P2).
+  const seen = useRef({ chainId: chain.id, account, chain });
   const [step, setStep] = useState<SendStep>("form");
   // 확인·보내는 중·결과 화면에선 다른 창의 언어 변경이 이 창을 다시 읽지 않게(개발 75) — 보내는 중에 다시 읽으면
   // 결과(해시·「불명」 경고)를 못 보고 다시 보내게 된다.
   useEffect(() => (step === "form" ? undefined : holdLangReload()), [step]);
-  const busy = step === "sending" || step === "done";
+  // 「불명」 결과도 busy — 사람이 닫을 때까지 카드가 남아야 해시와 「다시 보내지 마세요」를 본다(개발 76).
+  const busy = step === "sending" || step === "done" || step === "unknown";
   useEffect(() => {
     onBusy(busy);
   }, [busy, onBusy]);
@@ -143,15 +157,23 @@ export function SendCard({
       setPw(""); // 전송 성공 후 비번 즉시 비움 (완료 화면 동안 메모리에 남기지 않게)
       setStep("done");
     } catch (e) {
-      setError(String(e));
-      setStep("confirm");
+      const f = asSendFail(e);
       setPw("");
+      if (f.unknownHash) {
+        // 🔴 확인 단계로 돌려보내지 않는다(개발 75 코덱스 3차 P1) — 그러면 busy 가 풀려, 다른 창에서 체인·계정을
+        // 바꿔 두었을 때 카드가 스스로 닫히고 해시가 사라진다. 그리고 「보내기」 버튼이 다시 눌릴 자리에 놓인다.
+        setTxHash(f.unknownHash);
+        setStep("unknown");
+      } else {
+        setError(f.msg);
+        setStep("confirm");
+      }
     }
   }
 
   return (
     <motion.section {...enter} className={cn(cardBase, "relative px-8 py-8")}>
-      {step !== "sending" && step !== "done" && <CloseButton onClose={onClose} />}
+      {!busy && <CloseButton onClose={onClose} />}
 
       {/* 헤더 */}
       <div className="flex items-center gap-2">
@@ -174,6 +196,7 @@ export function SendCard({
           {step === "confirm" && t("비밀번호로 승인", "Approve with password")}
           {step === "sending" && t("보내는 중", "Sending")}
           {step === "done" && t("보냄", "Sent")}
+          {step === "unknown" && t("확인 필요", "Unconfirmed")}
         </p>
       </div>
 
@@ -376,11 +399,45 @@ export function SendCard({
 
           <button
             type="button"
-            onClick={() => openUrl(chain.explorerTx + txHash).catch(() => {})}
+            onClick={() => openUrl(seen.current.chain.explorerTx + txHash).catch(() => {})}
             className={cn(secondaryBtn, "mt-5 w-full")}
           >
             <ExternalLink size={13} />
-            {t(`${chain.explorerName}에서 보기`, `View on ${chain.explorerName}`)}
+            {t(`${seen.current.chain.explorerName}에서 보기`, `View on ${seen.current.chain.explorerName}`)}
+          </button>
+          <button type="button" onClick={onSent} className={cn(primaryBtn, "mt-2")}>
+            {t("확인", "Done")}
+          </button>
+        </div>
+      )}
+
+      {/* 5) 불명 — 나갔을 수 있다. 다시 보내기 버튼은 없다. */}
+      {step === "unknown" && txHash && (
+        <div className="mt-6 flex flex-col items-center py-4">
+          <AlertTriangle size={30} strokeWidth={1.75} className="text-amber-600 dark:text-amber-500" />
+          <p className="mt-4 text-[15px] tracking-tight">
+            {t("보냈는지 아직 몰라요", "Not sure it went out yet")}
+          </p>
+          <p className="mt-1 text-[13px] text-[var(--color-ink-500)] num">
+            {fmtAmount(amount, 6)} {token}
+          </p>
+          <p className="mt-4 text-center text-[12px] leading-relaxed text-[var(--color-ink-500)]">
+            {t(
+              "나갔을 수 있어요. 다시 보내기 전에 내역이나 익스플로러에서 먼저 확인하세요.",
+              "It may have gone through. Check History or the explorer before sending again.",
+            )}
+          </p>
+          <p className="mt-2 font-mono text-[11px] text-[var(--color-ink-300)] break-all text-center">
+            {txHash}
+          </p>
+
+          <button
+            type="button"
+            onClick={() => openUrl(seen.current.chain.explorerTx + txHash).catch(() => {})}
+            className={cn(secondaryBtn, "mt-5 w-full")}
+          >
+            <ExternalLink size={13} />
+            {t(`${seen.current.chain.explorerName}에서 보기`, `View on ${seen.current.chain.explorerName}`)}
           </button>
           <button type="button" onClick={onSent} className={cn(primaryBtn, "mt-2")}>
             {t("확인", "Done")}

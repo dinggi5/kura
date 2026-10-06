@@ -282,15 +282,6 @@ impl std::fmt::Display for SendError {
 }
 
 impl SendError {
-    /// 사람이 읽을 한 문장 — 화면에서 직접 보낸 송금(`send_usdc` 커맨드)처럼 문자열 오류만 나갈 수
-    /// 있는 자리용. 불명이면 「다시 보내지 말라」가 문장에 들어가야 한다.
-    pub(crate) fn into_message(self) -> String {
-        match self {
-            SendError::Failed(m) => m,
-            SendError::Unknown { msg, .. } => msg,
-        }
-    }
-
     /// 사람이 읽을 문장(빌림) — 테스트·로그용.
     #[cfg(test)]
     pub(crate) fn contains(&self, pat: &str) -> bool {
@@ -567,6 +558,42 @@ fn ensure_seen_target(chain_id: u64, account: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// 화면의 보내기(`send_eth`/`send_usdc`)가 프론트로 넘기는 오류 (개발 76, 개발 75 코덱스 3차 P1).
+///
+/// 예전엔 문자열 하나였다 — 「불명」도 「실패」와 같은 모양이라 보내기 카드가 비번 확인 단계로 돌아가며 busy 가 풀렸고,
+/// 그 사이 다른 창에서 체인·계정을 바꿔 두었으면 카드가 스스로 닫혀 해시와 「다시 보내지 마세요」가 사라졌다.
+/// `unknown_hash` 가 있으면 **나갔을 수 있다** — 카드는 별도 결과 화면으로 가서 사람이 닫을 때까지 남는다.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManualSendError {
+    msg: String,
+    unknown_hash: Option<String>,
+}
+
+impl From<SendError> for ManualSendError {
+    fn from(e: SendError) -> Self {
+        match e {
+            SendError::Failed(msg) => ManualSendError {
+                msg,
+                unknown_hash: None,
+            },
+            SendError::Unknown { hash, msg } => ManualSendError {
+                msg,
+                unknown_hash: Some(hash),
+            },
+        }
+    }
+}
+
+impl From<String> for ManualSendError {
+    fn from(msg: String) -> Self {
+        ManualSendError {
+            msg,
+            unknown_hash: None,
+        }
+    }
+}
+
 pub(crate) fn manual_send_in_flight() -> bool {
     MANUAL_SENDS.load(Ordering::SeqCst) > 0
 }
@@ -580,7 +607,7 @@ pub(crate) async fn send_eth(
     amount_eth: String,
     chain_id: u64,
     account: u32,
-) -> Result<String, String> {
+) -> Result<String, ManualSendError> {
     let _sending = ManualSend::begin()?;
     ensure_seen_target(chain_id, account)?;
     let password = Zeroizing::new(password);
@@ -593,7 +620,7 @@ pub(crate) async fn send_eth(
         with_pinned_account(account, send_eth_pinned(password, to, amount_eth)),
     )
     .await
-    .map_err(SendError::into_message)
+    .map_err(ManualSendError::from)
 }
 
 /// `send_eth` 와 같되 **실패의 종류를 보존한다**(개발 66) — 결제 승인(`approve_payment`)이 쓴다.
@@ -775,7 +802,7 @@ pub(crate) async fn send_usdc(
     amount_usdc: String,
     chain_id: u64,
     account: u32,
-) -> Result<String, String> {
+) -> Result<String, ManualSendError> {
     let _sending = ManualSend::begin()?;
     ensure_seen_target(chain_id, account)?;
     let password = Zeroizing::new(password);
@@ -785,7 +812,7 @@ pub(crate) async fn send_usdc(
         with_pinned_account(account, send_usdc_pinned(password, to, amount_usdc)),
     )
     .await
-    .map_err(SendError::into_message)
+    .map_err(ManualSendError::from)
 }
 
 /// `send_usdc` 와 같되 **실패의 종류를 보존한다**(개발 66) — 결제 승인(`approve_payment`)이 쓴다.
@@ -1275,16 +1302,32 @@ mod tests {
         assert!(arc.contains("USDC") && !arc.contains("ETH"), "{arc}");
     }
 
-    /// 불명 문구는 tx 해시와 「다시 보내기 전에 확인」을 싣는다 — 화면 송금은 이 문장만 보여 줄 수 있다.
+    /// 불명 문구는 tx 해시와 「다시 보내기 전에 확인」을 싣는다.
     #[test]
     fn unknown_message_carries_hash_and_warning() {
         let m = unknown_send_message("0xabc", "제출 응답 시간 초과");
         assert!(m.contains("0xabc") && m.contains("다시 보내기 전에"), "{m}");
-        let e = SendError::Unknown {
+    }
+
+    /// 화면 송금 오류는 불명과 실패를 **모양으로** 가른다(개발 76) — 프론트는 `unknownHash` 가 있을 때만
+    /// 결과 화면에 머문다. 이름이 바뀌면(snake_case 등) 프론트가 불명을 실패로 읽어 카드가 닫힐 수 있다.
+    #[test]
+    fn manual_send_error_shape_splits_unknown_from_failed() {
+        let unknown = ManualSendError::from(SendError::Unknown {
             hash: "0xabc".into(),
-            msg: m.clone(),
-        };
-        assert_eq!(e.into_message(), m);
+            msg: "m".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(&unknown).unwrap(),
+            serde_json::json!({ "msg": "m", "unknownHash": "0xabc" })
+        );
+        let failed = ManualSendError::from(SendError::Failed("f".into()));
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap(),
+            serde_json::json!({ "msg": "f", "unknownHash": null })
+        );
+        let early = ManualSendError::from("잠김".to_string());
+        assert_eq!(serde_json::to_value(&early).unwrap()["unknownHash"], serde_json::Value::Null);
     }
 
     // USDC 금액 파싱: 6 decimals 로 정확히 변환돼야 한다 (음수 거부 헬퍼 경유).
