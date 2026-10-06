@@ -1,4 +1,6 @@
 // 거래 내역 화면 — 모든 송금/서명 시도(성공·차단·실패·정산)와 들어온 돈(개발 69)을 최신순으로.
+// 큰 창을 넓게 펴면(768px 이상, 개발 75) 같은 기록을 표로 — 날짜는 「3시간 전」 대신 실제 시각, 주소는 줄이지 않는다.
+// 넓은 화면에서 내역을 여는 이유가 대개 「그 건이 언제, 어디로」를 맞춰 보는 것이라서.
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "framer-motion";
@@ -20,7 +22,8 @@ import { useChain } from "@/lib/chain";
 import { fmtAmount, fmtRelTime, shortenAddress } from "@/lib/format";
 import type { HistoryEntry } from "@/lib/types";
 import { cardBase, enter, shell } from "@/components/ui";
-import { t } from "@/lib/i18n";
+import { locale, t } from "@/lib/i18n";
+import { useWide } from "@/lib/win";
 
 export function HistoryScreen({
   entries,
@@ -32,9 +35,11 @@ export function HistoryScreen({
   onMore?: () => void;
   onClose: () => void;
 }) {
+  const wide = useWide();
   return (
-    <main className={shell}>
-      <header className="w-full max-w-md flex items-center justify-between text-[12px] text-[var(--color-ink-500)]">
+    // gap — 기록이 창보다 길면 justify-between 의 사이가 0 이 되어 머리줄이 카드에 붙는다.
+    <main className={cn(shell, "gap-4")}>
+      <header className="w-full max-w-md md:max-w-3xl flex items-center justify-between text-[12px] text-[var(--color-ink-500)]">
         <span className="flex items-center gap-2">
           <History size={12} className="text-[var(--color-accent)]" />
           {t("거래 내역", "History")}
@@ -48,7 +53,7 @@ export function HistoryScreen({
         </button>
       </header>
 
-      <motion.section {...enter} className={cn(cardBase, "max-w-md px-5 py-4")}>
+      <motion.section {...enter} className={cn(cardBase, "max-w-md md:max-w-3xl px-5 py-4 md:px-6")}>
         {entries == null ? (
           <div className="flex flex-col items-center py-12">
             <Loader2 size={22} className="animate-spin text-[var(--color-accent)]" />
@@ -71,11 +76,15 @@ export function HistoryScreen({
           </div>
         ) : (
           <>
-            <ul className="divide-y divide-[var(--color-ivory-300)] dark:divide-[var(--color-night-700)]">
-              {entries.map((e, i) => (
-                <HistoryRow key={`${e.ts}-${i}`} entry={e} />
-              ))}
-            </ul>
+            {wide ? (
+              <HistoryTable entries={entries} />
+            ) : (
+              <ul className="divide-y divide-[var(--color-ivory-300)] dark:divide-[var(--color-night-700)]">
+                {entries.map((e, i) => (
+                  <HistoryRow key={`${e.ts}-${i}`} entry={e} />
+                ))}
+              </ul>
+            )}
             {onMore && (
               <button
                 type="button"
@@ -117,8 +126,8 @@ function amountText(entry: HistoryEntry): string {
   return short === "0" && Number(entry.amount) > 0 ? entry.amount : short;
 }
 
-function HistoryRow({ entry }: { entry: HistoryEntry }) {
-  const chain = useChain();
+/** 한 줄이 무엇을 보여 줄지 — 목록과 표가 같은 규칙을 쓴다(둘이 갈리면 표에서만 링크가 사라지는 식의 어긋남이 생긴다). */
+function rowFacts(entry: HistoryEntry) {
   const meta = HISTORY_META[entry.status] ?? HISTORY_META.failed;
 
   // BaseScan 링크 대상 tx: 송금="sent"의 detail, x402 정산="settled"의 settle_tx.
@@ -134,6 +143,101 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
   const hasLink = linkTx.length > 0;
   // 사유는 사람이 읽을 차단/실패에만 표시(signed/settled의 detail은 nonce라 숨김).
   const showReason = (entry.status === "blocked" || entry.status === "failed") && !!entry.detail;
+  return { meta, received, linkTx, hasLink, showReason };
+}
+
+/** 표의 날짜 — 올해면 월·일·시각, 아니면 연도까지. */
+function fmtWhen(ts: number): string {
+  const d = new Date(ts * 1000);
+  const thisYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleString(locale(), {
+    ...(thisYear ? {} : { year: "numeric" }),
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** 상태 글자 — 탐색기 링크가 있으면 글자 자체가 링크다(개발 73). 목록·표 공용. */
+function StatusLabel({ entry }: { entry: HistoryEntry }) {
+  const chain = useChain();
+  const { meta, linkTx, hasLink } = rowFacts(entry);
+  return hasLink ? (
+    <button
+      type="button"
+      onClick={() => openUrl(chain.explorerTx + linkTx).catch(() => {})}
+      aria-label={`${meta.label} — ${t("탐색기에서 보기", "View in explorer")}`}
+      className={cn(
+        "inline-flex items-center gap-1 text-[11px] hover:text-[var(--color-accent)] transition-colors",
+        meta.labelColor || "text-[var(--color-ink-500)]",
+      )}
+    >
+      {meta.label} <ExternalLink size={10} />
+    </button>
+  ) : (
+    <span className={cn("text-[11px]", meta.labelColor || "text-[var(--color-ink-300)]")}>{meta.label}</span>
+  );
+}
+
+function HistoryTable({ entries }: { entries: HistoryEntry[] }) {
+  const th = "pb-2 text-left font-normal text-[11px] text-[var(--color-ink-300)]";
+  return (
+    <table className="w-full table-fixed">
+      <colgroup>
+        <col className="w-[9rem]" />
+        <col />
+        <col className="w-[8rem]" />
+        <col className="w-[8rem]" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th className={th}>{t("시각", "When")}</th>
+          <th className={th}>{t("상대", "Counterparty")}</th>
+          <th className={cn(th, "text-right pr-6")}>{t("금액", "Amount")}</th>
+          <th className={th}>{t("상태", "Status")}</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-[var(--color-ivory-300)] dark:divide-[var(--color-night-700)]">
+        {entries.map((e, i) => (
+          <HistoryTableRow key={`${e.ts}-${i}`} entry={e} />
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function HistoryTableRow({ entry }: { entry: HistoryEntry }) {
+  const { received, showReason } = rowFacts(entry);
+  return (
+    <tr className="align-top">
+      <td className="py-3 text-[12px] text-[var(--color-ink-500)] num whitespace-nowrap">{fmtWhen(entry.ts)}</td>
+      <td className="py-3 pr-4 min-w-0">
+        <p className="flex items-center gap-1.5 text-[11px] text-[var(--color-ink-700)] dark:text-[#B5AFA2] font-mono truncate">
+          <span className="shrink-0 text-[var(--color-ink-300)]">
+            {received ? <ArrowDownLeft size={12} /> : <ArrowUpRight size={12} />}
+          </span>
+          {/* 넓으니 주소를 줄이지 않는다 — 표에서 맞춰 보는 건 대개 이 값이다. */}
+          <span className="truncate select-text">{entry.to || t("컨트랙트에서", "From a contract")}</span>
+        </p>
+        {showReason && <p className="mt-0.5 pl-[18px] text-[11px] text-[var(--color-ink-300)] truncate">{entry.detail}</p>}
+      </td>
+      <td className="py-3 pr-6 text-right whitespace-nowrap">
+        <span className="num text-[14px] tracking-tight text-[var(--color-ink-900)] dark:text-[#E8E5DD]">
+          {received ? "+" : ""}
+          {amountText(entry)}
+        </span>
+        <span className="ml-1 text-[11px] text-[var(--color-ink-500)]">{entry.token}</span>
+      </td>
+      <td className="py-3">
+        <StatusLabel entry={entry} />
+      </td>
+    </tr>
+  );
+}
+
+function HistoryRow({ entry }: { entry: HistoryEntry }) {
+  const { meta, received, showReason } = rowFacts(entry);
 
   return (
     <li className="flex items-center gap-3 py-3">
@@ -164,23 +268,7 @@ function HistoryRow({ entry }: { entry: HistoryEntry }) {
 
       <div className="shrink-0 flex flex-col items-end gap-1">
         <span className="text-[11px] text-[var(--color-ink-300)] num">{fmtRelTime(entry.ts)}</span>
-        {/* 링크가 있으면 상태 글자 자체가 링크다(개발 73) — 전엔 그 자리에 「보기」를 띄워
-            「확인 필요」·「되돌려짐」이 아이콘 색으로만 보였다. */}
-        {hasLink ? (
-          <button
-            type="button"
-            onClick={() => openUrl(chain.explorerTx + linkTx).catch(() => {})}
-            aria-label={`${meta.label} — ${t("탐색기에서 보기", "View in explorer")}`}
-            className={cn(
-              "inline-flex items-center gap-1 text-[11px] hover:text-[var(--color-accent)] transition-colors",
-              meta.labelColor || "text-[var(--color-ink-500)]",
-            )}
-          >
-            {meta.label} <ExternalLink size={10} />
-          </button>
-        ) : (
-          <span className={cn("text-[11px]", meta.labelColor || "text-[var(--color-ink-300)]")}>{meta.label}</span>
-        )}
+        <StatusLabel entry={entry} />
       </div>
     </li>
   );

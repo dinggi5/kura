@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* 큰 창(개발 75) 전용 변형 — `<html data-win="window">` 아래에서만 켜진다(src/lib/win.ts).
+   팝오버는 폭이 420 고정이라 `md:` 같은 폭 변형은 원래 큰 창에서만 걸리지만, 둥근 판·신호등 자리처럼
+   **폭이 아니라 창 종류**로 갈리는 것이 있다. 큰 창을 좁혀도 그건 보통 창이다. */
+@custom-variant win (&:where([data-win="window"], [data-win="window"] *));
+
 /* ---------------------------------------------------------------
    Pretendard — 앱 안에 번들 (CDN 링크 아님)
    전에는 jsDelivr 에서 받아 썼는데, 그러면 **앱을 켤 때마다 외부 CDN 에 요청**이 나가
@@ -115,6 +120,17 @@ body {
   margin: 0;
   height: 100vh;
   background: transparent;
+}
+
+/* 큰 창은 투명 창이 아니다 — 창 바닥색을 셸과 같게 칠해 둬야 크기를 키우는 순간(웹뷰가 따라오기 전
+   한 프레임)이나 스크롤 고무줄에서 흰 판이 비치지 않는다. */
+[data-win="window"] body {
+  background: var(--color-ivory-100);
+}
+@media (prefers-color-scheme: dark) {
+  [data-win="window"] body {
+    background: var(--color-night-900);
+  }
   /* 팝오버는 창 자체가 고정 크기 — 바깥쪽 스크롤(고무줄)은 없애고 안쪽에서만 스크롤한다. */
   overflow: hidden;
 }

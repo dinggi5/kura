@@ -16,9 +16,32 @@ import { initLang, t } from "@/lib/i18n";
 import { shell } from "@/components/ui";
 import { SetupScreen } from "@/screens/SetupScreen";
 import { WalletScreen } from "@/screens/WalletScreen";
+import { isWindow, markWindowKind } from "@/lib/win";
+import { useSync } from "@/lib/sync";
 import "./App.css";
 
+// 첫 프레임 전에 — 팝오버와 큰 창(개발 75)은 겉모양이 다르다.
+markWindowKind();
+
+/** 큰 창의 맨 위 띠 — 제목 막대를 숨겼으니(신호등만 남김) 여기를 잡고 창을 옮긴다. 두 번 누르면 확대.
+ *  내용보다 위에 있지만 셸의 윗여백(win:pt) 안에만 걸쳐 버튼을 가리지 않는다. */
+function DragStrip() {
+  return <div data-tauri-drag-region className="fixed inset-x-0 top-0 h-8 z-30" aria-hidden />;
+}
+
 function App() {
+  const view = <AppView />;
+  return isWindow ? (
+    <>
+      <DragStrip />
+      {view}
+    </>
+  ) : (
+    view
+  );
+}
+
+function AppView() {
   const [status, setStatus] = useState<WalletStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
   const loadStatus = useCallback(() => {
@@ -49,6 +72,15 @@ function App() {
   }, []);
 
   useEffect(loadStatus, [loadStatus]);
+
+  // 다른 창(개발 75)에서 계정을 바꾸거나 백업을 마치거나 언어를 바꿨으면 이 창도 따라간다.
+  // 처음 읽기와 달리 실패는 조용히 — 멀쩡히 떠 있는 지갑 화면을 오류 화면으로 바꿀 이유가 없다.
+  useSync(() => {
+    void initLang();
+    invoke<WalletStatus>("get_wallet_status")
+      .then(setStatus)
+      .catch(() => {});
+  });
 
   // 로딩
   if (!status && !statusError) {

@@ -97,7 +97,7 @@ If you run that last `rm -rf ~/.jigap` without your 12 words, **nobody can recov
 
 ## First run
 
-> **Kura lives in your menu bar.** Launch it and a keyhole icon (◉) appears at the top of your screen; the window drops down only when you click it. Click elsewhere and it closes, while the app stays in the background waiting for AI payment requests. To quit for good, **right-click the icon → Quit**. (On the very first run, with no wallet yet, the window opens on its own.)
+> **Kura lives in your menu bar.** Launch it and a keyhole icon (◉) appears at the top of your screen; the window drops down only when you click it. Click elsewhere and it closes, while the app stays in the background waiting for AI payment requests. For more room for history and settings, right-click the icon → **Open in Window** (or ⤢ at the top right of the drop-down) to get a regular window — payment approvals still come to the menu-bar window. To quit for good, **right-click the icon → Quit**. (On the very first run, with no wallet yet, the window opens on its own.)
 
 1. **Create a wallet** — choose the password (8 characters or more) you'll type for every payment. Your key is stored encrypted with it (`~/.jigap/wallet.enc`).
 2. **Back up your words** — twelve words appear. They are **the real proof the funds are yours**, so write them on paper or keep them in a password manager. Even if you forget your password they bring the funds back: quit the app, **check that you have the twelve words**, delete `~/.jigap/wallet.enc`, relaunch, and use **Import** on the first screen (any standard BIP-39 wallet works too). Delete that file without the twelve words and the funds are gone for good.

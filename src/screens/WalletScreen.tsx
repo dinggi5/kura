@@ -11,6 +11,7 @@ import {
   HelpCircle,
   History,
   KeyRound,
+  Maximize2,
   Settings as SettingsIcon,
   ShieldAlert,
   ShieldCheck,
@@ -47,6 +48,9 @@ import { HistoryScreen } from "@/screens/HistoryScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
 import { WelcomeTour } from "@/screens/WelcomeTour";
 import { t } from "@/lib/i18n";
+import { isWindow } from "@/lib/win";
+import { notifySync, useSync } from "@/lib/sync";
+import { ApprovalElsewhereBanner } from "@/components/banners";
 
 type Mode = "balance" | "receive" | "send";
 
@@ -77,6 +81,11 @@ export function WalletScreen({
   const [balanceError, setBalanceError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [backedUp, setBackedUp] = useState(initialBackedUp);
+  // 다른 창에서 백업을 마쳤으면(개발 75) App 이 다시 읽은 값이 여기로 내려온다. 내려가는 쪽(true → false)은
+  // 없다 — 백업 표식은 지우는 길이 없다.
+  useEffect(() => {
+    if (initialBackedUp) setBackedUp(true);
+  }, [initialBackedUp]);
   const [showBackup, setShowBackup] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -157,6 +166,7 @@ export function WalletScreen({
       await invoke("set_locked", { locked: next });
       setLocked(next);
       if (next) setMode("balance");
+      notifySync();
     } catch {
       /* 토글 실패는 조용히 무시 */
     }
@@ -303,6 +313,16 @@ export function WalletScreen({
     };
   }, [loadHistory, refreshBalancesSilent]);
 
+  // 다른 창(개발 75)이 상태를 바꿨거나 이 창이 앞으로 돌아왔다 — 한도·설정·잠금·내역을 다시 읽는다.
+  // 잔액은 위의 30초·복귀 갱신이 맡는다(RPC 라 여기서 또 부르면 복귀마다 두 번 나간다). 다만 알림은
+  // 송금·승인 직후에도 오므로 그때 잔액이 늦지 않게 조용한 갱신을 한 번 — in-flight 가드가 겹침을 막는다.
+  useSync(() => {
+    loadLimits();
+    loadHistory();
+    invoke<boolean>("is_locked").then(setLocked).catch(() => {});
+    void refreshBalancesSilent();
+  });
+
   // 내역 확인(개발 71): 러스트가 체인에서 결말을 확인해 기록을 고치면(불명 → 보냄·되돌려짐, 서명 → 정산됨·만료)
   // 알려 온다. 되돌려짐·만료는 오늘 한도도 돌려받으므로 한도도 다시 읽는다.
   useEffect(() => {
@@ -359,6 +379,12 @@ export function WalletScreen({
         if (autoBusy.current === null) setPending(null);
         return;
       }
+      // 큰 창(개발 75)은 승인하지 않는다 — 자율 승인도 모달도 팝오버 몫이다. 「승인하러 가기」 띠만.
+      if (isWindow) {
+        const req = r;
+        setPending((prev) => (prev?.id === req.id ? prev : req));
+        return;
+      }
       // 자율 승인 처리 중인 요청이면 모달을 띄우지 않고 기다린다.
       if (autoBusy.current === r.id) return;
       // 이미 자율 시도를 해본 요청이면 곧장 모달(같은 id면 객체 유지).
@@ -379,6 +405,7 @@ export function WalletScreen({
           void refreshBalances();
           loadLimits();
           loadHistory();
+          notifySync();
         }
       } catch {
         // 자율 불가(세션 잠김·한도 초과·자율 꺼짐) 또는 차단 → 사람 승인 모달.
@@ -403,7 +430,7 @@ export function WalletScreen({
   // macOS 14+는 포커스 뺏기를 무시해서 항상-위 고정 방식 — 승인이 끝나면(cleanup) 해제.
   const pendingId = pending?.id;
   useEffect(() => {
-    if (!pendingId) return;
+    if (!pendingId || isWindow) return;
     // 순서가 뒤집혀도(둘 다 비동기) 백엔드가 대기 요청 유무를 직접 보고 판단하므로 안전하다.
     invoke("raise_main_window").catch(() => {});
     return () => {
@@ -449,7 +476,7 @@ export function WalletScreen({
         )}
       </AnimatePresence>
       <AnimatePresence>
-        {pending && (
+        {pending && !isWindow && (
           <PaymentApprovalModal
             key={pending.id}
             request={pending}
@@ -461,6 +488,7 @@ export function WalletScreen({
               void refreshBalances();
               loadLimits();
               loadHistory();
+              notifySync();
             }}
           />
         )}
@@ -476,6 +504,7 @@ export function WalletScreen({
         onComplete={() => {
           setBackedUp(true);
           setShowBackup(false);
+          notifySync();
         }}
         onExit={() => setShowBackup(false)}
       />
@@ -492,6 +521,7 @@ export function WalletScreen({
         onClose={() => {
           setShowSettings(false);
           loadLimits();
+          notifySync();
         }}
       />,
     );
@@ -602,6 +632,15 @@ export function WalletScreen({
             <HeaderIconButton onClick={() => setShowSettings(true)} label={t("설정", "Settings")}>
               <SettingsIcon size={14} />
             </HeaderIconButton>
+            {/* 창으로 열기(개발 75) — 팝오버에만. 큰 창에선 이미 창이다. */}
+            {!isWindow && (
+              <HeaderIconButton
+                onClick={() => invoke("open_app_window").catch(() => {})}
+                label={t("창으로 열기", "Open in window")}
+              >
+                <Maximize2 size={13} />
+              </HeaderIconButton>
+            )}
           </div>
         </header>
 
@@ -614,6 +653,7 @@ export function WalletScreen({
           />
         </div>
 
+        {isWindow && pending && <ApprovalElsewhereBanner />}
         {locked && <LockBanner onUnlock={toggleLock} />}
         {!locked && (Number(session.auto_limit) > 0 || session.unlocked) && (
           <SessionBar
@@ -670,6 +710,7 @@ export function WalletScreen({
                 void refreshBalances();
                 loadLimits();
                 loadHistory();
+                notifySync();
               }}
             />
           )}
@@ -709,7 +750,10 @@ export function WalletScreen({
           <AccountSheet
             accounts={accounts}
             active={active}
-            onChange={onAccountsChange}
+            onChange={(st) => {
+              onAccountsChange(st);
+              notifySync();
+            }}
             onClose={() => setShowAccounts(false)}
           />
         )}

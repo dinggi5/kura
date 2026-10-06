@@ -1,7 +1,8 @@
-// 메인 화면 상단 배너 — 시드 백업 경고 + 긴급 잠금 안내 + 업데이트 알림.
+// 메인 화면 상단 배너 — 시드 백업 경고 + 긴급 잠금 안내 + 업데이트 알림 + 큰 창의 승인 안내(개발 75).
 
 import { motion } from "framer-motion";
-import { AlertTriangle, ShieldAlert, X, ArrowUpCircle } from "lucide-react";
+import { AlertTriangle, ShieldAlert, X, ArrowUpCircle, Wallet } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/cn";
 import { enter } from "@/components/ui";
 import { t } from "@/lib/i18n";
@@ -163,6 +164,41 @@ export function LockBanner({ onUnlock }: { onUnlock: () => void }) {
         )}
       >
         {t("해제", "Turn off")}
+      </button>
+    </motion.div>
+  );
+}
+
+/** 큰 창(개발 75)에서 결제 승인 요청이 기다리는 중.
+ *
+ *  승인은 메뉴바 팝오버만 한다(src-tauri/src/appwin.rs 머리) — 보통은 요청이 오는 순간 팝오버가 늘 위로
+ *  뜨니 이 띠가 할 일이 없다. 있는 이유는 사람이 그 팝오버를 일부러 닫아 둔 경우(개발 53): 그러면
+ *  만료 1분 전까지 다시 안 뜨는데, 사람은 지금 이 큰 창을 보고 있다. 버튼이 팝오버를 다시 띄운다. */
+export function ApprovalElsewhereBanner() {
+  return (
+    <motion.div
+      {...enter}
+      className={cn(
+        "w-full max-w-md flex items-center gap-3 px-4 py-3",
+        "rounded-[var(--radius-card)]",
+        "bg-[var(--color-ivory-50)] dark:bg-[var(--color-night-800)]",
+        "border border-[var(--color-ivory-400)] dark:border-[var(--color-night-700)]",
+      )}
+    >
+      <Wallet size={16} className="shrink-0 text-[var(--color-accent)]" />
+      <p className="flex-1 min-w-0 text-[12px] leading-snug text-[var(--color-ink-500)]">
+        {t("결제 승인을 기다리는 요청이 있어요.", "A payment is waiting for your approval.")}
+      </p>
+      <button
+        type="button"
+        onClick={() => invoke("show_approval").catch(() => {})}
+        className={cn(
+          "shrink-0 h-8 px-3.5 rounded-[var(--radius-pill)] text-[12px] tracking-tight",
+          "bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-hover)]",
+          "transition-colors duration-[var(--duration-base)]",
+        )}
+      >
+        {t("승인 창 열기", "Review")}
       </button>
     </motion.div>
   );

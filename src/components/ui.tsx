@@ -13,6 +13,11 @@ export const shell = cn(
   "bg-[var(--color-ivory-100)] text-[var(--color-ink-900)]",
   "dark:bg-[var(--color-night-900)] dark:text-[#E8E5DD]",
   "px-6 py-8",
+  // 큰 창(개발 75): 보통 맥 창이라 모서리는 창이 둥글린다. 위는 신호등 자리(56px)를 비우고, 내용은
+  // 팝오버 높이(640)만큼의 판을 창 한가운데에 둔다 — 가운데 맞춤(justify-center)이 아니라 **위아래 여백을
+  // 늘려서**. 가운데 맞춤은 내용이 창보다 길 때 위가 잘려 스크롤로도 닿지 않는다(위 justify-between 주석).
+  "win:rounded-none win:px-10",
+  "win:pt-[max(3.5rem,calc((100vh_-_640px)/2))] win:pb-[max(2.5rem,calc((100vh_-_640px)/2))]",
 );
 
 // 화면 전체를 덮는 모달 배경 — 팝오버 모서리를 넘어 사각으로 칠해지지 않게 같이 둥글린다.
@@ -22,6 +27,7 @@ export const shell = cn(
 export const modalOverlay = cn(
   "fixed inset-0 z-50 overflow-y-auto flex items-start justify-center p-5",
   "rounded-[var(--radius-window)] bg-black/40 backdrop-blur-sm",
+  "win:rounded-none",
 );
 
 export const cardBase = cn(

@@ -18,10 +18,12 @@
 //   session   자율 결제 세션(메모리 키) + 자동 승인
 //   notify    OS 알림 (자율 결제 사후 통지)
 //   tray      메뉴바 상주 — 트레이 아이콘 + 팝오버 위치·자동 숨김
+//   appwin    「창으로 열기」 — 팝오버 옆의 보통 맥 창(개발 75)
 //   update    인앱 자동 업데이트(개발 31) — 검사·설치, 승인 대기 중 재시작 차단
 //
 // 이 파일에는 앱 셸만 남긴다: 창 제어 커맨드 + run().
 
+mod appwin;
 mod autostart;
 mod chain;
 mod confirm;
@@ -48,6 +50,10 @@ mod wallet;
 mod x402;
 
 use session::SessionKey;
+
+/// 자리비움 잠금이 blur 뒤 기다리는 시간(ms) — 같은 앱의 다른 창이 포커스를 받는 데 충분하고,
+/// 사람이 다른 앱에서 무언가를 하기엔 짧다(개발 75).
+const BLUR_LOCK_DELAY_MS: u64 = 300;
 
 /// 결제 승인 팝업이 창에 가려져 5분 타임아웃을 놓친 실사례 → 사람 승인이 필요한 동안 창을 전면 고정.
 /// macOS 14+는 백그라운드 앱의 포커스 뺏기(activateIgnoringOtherApps)를 무시하므로 set_focus만으론
@@ -85,8 +91,16 @@ fn raise_main_window(app: tauri::AppHandle) {
 ///
 /// 창 닫기(`CloseRequested`)와 **같은 `hide_by_user` 를 탄다** — 「닫아 둠」 표식·만료
 /// 직전 되살리기 규칙이 두 경로에서 갈리지 않게.
+///
+/// 큰 창(개발 75)에서 부르면 그 창을 닫는다 — 웹뷰의 ⌘W 처리기는 두 창이 같은 코드라, 부른 창을
+/// 보고 갈라야 큰 창의 ⌘W 가 팝오버를 숨기는 사고가 안 난다. (큰 창은 테두리가 있어 AppKit 의
+/// 「닫기」도 살아 있다 — 둘 다 와도 두 번째는 이미 없어진 창이라 아무 일도 없다.)
 #[tauri::command]
-fn hide_main_window(app: tauri::AppHandle) {
+fn hide_main_window(app: tauri::AppHandle, window: tauri::WebviewWindow) {
+    if window.label() == appwin::LABEL {
+        let _ = window.close();
+        return;
+    }
     tray::hide_by_user(&app);
 }
 
@@ -150,6 +164,10 @@ pub fn run() {
             // 계속 받는다. 완전 종료는 Cmd+Q(ExitRequested는 안 막음) 또는 트레이 메뉴의 "종료".
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 use tauri::Manager;
+                // 큰 창(개발 75)은 정말 닫는다 — 결제 요청은 팝오버가 받는다(appwin.rs 머리).
+                if window.label() == appwin::LABEL {
+                    return;
+                }
                 api.prevent_close();
                 // 승인 대기 중에도 숨긴다(개발 53) — 단 「닫아 둠」으로 적어, 감시 스레드가
                 // 도로 띄우지 않고 만료 직전 한 번만 되살린다(tray::hide_by_user).
@@ -157,14 +175,26 @@ pub fn run() {
             }
             tauri::WindowEvent::Focused(false) => {
                 use tauri::Manager;
-                // 자리비움 자동 잠금(Session 14): 설정이 켜져 있으면 세션 키를 즉시 소멸.
+                // 자리비움 자동 잠금(Session 14): 설정이 켜져 있으면 세션 키를 소멸.
+                // 창이 둘이 된 뒤(개발 75)로는 **Kura 밖으로 나갔을 때만** — 팝오버에서 큰 창으로
+                // 옮기는 순간에도 팝오버는 blur 를 받는다. 새 창의 Focused(true) 는 blur 직후에 오므로
+                // 잠깐 기다렸다 Kura 창 중 아무도 포커스가 없을 때 잠근다. 메인 스레드를 막지 않게 따로.
                 if settings::read_settings().lock_on_blur {
-                    if let Ok(mut g) = window.state::<SessionKey>().0.lock() {
-                        *g = None;
-                    }
+                    let app = window.app_handle().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(BLUR_LOCK_DELAY_MS));
+                        if !appwin::any_focused(&app) {
+                            if let Ok(mut g) = app.state::<SessionKey>().0.lock() {
+                                *g = None;
+                            }
+                        }
+                    });
                 }
                 // 팝오버 자동 숨김(개발 26). 승인 대기 중이면 tray 쪽에서 걸러 안 숨긴다.
-                tray::on_blur(window);
+                // 큰 창은 보통 맥 창이라 다른 앱을 눌러도 그 자리에 있는다.
+                if window.label() == "main" {
+                    tray::on_blur(window);
+                }
             }
             _ => {}
         })
@@ -204,6 +234,8 @@ pub fn run() {
             raise_main_window,
             release_main_window,
             hide_main_window,
+            appwin::open_app_window,
+            appwin::show_approval,
             autostart::get_autostart,
             autostart::set_autostart,
             settings::set_auto_check_update,
@@ -222,8 +254,11 @@ pub fn run() {
             // 숨겨진 창을 Dock 아이콘 클릭으로 복원 (macOS applicationShouldHandleReopen).
             // 도크 아이콘은 유지하기로 했으므로(개발 26) 이 경로도 그대로 살려 둔다 —
             // 트레이와 함께 팝오버를 띄우는 두 번째 경로.
+            // 큰 창(개발 75)이 떠 있으면 그 창을 앞으로 — 단 승인 대기 중이면 팝오버가 먼저다.
             if let tauri::RunEvent::Reopen { .. } = event {
-                tray::show(app);
+                if ipc::live_request().is_some() || !appwin::focus_if_open(app) {
+                    tray::show(app);
+                }
             }
         });
 }

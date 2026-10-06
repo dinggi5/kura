@@ -473,8 +473,16 @@ fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         true,
         None::<&str>,
     )?;
+    // 보통 맥 창으로 (개발 75) — 내역·설정을 넓게 볼 때.
+    let window_i = MenuItem::with_id(
+        app,
+        "window",
+        ts!("창으로 열기", "Open in Window"),
+        true,
+        None::<&str>,
+    )?;
     let quit_i = MenuItem::with_id(app, "quit", ts!("종료", "Quit"), true, None::<&str>)?;
-    Menu::with_items(app, &[&open_i, &quit_i])
+    Menu::with_items(app, &[&open_i, &window_i, &quit_i])
 }
 
 /// 언어를 바꾼 뒤 메뉴바의 글자를 새 언어로 갈아 끼운다 (개발 42).
@@ -501,6 +509,7 @@ pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show(app),
+            "window" => crate::appwin::open(app),
             "quit" => app.exit(0),
             _ => {}
         })
