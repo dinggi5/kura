@@ -68,6 +68,11 @@ pub(crate) struct PaymentRequest {
     /// 없다(false) → 예전 규칙(5분+유예) 그대로다.
     #[serde(default)]
     pub(crate) lease: bool,
+    /// **이 시각(유닉스 초)이 지나면 제출하지 않는다** (개발 76, 코덱스 1차 P0). x402 직접 제출의 seed 모드에서 MCP 가
+    /// 「seed 만료 − (채우기·제출·영수증·증거 꼬리)」로 계산해 싣는다. 승인 창 카운트다운도 이걸 쓴다.
+    /// 0 = 없음(다른 결제·옛 MCP) → 예전 그대로 만든 시각 + 5분.
+    #[serde(default)]
+    pub(crate) approve_by: u64,
 }
 
 /// MCP 가 온체인에서 읽어 **대조까지 마친 사실**. GUI 는 판정하지 않고 그대로 보여준다.
@@ -1051,6 +1056,7 @@ async fn approve_kind(req: &PaymentRequest, password: String) -> Result<PaymentR
                 req.to.clone(),
                 req.amount.clone(),
                 req.nonce.clone(),
+                req.approve_by,
             )
             .await,
         ),
@@ -1308,6 +1314,7 @@ mod tests {
             from: String::new(),
             agent: None,
             lease: false,
+            approve_by: 0,
         }
     }
 
@@ -1562,6 +1569,7 @@ mod tests {
             from: "0xF39f".into(),
             agent: None,
             lease: false,
+            approve_by: 0,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: PaymentRequest = serde_json::from_str(&json).unwrap();

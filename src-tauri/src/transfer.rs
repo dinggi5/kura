@@ -317,6 +317,11 @@ fn classify_send_error(e: &alloy::providers::transport::TransportError) -> SendF
                 || m.contains("known transaction")
             {
                 SendFault::AlreadyKnown
+            } else if p.code == -32603 || ambiguous_error_text(&m) {
+                // 🔴 오류 응답이라고 다 「노드가 읽고 거절」은 아니다(개발 76, 코덱스 1차 P0). 중계(게이트웨이·RPC 업체)가
+                // 뒤 노드에 넘긴 뒤 시간 초과·내부 오류를 JSON-RPC 오류로 감싸 돌려줄 수 있다 — 그땐 tx 가 들어갔을 수 있다.
+                // 「안 나감」으로 치면 한도를 환불하고 카드가 다시 보내기를 열어 둔다(이중 송금).
+                SendFault::Unknown
             } else {
                 SendFault::Rejected
             }
@@ -324,11 +329,29 @@ fn classify_send_error(e: &alloy::providers::transport::TransportError) -> SendF
         RpcError::SerError(_) | RpcError::LocalUsageError(_) | RpcError::UnsupportedFeature(_) => {
             SendFault::Rejected
         }
-        RpcError::Transport(TransportErrorKind::HttpError(h)) if (400..500).contains(&h.status) => {
+        // 408(요청 시간 초과)·499(상대가 끊음)는 이미 뒤로 넘어갔을 수 있다 — 모름(개발 76).
+        RpcError::Transport(TransportErrorKind::HttpError(h))
+            if (400..500).contains(&h.status) && h.status != 408 && h.status != 499 =>
+        {
             SendFault::Rejected
         }
         _ => SendFault::Unknown,
     }
+}
+
+/// 오류 응답 문구가 「처리됐는지 모름」을 뜻하나 — 중계의 시간 초과·내부 오류 (`classify_send_error`, 소문자로 받는다).
+fn ambiguous_error_text(m: &str) -> bool {
+    [
+        "timeout",
+        "timed out",
+        "internal error",
+        "internal server",
+        "upstream",
+        "unavailable",
+        "gateway",
+    ]
+    .iter()
+    .any(|k| m.contains(k))
 }
 
 /// 트랜잭션을 채워 서명하고 제출한다. 반환: 확실히 받혔으면 해시, 아니면 `SendError`.
@@ -341,7 +364,7 @@ fn classify_send_error(e: &alloy::providers::transport::TransportError) -> SendF
 pub(crate) async fn broadcast(
     signer: &PrivateKeySigner,
     tx: TransactionRequest,
-    token: &str,
+    journal: &Journal,
 ) -> Result<String, SendError> {
     // 🔴 **앱 안의 제출은 한 줄로 선다** (개발 75, 코덱스 1차 P1). nonce 는 채우기 때 노드의 「대기 포함 다음 번호」를
     // 묻는다 — 두 송금이 동시에 채우면 **같은 번호**를 받고, 하나는 거절되거나 다른 하나를 덮어쓴다(덮인 쪽은 내역에
@@ -351,7 +374,63 @@ pub(crate) async fn broadcast(
     // (첫 제출이 「불명」으로 끝난 갈래는 노드가 그 tx 를 모를 수 있어 여전히 같은 번호가 나올 수 있다 — 그땐
     // 둘 중 하나만 들어가고, 불명 쪽은 체인 확인(confirm.rs)이 결말을 고친다.)
     let _turn = SUBMIT.lock().await;
-    broadcast_via(&effective_rpc(), signer, tx, token, read_lock).await
+    broadcast_via(&effective_rpc(), signer, tx, &journal.token, read_lock, |h| {
+        journal.signed(h)
+    })
+    .await
+}
+
+/// 한 건의 제출을 내역에 잇는 끈 (개발 76, 코덱스 1차 P0) — 서명 직후·제출 직전에 「확인 필요」+해시로 먼저 적고
+/// (`signed`), 결말이 나오면 그 줄을 고친다(`finish`). 앱이 그 사이 꺼져도 해시가 실린 줄이 남아 체인 확인이 결말을 찾는다.
+/// 서명 전에 끝난 실패(잔액·RPC 연결 등)는 먼저 적은 줄이 없어 예전처럼 새 줄을 적는다.
+pub(crate) struct Journal {
+    pub(crate) token: String,
+    to: String,
+    amt: String,
+    /// false = 내역을 안 건드린다(실 RPC 를 부르는 무시된 테스트용).
+    record: bool,
+    id: std::sync::Mutex<Option<String>>,
+}
+
+impl Journal {
+    pub(crate) fn new(token: &str, to: &str, amt: &str) -> Self {
+        Journal {
+            token: token.into(),
+            to: to.into(),
+            amt: amt.into(),
+            record: true,
+            id: std::sync::Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    fn unrecorded(token: &str) -> Self {
+        Journal {
+            record: false,
+            ..Journal::new(token, "", "")
+        }
+    }
+
+    fn signed(&self, hash: &str) {
+        if !self.record {
+            return;
+        }
+        let id = crate::history::log_pending(&self.token, &self.to, &self.amt, hash);
+        *self.id.lock().unwrap_or_else(|e| e.into_inner()) = id;
+    }
+
+    fn finish(&self, status: &str, detail: &str) {
+        if !self.record {
+            return;
+        }
+        let id = self.id.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match id {
+            Some(id) => crate::history::finish_pending(
+                &id, &self.token, &self.to, &self.amt, status, detail,
+            ),
+            None => log_attempt(&self.token, &self.to, &self.amt, status, detail),
+        }
+    }
 }
 
 /// 제출 줄 — `broadcast` 주석 참고.
@@ -364,7 +443,7 @@ static SUBMIT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub(crate) async fn broadcast_now(
     signer: &PrivateKeySigner,
     tx: TransactionRequest,
-    token: &str,
+    journal: &Journal,
 ) -> Result<String, SendError> {
     let Ok(_turn) = SUBMIT.try_lock() else {
         return Err(SendError::Failed(
@@ -375,7 +454,10 @@ pub(crate) async fn broadcast_now(
             .into(),
         ));
     };
-    broadcast_via(&effective_rpc(), signer, tx, token, read_lock).await
+    broadcast_via(&effective_rpc(), signer, tx, &journal.token, read_lock, |h| {
+        journal.signed(h)
+    })
+    .await
 }
 
 /// 긴급 잠금으로 제출 직전에 멈췄을 때의 문구.
@@ -401,6 +483,7 @@ async fn broadcast_via(
     tx: TransactionRequest,
     token: &str,
     locked: fn() -> bool,
+    on_signed: impl FnOnce(&str),
 ) -> Result<String, SendError> {
     use alloy::network::eip2718::Encodable2718;
 
@@ -455,6 +538,8 @@ async fn broadcast_via(
     if locked() {
         return Err(locked_before_submit());
     }
+    // 제출 직전 — 이 뒤로는 「나갔을 수 있다」. 해시를 먼저 내역에 남긴다(`Journal`, 개발 76).
+    on_signed(&hash);
 
     // ② 제출.
     let why = match tokio::time::timeout(SEND_WAIT, provider.send_raw_transaction(&raw)).await {
@@ -743,11 +828,10 @@ async fn do_send_eth_inner(
     let tx = TransactionRequest::default()
         .with_to(to_addr)
         .with_value(value);
+    let journal = Journal::new("ETH", to, amt);
     let hash = settle_broadcast(
-        Box::pin(broadcast(signer, tx, "ETH")).await,
-        "ETH",
-        to,
-        amt,
+        Box::pin(broadcast(signer, tx, &journal)).await,
+        &journal,
         value,
         reserved_day,
     )
@@ -763,24 +847,23 @@ async fn do_send_eth_inner(
 ///          + 내역 "unknown" + 해시 + 사람에게 알림(창이 없는 자율 경로도 있어서 알림이 유일한 통로다).
 pub(crate) async fn settle_broadcast(
     sent: Result<String, SendError>,
-    token: &str,
-    to: &str,
-    amt: &str,
+    journal: &Journal,
     value: U256,
     reserved_day: u64,
 ) -> Result<String, SendError> {
+    let token = journal.token.as_str();
     match sent {
         Ok(hash) => {
-            log_attempt(token, to, amt, "sent", &hash);
+            journal.finish("sent", &hash);
             Ok(hash)
         }
         Err(SendError::Failed(msg)) => {
             refund_spend(token, value, reserved_day).await;
-            log_attempt(token, to, amt, "failed", &msg);
+            journal.finish("failed", &msg);
             Err(SendError::Failed(msg))
         }
         Err(SendError::Unknown { hash, msg }) => {
-            log_attempt(token, to, amt, "unknown", &hash);
+            journal.finish("unknown", &hash);
             crate::notify::show_notification(
                 ts!("전송 확인 필요", "Transfer needs checking"),
                 ts!(
@@ -926,11 +1009,10 @@ async fn do_send_usdc_inner(
             }
             .abi_encode(),
         );
+    let journal = Journal::new("USDC", to, amt);
     settle_broadcast(
-        Box::pin(broadcast(signer, tx, "USDC")).await,
-        "USDC",
-        to,
-        amt,
+        Box::pin(broadcast(signer, tx, &journal)).await,
+        &journal,
         value,
         reserved_day,
     )
@@ -985,6 +1067,18 @@ mod tests {
         assert_eq!(
             classify_send_error(&resp("insufficient funds for gas * price + value")),
             SendFault::Rejected
+        );
+        // 중계가 감싼 시간 초과·내부 오류 — 뒤 노드에 넘어갔을 수 있다 = 모름(개발 76, 코덱스 1차 P0).
+        for m in ["request timed out", "upstream request timeout", "service unavailable", "Internal error"] {
+            assert_eq!(classify_send_error(&resp(m)), SendFault::Unknown, "{m}");
+        }
+        let internal: TransportError = RpcError::ErrorResp(
+            serde_json::from_str(r#"{"code":-32603,"message":"boom"}"#).unwrap(),
+        );
+        assert_eq!(classify_send_error(&internal), SendFault::Unknown);
+        assert_eq!(
+            classify_send_error(&TransportErrorKind::http_error(408, String::new())),
+            SendFault::Unknown
         );
         // 이미 가지고 있다 — 같은 tx 가 들어가 있다 = 나갔다(클라이언트마다 문구가 다르다).
         for m in ["already known", "AlreadyKnown", "Known transaction: 0xabc"] {
@@ -1142,7 +1236,7 @@ mod tests {
     async fn lost_reply_then_already_known_is_sent() {
         let f = fake_rpc(vec![Act::Drop, Act::RpcErr("already known")]);
         let signer = PrivateKeySigner::random();
-        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false)
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| {})
             .await
             .expect("already known 은 받힌 것이다");
         assert_same_raw(&f, &hash, 2);
@@ -1153,7 +1247,7 @@ mod tests {
     async fn lock_turned_on_before_submit_sends_nothing() {
         let f = fake_rpc(vec![Act::Ok]);
         let signer = PrivateKeySigner::random();
-        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || true).await {
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || true, |_| {}).await {
             Err(SendError::Failed(_)) => {}
             other => panic!("확실한 실패여야 한다: {other:?}"),
         }
@@ -1165,8 +1259,15 @@ mod tests {
     async fn lost_twice_is_unknown_with_the_hash() {
         let f = fake_rpc(vec![Act::Drop, Act::Drop]);
         let signer = PrivateKeySigner::random();
-        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || false).await {
+        // 제출 전에 해시를 넘겨받는다(개발 76 `Journal`) — 응답이 영영 안 와도 내역엔 이 해시가 먼저 남는다.
+        let journaled = std::sync::Mutex::new(None::<String>);
+        let sent = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |h| {
+            *journaled.lock().unwrap() = Some(h.to_string())
+        })
+        .await;
+        match sent {
             Err(SendError::Unknown { hash, msg }) => {
+                assert_eq!(journaled.lock().unwrap().as_deref(), Some(hash.as_str()));
                 assert!(msg.contains(&hash), "{msg}");
                 assert_same_raw(&f, &hash, 2);
             }
@@ -1179,7 +1280,7 @@ mod tests {
     async fn gateway_error_then_ok_is_sent() {
         let f = fake_rpc(vec![Act::Http(502), Act::Ok]);
         let signer = PrivateKeySigner::random();
-        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false)
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| {})
             .await
             .unwrap();
         assert_same_raw(&f, &hash, 2);
@@ -1196,7 +1297,7 @@ mod tests {
         }
         let f = fake_rpc(vec![Act::Http(502), Act::Ok]);
         let signer = PrivateKeySigner::random();
-        match broadcast_via(&f.url, &signer, native_tx(), "USDC", locked_after_first).await {
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC", locked_after_first, |_| {}).await {
             Err(SendError::Unknown { .. }) => {}
             other => panic!("불명이어야 한다: {other:?}"),
         }
@@ -1208,7 +1309,7 @@ mod tests {
     async fn node_rejection_is_final_and_not_resent() {
         let f = fake_rpc(vec![Act::RpcErr("nonce too low")]);
         let signer = PrivateKeySigner::random();
-        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || false).await {
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| {}).await {
             Err(SendError::Failed(_)) => {}
             other => panic!("확실한 실패여야 한다: {other:?}"),
         }
@@ -1226,7 +1327,7 @@ mod tests {
         let base = crate::chain::BASE_SEPOLIA.chain_id;
         with_pinned_chain(
             base,
-            broadcast_via(&f.url, &signer, native_tx(), "USDC", || false),
+            broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| {}),
         )
         .await
         .unwrap();
@@ -1240,7 +1341,7 @@ mod tests {
     async fn plain_success_sends_once() {
         let f = fake_rpc(vec![Act::Ok]);
         let signer = PrivateKeySigner::random();
-        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false)
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| {})
             .await
             .unwrap();
         assert_same_raw(&f, &hash, 1);
@@ -1269,7 +1370,7 @@ mod tests {
                     }
                     .abi_encode(),
                 );
-            match broadcast(&signer, tx, "USDC").await {
+            match broadcast(&signer, tx, &Journal::unrecorded("USDC")).await {
                 Err(SendError::Failed(m)) => println!("① Failed: {m}"),
                 other => panic!("① 확실한 실패여야 한다: {other:?}"),
             }
@@ -1277,7 +1378,7 @@ mod tests {
             let tx = TransactionRequest::default()
                 .with_to(to)
                 .with_value(U256::ZERO);
-            match broadcast(&signer, tx, "USDC").await {
+            match broadcast(&signer, tx, &Journal::unrecorded("USDC")).await {
                 Err(SendError::Failed(m)) => println!("② Failed: {m}"),
                 other => panic!("② 확실한 실패여야 한다: {other:?}"),
             }

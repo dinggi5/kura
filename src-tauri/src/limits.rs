@@ -232,7 +232,7 @@ pub(crate) fn spend_path() -> Result<PathBuf, String> {
     Ok(jigap_dir()?.join(chain_file("spend")))
 }
 
-/// 예약·환불용 오늘 장부 (개발 71, 코덱스 1차 P1). `read_spend_today` 는 못 읽으면 0 으로 삼킨다 — 화면엔 그래도 되지만
+/// 예약·환불용 오늘 장부 (개발 71, 코덱스 1차 P1). 옛 `read_spend_today` 는 못 읽으면 0 으로 삼켰다(개발 76 에 지움 — 화면도 이걸 쓴다) —
 /// **돈이 나가기 전의 한도 검사**에선 「오늘 19 USDC 를 썼는데 장부가 상해 0 부터」가 되어 일일 한도를 넘겨 보냈다
 /// (내역·입금에서 두 번 본 「못 읽으면 빈 값」 병). 파일이 있는데 못 읽으면 None — 단 마지막 수정이 **어제 이전**이면 그 파일은
 /// 오늘 쓴 돈을 담을 수 없으니 새 날 장부로 간다(안 그러면 한 번 상한 장부가 영영 결제를 막는다).
@@ -284,27 +284,6 @@ fn judge_spend(
     }
 }
 
-/// 오늘 장부를 읽는다(화면용 — 못 읽으면 0). 날이 바뀌었으면 0으로 리셋한 새 장부를 돌려준다.
-/// 🔴 한도 검사엔 쓰지 않는다 — `spend_for_reserve` 를 쓴다.
-pub(crate) fn read_spend_today() -> Spend {
-    let today = current_day();
-    let s = spend_path()
-        .ok()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<Spend>(&s).ok())
-        .unwrap_or_default();
-    if s.day == today {
-        s
-    } else {
-        Spend {
-            day: today,
-            usdc: "0".into(),
-            eth: "0".into(),
-            ..Default::default()
-        }
-    }
-}
-
 /// 단일 + 일일 누적 한도를 검사한다 (체인에 보내기 전에). 통과하면 Ok.
 /// 한도가 0이면 "무제한"으로 보고 그 검사를 건너뛴다.
 pub(crate) fn enforce_caps(
@@ -334,15 +313,23 @@ pub(crate) fn enforce_caps(
 }
 
 /// 오늘 누적 사용액을 보기 좋은 십진수로 돌려준다.
+/// 🔴 장부를 못 읽으면 **오류**다(개발 76, 코덱스 1차 P2) — 예전엔 화면용이라며 0 을 돌려줘, 결제는 막히는데 설정·보내기
+/// 화면은 「오늘 남은 한도」를 꽉 찬 값으로 보였다. 판정은 결제 검사와 같은 `spend_for_reserve`.
 #[tauri::command]
-pub(crate) fn get_today_spend() -> SpendView {
-    let s = read_spend_today();
+pub(crate) fn get_today_spend() -> Result<SpendView, String> {
+    let s = spend_for_reserve().ok_or_else(|| {
+        ts!(
+            "오늘 쓴 금액 기록을 읽지 못했어요.",
+            "Couldn't read today's spending record."
+        )
+        .to_string()
+    })?;
     let usdc_raw: U256 = s.usdc.parse().unwrap_or(U256::ZERO);
     let eth_raw: U256 = s.eth.parse().unwrap_or(U256::ZERO);
-    SpendView {
+    Ok(SpendView {
         usdc: format_units(usdc_raw, active_chain().usdc_decimals).unwrap_or_else(|_| "0".into()),
         eth: format_ether(eth_raw),
-    }
+    })
 }
 
 #[cfg(test)]

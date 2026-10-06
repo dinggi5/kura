@@ -277,15 +277,21 @@ pub(crate) async fn do_x402_direct(
     to: String,
     amount_usdc: String,
     nonce_hex: String,
+    approve_by: u64,
 ) -> Result<String, SendError> {
     with_pinned_chain(
         active_chain().chain_id,
         with_pinned_account(
             active_account_index(),
-            do_x402_direct_inner(signer, to, amount_usdc, nonce_hex),
+            do_x402_direct_inner(signer, to, amount_usdc, nonce_hex, approve_by),
         ),
     )
     .await
+}
+
+/// 제출 마감(`PaymentRequest::approve_by`)이 지났나 — 0 이면 마감 없음 (순수 — 테스트용).
+fn past_approve_by(approve_by: u64, now: u64) -> bool {
+    approve_by != 0 && now > approve_by
 }
 
 async fn do_x402_direct_inner(
@@ -293,10 +299,11 @@ async fn do_x402_direct_inner(
     to: String,
     amount_usdc: String,
     nonce_hex: String,
+    approve_by: u64,
 ) -> Result<String, SendError> {
     use crate::chain::IEIP3009;
     // 줄을 기다리지 않는 제출(개발 75) — seed 만료가 있는 결제라 기다린 시간이 MCP 예산 밖이다(transfer.rs `broadcast_now`).
-    use crate::transfer::{broadcast_now, settle_broadcast};
+    use crate::transfer::{broadcast_now, settle_broadcast, Journal};
     use alloy::network::TransactionBuilder;
     use alloy::rpc::types::TransactionRequest;
     use alloy::sol_types::SolCall;
@@ -402,11 +409,23 @@ async fn do_x402_direct_inner(
     // 송금과 같은 모양으로 남긴다 — 사용자는 내역에서 «나간 돈»을 한 줄로 본다(서명만 한 x402 의
     // "signed" 와 다르다. 이건 이미 나간 전송이다). 받힘·실패·불명의 내역·한도 반영은 송금과
     // **같은 함수**가 한다(개발 66).
+    // 🔴 **제출 직전에 마감을 본다** (개발 76, 코덱스 1차 P0). MCP 는 승인 대기를 seed 수명 안으로 줄였지만, 그건 「언제까지
+    // 승인 버튼을 누를 수 있나」일 뿐이다 — 마감 직전에 누르면 비번 키 유도·요청 정리에 몇 초가 더 들고, 그 뒤 채우기·제출·
+    // 영수증·증거가 남은 꼬리를 넘겨 돈만 나가고 증거는 만료 뒤에 닿을 수 있었다. 인가는 서명했지만 아직 아무에게도
+    // 안 냈으니(제출 전) 「안 나감」이 확실하다.
+    if past_approve_by(approve_by, now_secs()) {
+        refund_spend("USDC", value, reserved_day).await;
+        let msg = ts!(
+            "결제 요청의 유효시간이 끝나 이 결제는 내지 않았어요. 아무것도 보내지 않았습니다 — AI 가 다시 요청하면 새 요청을 받아요.",
+            "This payment's time ran out, so it wasn't sent. Nothing was sent — the AI can ask again for a fresh one."
+        );
+        log_attempt("USDC", to, amt, "failed", msg);
+        return Err(SendError::Failed(msg.into()));
+    }
+    let journal = Journal::new("USDC", to, amt);
     settle_broadcast(
-        Box::pin(broadcast_now(signer, tx, "USDC")).await,
-        "USDC",
-        to,
-        amt,
+        Box::pin(broadcast_now(signer, tx, &journal)).await,
+        &journal,
         value,
         reserved_day,
     )
@@ -422,13 +441,14 @@ pub(crate) async fn x402_direct_payment(
     to: String,
     amount_usdc: String,
     nonce: String,
+    approve_by: u64,
 ) -> Result<String, SendError> {
     let password = Zeroizing::new(password);
     with_pinned_chain(
         active_chain().chain_id,
         with_pinned_account(
             active_account_index(),
-            x402_direct_pinned(password, to, amount_usdc, nonce),
+            x402_direct_pinned(password, to, amount_usdc, nonce, approve_by),
         ),
     )
     .await
@@ -439,6 +459,7 @@ async fn x402_direct_pinned(
     to: String,
     amount_usdc: String,
     nonce: String,
+    approve_by: u64,
 ) -> Result<String, SendError> {
     let signer = match unlock_signer(&password) {
         Ok(s) => s,
@@ -448,7 +469,7 @@ async fn x402_direct_pinned(
         }
     };
     let to_addr = to.clone();
-    let hash = do_x402_direct(&signer, to, amount_usdc, nonce).await?;
+    let hash = do_x402_direct(&signer, to, amount_usdc, nonce, approve_by).await?;
     record_trusted(&to_addr); // 비번(사람) 승인 성공 = 신뢰 주소 학습 (송금·서명 경로와 동일)
     Ok(hash)
 }
@@ -459,6 +480,14 @@ mod tests {
     use crate::chain::IERC20;
     use alloy::primitives::address;
     use alloy::providers::ProviderBuilder;
+
+    /// 제출 마감(개발 76): 0 = 없음, 마감 시각 그 초까지는 낸다, 지나면 안 낸다.
+    #[test]
+    fn approve_by_deadline() {
+        assert!(!past_approve_by(0, u64::MAX));
+        assert!(!past_approve_by(100, 100));
+        assert!(past_approve_by(100, 101));
+    }
 
     // [x402-1] EIP-3009 타입해시가 표준 상수와 일치 → 우리 구조체 정의(필드·순서·타입)가 정확하다.
     // (오프라인. keccak256("TransferWithAuthorization(address from,address to,uint256 value,
@@ -554,6 +583,7 @@ mod tests {
                 "0x1111111111111111111111111111111111111111".into(),
                 "0.01".into(),
                 format!("0x{}", "5a".repeat(32)),
+                0,
             ),
         )
         .await
@@ -576,6 +606,7 @@ mod tests {
                 "0x1111111111111111111111111111111111111111".into(),
                 "0.01".into(),
                 "0xnot-a-nonce".into(),
+                0,
             ),
         )
         .await

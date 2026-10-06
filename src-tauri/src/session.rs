@@ -342,6 +342,7 @@ async fn auto_work(
                 req.to.clone(),
                 req.amount.clone(),
                 req.nonce.clone(),
+                req.approve_by,
             )
             .await,
         ),

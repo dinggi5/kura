@@ -9,9 +9,12 @@ export const MAX_USDC = 5;
 /** 결제 승인 대기 시간(초). MCP/백엔드 타임아웃과 일치(5분). */
 export const PAYMENT_TTL = 300;
 
-/** 요청 생성 시각 기준 남은 승인 시간(초). */
-export function secsLeft(created: number): number {
-  return Math.max(0, PAYMENT_TTL - (Math.floor(Date.now() / 1000) - created));
+/** 남은 승인 시간(초). `approveBy`(개발 76)가 있으면 그 마감까지 — seed 모드 결제는 5분보다 짧다.
+ *  없으면 요청 생성 시각 + 5분. */
+export function secsLeft(created: number, approveBy?: number): number {
+  const now = Math.floor(Date.now() / 1000);
+  const end = approveBy ? Math.min(approveBy, created + PAYMENT_TTL) : created + PAYMENT_TTL;
+  return Math.max(0, end - now);
 }
 
 /** 남은 초를 m:ss 로. */

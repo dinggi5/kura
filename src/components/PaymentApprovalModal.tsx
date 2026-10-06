@@ -62,15 +62,15 @@ export function PaymentApprovalModal({
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [remaining, setRemaining] = useState(() => secsLeft(request.created));
+  const [remaining, setRemaining] = useState(() => secsLeft(request.created, request.approve_by));
   // 받는 주소가 이전에 비번으로 승인된 적 있는지 (null = 조회 중).
   const [trusted, setTrusted] = useState<boolean | null>(null);
 
-  // 5분 카운트다운. 0이 되면 MCP가 요청을 거둬가고 폴링이 팝업을 닫는다.
+  // 카운트다운(보통 5분, seed 결제는 마감까지). 0이 되면 MCP가 요청을 거둬가고 폴링이 팝업을 닫는다.
   useEffect(() => {
-    const h = setInterval(() => setRemaining(secsLeft(request.created)), 1000);
+    const h = setInterval(() => setRemaining(secsLeft(request.created, request.approve_by)), 1000);
     return () => clearInterval(h);
-  }, [request.created]);
+  }, [request.created, request.approve_by]);
 
   useEffect(() => {
     invoke<boolean>("is_trusted_addr", { to: request.to })

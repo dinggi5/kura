@@ -369,6 +369,23 @@ async fn lookup_inner(agent_id: u64) -> Result<AgentRecord, String> {
             )
         })?;
 
+    // 🔴 지정 RPC 가 고른 체인에 붙어 있는지 먼저 본다(개발 76, 코덱스 1차 P1). Base·Arc 메인넷은 레지스트리 주소가 같아,
+    // Arc 를 고르고 Base RPC 를 적으면 조회가 「성공」하며 Base 의 기록을 Arc 의 사실로 승인 창·자율 차단에 넘겼다.
+    let got = alloy::providers::Provider::get_chain_id(&provider).await.map_err(|e| {
+        tf!(
+            "RPC 체인 확인 실패: {}",
+            "Couldn't check the RPC's chain: {}",
+            redact_urls(&e.to_string())
+        )
+    })?;
+    if got != chain.chain_id {
+        return Err(tf!(
+            "지정한 RPC 가 다른 체인(id {})에 붙어 있어 에이전트를 조회하지 않았어요.",
+            "The custom RPC is on a different chain (id {}), so the agent wasn't looked up.",
+            got
+        ));
+    }
+
     let id = U256::from(agent_id);
     let registry = IIdentityRegistry::new(identity, &provider);
 

@@ -184,6 +184,58 @@ fn append_archive(path: &std::path::Path, evicted: &[HistoryEntry]) -> Result<()
 ///
 /// 기록마다 고유 번호(`id`)와 주인 주소(`from` — 작업이 고정한 계정)를 싣는다(개발 71).
 pub(crate) fn log_attempt(token: &str, to: &str, amount: &str, status: &str, detail: &str) {
+    log_entry(token, to, amount, status, detail);
+}
+
+/// 서명한 tx 를 **제출하기 직전에** 「확인 필요」 + 해시로 먼저 적는다 (개발 76, 코덱스 1차 P0).
+///
+/// 예전엔 제출 결과가 나온 뒤에야 적었다 — 노드가 tx 를 받고 응답을 기다리는 사이 앱이 꺼지거나(종료·크래시·업데이트)
+/// 죽으면 해시는 메모리에만 있다가 사라졌다. 다시 켜면 한도는 잡혀 있는데 내역엔 나간 돈이 없고, 사람은 다시 보낸다.
+/// 먼저 적어 두면 그 줄은 체인 확인(confirm.rs)이 해시로 결말을 찾는다. 돌려준 id 로 `finish_pending` 이 고친다.
+/// 못 적었으면 None — 호출자는 끝에 예전처럼 새 줄을 적는다.
+pub(crate) fn log_pending(token: &str, to: &str, amount: &str, hash: &str) -> Option<String> {
+    log_entry(token, to, amount, "unknown", hash)
+}
+
+/// `log_pending` 이 적은 줄을 결말로 고친다. **아직 「확인 필요」일 때만** — 그 사이 체인 확인이 먼저 결말(되돌려짐 등)을
+/// 적었으면 그쪽이 체인에서 본 사실이라 덮지 않는다. 줄을 못 찾으면(깨진 내역을 치웠다 등) 아무것도 안 한다 —
+/// 해시가 실린 줄이 어딘가 남아 있거나, 없으면 새로 적는다.
+pub(crate) fn finish_pending(id: &str, token: &str, to: &str, amount: &str, status: &str, detail: &str) {
+    let _g = history_guard();
+    let Ok(path) = history_path() else {
+        return;
+    };
+    match finish_at(&path, id, status, detail) {
+        Ok(true) => {}
+        Ok(false) => {
+            drop(_g);
+            if !pending_settled_elsewhere(&path, id) {
+                log_attempt(token, to, amount, status, detail);
+            }
+        }
+        Err(e) => eprintln!("[history] 결말 기록 실패: {e}"),
+    }
+}
+
+/// `finish_pending` 의 본체 — 경로를 받는다(테스트용). 고쳤으면 true, 그 id 의 「확인 필요」 줄이 없으면 false.
+fn finish_at(path: &PathBuf, id: &str, status: &str, detail: &str) -> Result<bool, String> {
+    let mut list = read_history_at(path);
+    let Some(e) = list.iter_mut().find(|e| e.id == id && e.status == "unknown") else {
+        return Ok(false);
+    };
+    e.status = status.into();
+    e.detail = detail.into();
+    write_json(path.clone(), &list).map(|_| true)
+}
+
+/// 그 id 의 줄이 본 파일에 **다른 상태로** 있나(체인 확인이 먼저 적음) — 그러면 새 줄을 보태지 않는다.
+fn pending_settled_elsewhere(path: &PathBuf, id: &str) -> bool {
+    let _g = history_guard();
+    read_history_at(path).iter().any(|e| e.id == id)
+}
+
+/// 한 줄을 적고 그 id 를 돌려준다(저장 실패면 None).
+fn log_entry(token: &str, to: &str, amount: &str, status: &str, detail: &str) -> Option<String> {
     let entry = HistoryEntry {
         ts: now_secs(),
         token: token.into(),
@@ -199,12 +251,15 @@ pub(crate) fn log_attempt(token: &str, to: &str, amount: &str, status: &str, det
     };
     // 디스크와 따로 메모리에도 — 저장이 실패해도 10분 중복 검사가 방금 나간 결제를 본다(개발 73).
     remember_recent(&entry);
+    let id = entry.id.clone();
     let _g = history_guard();
-    let Ok(path) = history_path() else {
-        return;
-    };
-    if let Err(e) = record_at(&path, entry, HISTORY_CAP) {
-        eprintln!("[history] 기록 실패: {e}");
+    let path = history_path().ok()?;
+    match record_at(&path, entry, HISTORY_CAP) {
+        Ok(()) => Some(id),
+        Err(e) => {
+            eprintln!("[history] 기록 실패: {e}");
+            None
+        }
     }
 }
 
@@ -811,6 +866,25 @@ mod tests {
 
     fn tags(list: &[HistoryEntry]) -> Vec<String> {
         list.iter().map(|e| e.detail.clone()).collect()
+    }
+
+    /// 🔴 개발 76: 제출 직전에 적은 「확인 필요」 줄은 결말로 고쳐진다 — 단 그새 체인 확인이 다른 결말을 적었으면 덮지 않는다.
+    #[test]
+    fn pending_entry_is_finished_only_while_unknown() {
+        let hot = temp_hot("pending");
+        let mut p = entry("0xhash");
+        p.status = "unknown".into();
+        p.id = "j1".into();
+        record_at(&hot, p, 10).unwrap();
+        assert!(finish_at(&hot, "j1", "sent", "0xhash").unwrap());
+        let list = read_history_at(&hot);
+        assert_eq!((list.len(), list[0].status.as_str()), (1, "sent"));
+        // 이미 결말이 있는 줄(여기선 방금 sent)은 다시 안 고친다 = false, 내용 그대로.
+        assert!(!finish_at(&hot, "j1", "failed", "x").unwrap());
+        assert_eq!(read_history_at(&hot)[0].status, "sent");
+        // 없는 id 도 false.
+        assert!(!finish_at(&hot, "nope", "sent", "h").unwrap());
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
     }
 
     /// 🔴 개발 70: 200건을 넘친 기록은 지워지지 않고 보관 파일로 간다 — 본 파일은 최신 cap 건, 나머지는 보관 파일에

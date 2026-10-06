@@ -318,6 +318,15 @@ pub(crate) fn decrypt_wallet(
     let key = derive_key(password, &salt, w.kdf_m, w.kdf_t, w.kdf_p)?;
     let cipher = Aes256Gcm::new_from_slice(&*key)
         .map_err(|e| tf!("암호기 생성 실패: {e}", "Couldn't set up encryption: {e}"))?;
+    // 🔴 `Nonce::from_slice` 는 길이가 12 가 아니면 **패닉**한다(개발 76, 코덱스 1차 P0) — JSON 모양만 맞는 깨진 wallet.enc
+    // (`"nonce": ""` 등)가 잠금 해제·백업·결제에서 앱을 죽였다. 길이를 먼저 본다.
+    if nonce_bytes.len() != 12 {
+        return Err(ts!(
+            "지갑 파일이 손상됐어요(논스 길이).",
+            "The wallet file is damaged (nonce length)."
+        )
+        .into());
+    }
     let nonce = Nonce::from_slice(&nonce_bytes);
     let plaintext = cipher.decrypt(nonce, ciphertext.as_ref()).map_err(|_| {
         ts!("비밀번호가 올바르지 않습니다", "That password isn't right").to_string()
@@ -1148,6 +1157,7 @@ mod tests {
             from: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8".into(),
             agent: None,
             lease: false,
+            approve_by: 0,
         };
         assert!(crate::ipc::ensure_request_account(&req).is_err());
         switch_account(1).unwrap();

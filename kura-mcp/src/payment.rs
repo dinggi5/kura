@@ -70,6 +70,10 @@ pub struct PaymentRequest {
     /// 없다(false) → 예전 규칙(5분+유예) 그대로다.
     #[serde(default)]
     pub lease: bool,
+    /// **이 시각(유닉스 초)이 지나면 앱이 제출하지 않는다** (개발 76, 코덱스 1차 P0) — seed 모드 x402 직접 제출에서
+    /// 승인 대기 예산(`approval_budget_secs`)의 끝. 앱 `ipc::PaymentRequest::approve_by` 와 같은 칸. 0 = 없음.
+    #[serde(default)]
+    pub approve_by: u64,
 }
 
 fn default_kind() -> String {
@@ -453,6 +457,7 @@ pub fn write_request_agent(
         "",
         agent,
         None,
+        None,
     )
 }
 
@@ -476,12 +481,14 @@ pub fn write_x402_request(
         "",
         agent,
         Some(picked_chain),
+        None,
     )
     .map(|(id, agent, _)| (id, agent))
 }
 
 /// x402 **직접 제출** 요청 (개발 64) — 서명만 받는 게 아니라 **온체인 전송까지** GUI 에 맡긴다.
 /// GUI 는 이 kind 를 송금과 같은 것으로 다룬다(가스 여유분·내역 "sent"·tx 해시 반환).
+#[allow(clippy::too_many_arguments)]
 pub fn write_x402_direct_request(
     to: &str,
     amount: &str,
@@ -490,6 +497,7 @@ pub fn write_x402_direct_request(
     nonce: &str,
     agent: Option<AgentTrust>,
     picked_chain: u64,
+    approve_secs: Option<u64>,
 ) -> Result<(String, Option<AgentTrust>), String> {
     write_request_kind(
         "USDC",
@@ -501,6 +509,7 @@ pub fn write_x402_direct_request(
         nonce,
         agent,
         Some(picked_chain),
+        approve_secs,
     )
     .map(|(id, agent, _)| (id, agent))
 }
@@ -523,6 +532,7 @@ fn write_request_kind(
     nonce: &str,
     agent: Option<AgentTrust>,
     pin: Option<u64>,
+    approve_secs: Option<u64>,
 ) -> Result<(String, Option<AgentTrust>, &'static str), String> {
     let id = new_id();
     let chain = crate::chain::active_chain();
@@ -560,6 +570,11 @@ fn write_request_kind(
         from: account.address,
         agent: agent.clone(),
         lease: true,
+        approve_by: 0,
+    };
+    let req = PaymentRequest {
+        approve_by: approve_secs.map_or(0, |secs| req.created + secs),
+        ..req
     };
     let json = serde_json::to_string_pretty(&req)
         .map_err(|e| tf!("직렬화 실패: {e}", "Couldn't serialize the request: {e}"))?;
@@ -916,7 +931,7 @@ mod tests {
     /// 어떤 실제 체인도 id 0 이 아니라 활성 체인이 무엇이든 어긋난다 — 파일을 안 건드리고 돌아온다.
     #[test]
     fn x402_request_refuses_when_chain_moved() {
-        let err = write_request_kind("USDC", "0xabc", "0.01", "", crate::policy::KIND_X402, "", "", None, Some(0))
+        let err = write_request_kind("USDC", "0xabc", "0.01", "", crate::policy::KIND_X402, "", "", None, Some(0), None)
             .expect_err("체인이 다르면 거절");
         assert!(err.contains("네트워크") || err.contains("network"), "{err}");
     }
@@ -994,6 +1009,7 @@ mod tests {
             from: "0xOne".into(),
             agent: None,
             lease: false,
+            approve_by: 0,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: PaymentRequest = serde_json::from_str(&json).unwrap();
@@ -1044,6 +1060,7 @@ mod tests {
             from: String::new(),
             agent: None,
             lease: false,
+            approve_by: 0,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("agent"), "{json}");
@@ -1148,6 +1165,7 @@ mod tests {
             from: String::new(),
             agent: None,
             lease: false,
+            approve_by: 0,
         };
         fs::write(path, serde_json::to_string(&r).unwrap()).unwrap();
     }

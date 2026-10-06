@@ -472,6 +472,16 @@ pub fn parse_settlement(b64: &str) -> Option<(String, bool)> {
     Some((tx, success))
 }
 
+/// 정산 증빙 헤더가 **명시적으로 실패**(`success:false`)를 말하나 — tx 칸이 비어 있어도 본다 (개발 76, 코덱스 1차 P1).
+/// `parse_settlement` 은 tx 가 없으면 None 이라 이 말을 놓친다. 못 읽는 헤더는 false(말한 게 없다).
+pub fn settlement_says_failed(b64: &str) -> bool {
+    B64.decode(b64.trim())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.get("success").and_then(Value::as_bool))
+        == Some(false)
+}
+
 /// 서명한 인가를 실은 재요청이 **응답 없이** 끝났을 때의 안내 (개발 66). 서버에 닿았는지 모른다 —
 /// 닿았다면 페이실리테이터가 정산했을 수 있다. 「다시 부르면 새 인가가 하나 더 나간다」가 핵심이다.
 pub fn signed_unknown_notice(err: &str) -> String {
@@ -486,6 +496,18 @@ pub fn signed_unknown_notice(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 정산 증빙의 명시적 실패는 tx 칸이 비어도 읽는다(개발 76) — 못 읽는 헤더·성공·말 없음은 false.
+    #[test]
+    fn settlement_failure_is_read_without_tx() {
+        let enc = |j: &str| B64.encode(j);
+        assert!(settlement_says_failed(&enc(r#"{"success":false}"#)));
+        assert!(settlement_says_failed(&enc(r#"{"success":false,"transaction":"0x1"}"#)));
+        assert!(!settlement_says_failed(&enc(r#"{"success":true,"transaction":"0x1"}"#)));
+        assert!(!settlement_says_failed(&enc(r#"{"transaction":"0x1"}"#)));
+        assert!(!settlement_says_failed(""));
+        assert!(!settlement_says_failed("%%%"));
+    }
 
     /// V1 응답 본문 (Session 12 형태): 본문 JSON + base-sepolia + maxAmountRequired + 요구별 resource.
     fn sample_v1_body() -> &'static str {

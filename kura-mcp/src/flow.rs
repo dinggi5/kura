@@ -24,14 +24,15 @@ const RECEIPT_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// 영수증을 잡은 **뒤** 증거를 제출하는 데 남겨 둘 시간(초). seed 수명에서 이만큼을 더 뺀다 —
 /// 영수증이 45초 꽉 차서 나왔는데 제출 왕복 중에 만료되면 그것도 「돈만 나감」이다.
-const PROOF_TAIL_SECS: u64 = 20;
+/// 개발 76: 20 → 30 — 증거 제출 HTTP 상한(`http_client_no_redirect`, 30초)보다 짧으면 마지막 왕복이 만료를 넘을 수 있었다(코덱스 1차 P0).
+const PROOF_TAIL_SECS: u64 = 30;
 
 /// 승인 **뒤** GUI 가 거래를 채우고(nonce·가스·서명) 올리는 데 남겨 둘 시간(초) — seed 수명에서 이것도 뺀다
 /// (개발 68, 코덱스 1차). 빼지 않으면 마감 직전 승인 + 느린 RPC 에서 전송은 성공하고 증거를 낼 땐 seed 가
 /// 만료된다 = 돈만 나감. 값은 GUI `transfer.rs` `broadcast_via` 가 **성공으로 끝날 수 있는 가장 긴 길**이다:
 /// 채우기(`FILL_WAIT` 30) + 첫 제출(`SEND_WAIT` 30) + 되묻기(`LOOKUP_WAIT` 10) + 재제출(`SEND_WAIT` 30) = 100초.
 /// 개발 75 에 두 번 고쳤다 — 처음엔 채우기만(30), 1차 반영 땐 「되묻기·재제출은 불명으로 끝난다」며 60 으로 뒀는데
-/// 둘 다 `Ok(hash)` 를 돌려줄 수 있는 길이다(코덱스 2차 P0). 대가로 seed 300초 중 승인에 쓸 시간이 135초로 준다.
+/// 둘 다 `Ok(hash)` 를 돌려줄 수 있는 길이다(코덱스 2차 P0). 대가로 seed 300초 중 승인에 쓸 시간이 125초로 준다(개발 76 에 증거 꼬리 20→30).
 /// GUI 의 제출 줄(앞 송금을 기다리기)은 여기에 없다 — 이 결제는 줄을 기다리지 않는다(`broadcast_now`).
 const BROADCAST_TAIL_SECS: u64 = 100;
 
@@ -640,6 +641,8 @@ pub async fn run_x402(
             &nonce,
             agent,
             picked_chain,
+            // 승인 예산의 끝을 요청에 싣는다(개발 76) — 앱이 제출 직전에 다시 보고, 승인 창 카운트다운도 이걸 쓴다.
+            budget,
         )?
     } else {
         payment::write_x402_request(
@@ -689,11 +692,21 @@ pub async fn run_x402(
         Some(r) => r,
         // 아무것도 안 나갔다(요청은 await_result 가 거뒀다). 전송 중이었으면 여기가 아니라 "unknown" 이 온다.
         None => {
-            return Err(ts!(
-                "승인 시간 초과(5분). 사용자가 응답하지 않았어요.",
-                "Approval timed out after 5 minutes — the user didn't respond."
-            )
-            .into());
+            // 기다린 시간을 그대로 말한다(개발 76) — seed 모드는 5분보다 짧다.
+            let secs = approval_wait.as_secs();
+            return Err(if secs >= 60 && secs % 60 == 0 {
+                tf!(
+                    "승인 시간 초과({}분). 사용자가 응답하지 않았어요.",
+                    "Approval timed out after {} min — the user didn't respond.",
+                    secs / 60
+                )
+            } else {
+                tf!(
+                    "승인 시간 초과({}초). 사용자가 응답하지 않았어요.",
+                    "Approval timed out after {}s — the user didn't respond.",
+                    secs
+                )
+            });
         }
     };
     // 🔴 **「불명」은 갈래마다 뜻이 다르다** (개발 66).
@@ -1025,13 +1038,19 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
     // 실어 보내 GUI 내역을 가짜 "정산됨"으로 오염시키는 걸 막는다.
     // 직접 제출은 이 기록이 필요 없다 — 내역엔 이미 우리가 올린 전송이 tx 해시와 함께 "sent" 로
     // 남아 있다(GUI 가 송금과 같은 경로로 기록한다). 여긴 **서명만 한 결제**를 정산 tx 로 잇는 자리다.
-    let ok = (200..300).contains(&paid_status);
-    if ok && !settlement.is_empty() {
+    let http_ok = (200..300).contains(&paid_status);
+    if http_ok && !settlement.is_empty() {
         if let (Some(payment), Some((tx, success))) = (&signed, x402::parse_settlement(&settlement))
         {
             let _ = payment::record_settlement(&payment.authorization.nonce, &tx, success);
         }
     }
+
+    // 🔴 서명 갈래에서 2xx 인데 정산 증빙이 `success:false` 라고 말하면 「정산 성공」이 아니다(개발 76, 코덱스 1차 P1) —
+    // 예전엔 HTTP 2xx 만 보고 `payment:"confirmed"` 로 말했고, 같은 응답을 GUI 내역은 「정산 실패」로 적었다. 서명은 서버 손에
+    // 있으니 나중에 정산될 수도 있다 → `ok=false` 로 두면 `payment_state` 가 「모름」으로 말한다. 직접 제출은 돈이 이미
+    // 체인에 있어(영수증 성공) 서버의 정산 말과 무관하다.
+    let ok = http_ok && !(direct_tx.is_empty() && x402::settlement_says_failed(&settlement));
 
     // 🔴 **`settlement_failed` 는 두 갈래에서 정반대를 뜻한다** (개발 64 opus 리뷰 P1).
     // 서명 갈래면 아무것도 안 나갔으니 재시도가 맞고, 직접 제출이면 **이미 나갔으니 재시도가

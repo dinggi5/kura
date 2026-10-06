@@ -165,7 +165,8 @@ export function WalletScreen({
     try {
       await invoke("set_locked", { locked: next });
       setLocked(next);
-      if (next) setMode("balance");
+      // 보내는 중·결과 화면은 남긴다(개발 76) — 잠금은 제출 직전에 백엔드가 본다. 카드를 내리면 결과만 사라진다.
+      if (next && !sendBusy.current) setMode("balance");
       notifySync();
     } catch {
       /* 토글 실패는 조용히 무시 */
@@ -223,7 +224,8 @@ export function WalletScreen({
   const loadLimits = useCallback(() => {
     invoke<Settings>("get_settings").then(setSettings).catch(() => {});
     invoke<boolean>("settings_file_broken").then(setSettingsBroken).catch(() => {});
-    invoke<SpendView>("get_today_spend").then(setSpend).catch(() => {});
+    // 장부를 못 읽으면 null(개발 76) — 「오늘 남은 한도」를 꽉 찬 값으로 보이지 않게(결제는 백엔드가 막는다).
+    invoke<SpendView>("get_today_spend").then(setSpend).catch(() => setSpend(null));
   }, []);
 
   useEffect(() => {
@@ -235,9 +237,20 @@ export function WalletScreen({
   // 다른 창(개발 75)에서 네트워크·계정을 바꿨을 때 보내기 카드는 **스스로** 닫는다(SendCard `seen`) — 보내는 중이면
   // 결과를 보여 주려고 남는다. 여기서 카드를 내리면 나가는 중인 송금의 결과 화면까지 사라진다(코덱스 2차 P1).
   const sendBusy = useRef(false);
+  // 같은 값의 상태판 — 화면 이동 버튼을 막는다(개발 76, 코덱스 1차 P0). 보내는 중·결과 화면에서 받기·내역·설정 등으로
+  // 가면 보내기 카드가 내려가 나가는 중인 송금의 해시·「확인 필요」가 사라졌다(다시 열면 새로 보낼 수 있었다).
+  const [sending, setSending] = useState(false);
   const onSendBusy = useCallback((b: boolean) => {
     sendBusy.current = b;
+    setSending(b);
   }, []);
+  /** 보내는 중이 아닐 때만 화면을 바꾼다. */
+  const unlessSending = useCallback(
+    (fn: () => void) => () => {
+      if (!sendBusy.current) fn();
+    },
+    [],
+  );
   const closeSend = useCallback(() => setMode("balance"), []);
 
   // 계정을 바꾸면 옛 계정의 잔액을 새 이름 아래 1초라도 보여주지 않는다 (개발 54) —
@@ -268,12 +281,19 @@ export function WalletScreen({
   // (사용액 spend 는 loadLimits 가 설정 저장 후 onClose 에서 갱신한다.)
   // 계정이 바뀌어도 같다 (개발 54) — 내역은 계정별 파일이다. refreshBalances 가 주소를 물고
   // 있어 주소가 바뀌면 이 효과도 다시 돈다.
+  // RPC 주소도 같다(개발 76, 코덱스 1차 P1) — 다른 창에서 RPC 만 다른 체인 것으로 바꾸면, 배경 갱신은 오류를 삼키고 옛 잔액을
+  // 그대로 보였다. 체인·RPC 가 바뀌면 옛 잔액을 먼저 지우고(새 조회가 멈춰도 남의 체인 값을 안 보이게) 오류가 보이는 쪽으로 다시 읽는다.
   const chainId = settings?.chain_id;
+  const rpcUrl = settings?.rpc_url;
+  const balanceSource = useRef<string | null>(null);
   useEffect(() => {
     if (chainId === undefined) return;
+    const source = `${chainId}|${rpcUrl ?? ""}`;
+    if (balanceSource.current !== null && balanceSource.current !== source) setBalances(null);
+    balanceSource.current = source;
     void refreshBalances();
     loadHistory();
-  }, [chainId, refreshBalances, loadHistory]);
+  }, [chainId, rpcUrl, refreshBalances, loadHistory]);
 
   // 입금 자동 반영(개발 35): 잔액이 시작·체인 전환·결제 직후·수동 ↻에서만 갱신돼서 외부
   // 입금은 재시작해야 보이던 문제(실사용 발견). 창이 보일 때만 30초 폴링 + 창이 다시
@@ -608,7 +628,7 @@ export function WalletScreen({
             >
               {chain.name}
             </span>
-            <HeaderIconButton onClick={() => setShowHelp(true)} label={t("도움말", "Help")}>
+            <HeaderIconButton onClick={unlessSending(() => setShowHelp(true))} label={t("도움말", "Help")}>
               <HelpCircle size={14} />
             </HeaderIconButton>
             <HeaderIconButton
@@ -623,22 +643,22 @@ export function WalletScreen({
               {locked ? <ShieldAlert size={14} /> : <ShieldCheck size={14} />}
             </HeaderIconButton>
             <HeaderIconButton
-              onClick={() => {
+              onClick={unlessSending(() => {
                 setHistoryPage(HISTORY_PAGE);
                 setShowHistory(true);
-              }}
+              })}
               label={t("거래 내역", "History")}
             >
               <History size={14} />
             </HeaderIconButton>
             <HeaderIconButton
-              onClick={() => setShowBackup(true)}
+              onClick={unlessSending(() => setShowBackup(true))}
               label={t("시드 백업", "Back up your words")}
               tone={backedUp ? "default" : "warn"}
             >
               <KeyRound size={14} />
             </HeaderIconButton>
-            <HeaderIconButton onClick={() => setShowSettings(true)} label={t("설정", "Settings")}>
+            <HeaderIconButton onClick={unlessSending(() => setShowSettings(true))} label={t("설정", "Settings")}>
               <SettingsIcon size={14} />
             </HeaderIconButton>
             {/* 창으로 열기(개발 75) — 팝오버에만. 큰 창에선 이미 창이다. */}
@@ -658,7 +678,7 @@ export function WalletScreen({
             connected={agent.connected}
             ready={ready}
             client={agent.client}
-            onClick={() => setShowConnect(true)}
+            onClick={unlessSending(() => setShowConnect(true))}
           />
         </div>
 
@@ -671,7 +691,7 @@ export function WalletScreen({
             onLock={lockSession}
           />
         )}
-        {!backedUp && <BackupNag onBackup={() => setShowBackup(true)} />}
+        {!backedUp && <BackupNag onBackup={unlessSending(() => setShowBackup(true))} />}
         {/* 설정 파일 못 읽음(개발 52) — 백업보다 아래, 업데이트보다 위. 돈은 안 걸렸지만
             「고른 RPC 가 안 쓰인다」는 프라이버시 사실이라 새 버전 안내보다 먼저다. */}
         {settingsBroken && <SettingsBrokenBanner />}
@@ -680,10 +700,10 @@ export function WalletScreen({
         {update.info && !update.bannerHidden && (
           <UpdateBanner
             version={update.info.version}
-            onOpen={() => {
+            onOpen={unlessSending(() => {
               update.hideBanner();
               setShowSettings(true);
-            }}
+            })}
             onHide={update.hideBanner}
           />
         )}
@@ -734,13 +754,14 @@ export function WalletScreen({
           label={t("받기", "Receive")}
           onClick={() => setMode(mode === "receive" ? "balance" : "receive")}
           active={mode === "receive"}
+          disabled={sending}
         />
         <ActionButton
           icon={<ArrowUpRight size={16} />}
           label={t("보내기", "Send")}
           onClick={() => setMode(mode === "send" ? "balance" : "send")}
           active={mode === "send"}
-          disabled={locked}
+          disabled={locked || sending}
         />
       </div>
 

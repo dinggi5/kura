@@ -135,6 +135,8 @@ export type PaymentRequest = {
   /** ERC-8004 대조 결과 — AI 가 에이전트 번호를 함께 준 x402 결제에만 붙는다.
    *  없으면 승인 창은 예전 그대로다(말할 사실이 있을 때만 한 줄이 붙는다). */
   agent?: AgentTrust;
+  /** 이 시각(유닉스 초)이 지나면 앱이 제출하지 않는다 (개발 76) — seed 모드 x402 직접 제출만. 0·없음 = 만든 시각 + 5분. */
+  approve_by?: number;
 };
 
 export type AgentStatus = { connected: boolean; client: string };
