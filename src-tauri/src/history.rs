@@ -201,6 +201,9 @@ pub(crate) fn log_pending(token: &str, to: &str, amount: &str, hash: &str) -> Op
 /// 적었으면 그쪽이 체인에서 본 사실이라 덮지 않는다. 줄을 못 찾으면(깨진 내역을 치웠다 등) 아무것도 안 한다 —
 /// 해시가 실린 줄이 어딘가 남아 있거나, 없으면 새로 적는다.
 pub(crate) fn finish_pending(id: &str, token: &str, to: &str, amount: &str, status: &str, detail: &str) {
+    // 메모리 사본(10분 중복 검사)도 같이 고친다(코덱스 2차 P2) — 확실한 실패인데 「확인 필요」로 남아 있으면 같은 결제를
+    // 10분 동안 사람에게 돌린다(돈은 안 나갔고 한도도 돌려줬는데).
+    settle_recent(id, status);
     let _g = history_guard();
     let Ok(path) = history_path() else {
         return;
@@ -228,10 +231,19 @@ fn finish_at(path: &PathBuf, id: &str, status: &str, detail: &str) -> Result<boo
     write_json(path.clone(), &list).map(|_| true)
 }
 
-/// 그 id 의 줄이 본 파일에 **다른 상태로** 있나(체인 확인이 먼저 적음) — 그러면 새 줄을 보태지 않는다.
+/// 그 id 의 줄이 이미 어딘가 있나 — 본 파일에 **다른 상태로**(체인 확인이 먼저 적음) 있거나, 그새 넘친 기록에 밀려 **보관 파일**로
+/// 갔으면 새 줄을 보태지 않는다(코덱스 2차 P1). 새 id 로 보태면 같은 tx 가 두 줄이 되고, 되돌려짐이면 체인 확인이 두 줄에
+/// 각각 한도를 돌려줬다(`refund_once` 는 기록 id 로 묶는다). 보관 파일의 「확인 필요」 줄은 체인 확인이 해시로 결말을 찾는다.
+/// 보관 파일을 못 읽으면 「있다」로 본다 — 두 번 환불보다 결말이 늦는 쪽이 낫다.
 fn pending_settled_elsewhere(path: &PathBuf, id: &str) -> bool {
     let _g = history_guard();
-    read_history_at(path).iter().any(|e| e.id == id)
+    if read_history_at(path).iter().any(|e| e.id == id) {
+        return true;
+    }
+    match read_archive_rows(&crate::policy::history_archive_path(path)) {
+        Ok(rows) => rows.iter().any(|(_, e)| e.as_ref().is_some_and(|e| e.id == id)),
+        Err(_) => true,
+    }
 }
 
 /// 한 줄을 적고 그 id 를 돌려준다(저장 실패면 None).
@@ -277,6 +289,18 @@ fn remember_recent(entry: &HistoryEntry) {
     let now = now_secs();
     list.retain(|(_, e)| now.saturating_sub(e.ts) <= REPEAT_WINDOW_SECS);
     list.push((chain, entry.clone()));
+}
+
+/// `finish_pending` 이 부른다 — 먼저 적은 「확인 필요」의 메모리 사본을 결말로. 나간 게 아니면 뺀다.
+fn settle_recent(id: &str, status: &str) {
+    let mut list = RECENT_PAID.lock().unwrap_or_else(|e| e.into_inner());
+    if counts_as_paid(status) {
+        for (_, e) in list.iter_mut().filter(|(_, e)| e.id == id) {
+            e.status = status.into();
+        }
+    } else {
+        list.retain(|(_, e)| e.id != id);
+    }
 }
 
 fn recent_in_memory() -> Vec<HistoryEntry> {
@@ -884,6 +908,15 @@ mod tests {
         assert_eq!(read_history_at(&hot)[0].status, "sent");
         // 없는 id 도 false.
         assert!(!finish_at(&hot, "nope", "sent", "h").unwrap());
+        // 넘쳐 보관 파일로 간 줄은 「이미 있음」 — 새 줄을 안 보탠다(코덱스 2차 P1).
+        let mut q = entry("0xq");
+        q.status = "unknown".into();
+        q.id = "j2".into();
+        record_at(&hot, q, 1).unwrap();
+        record_at(&hot, entry("newer"), 1).unwrap();
+        assert!(!finish_at(&hot, "j2", "failed", "x").unwrap());
+        assert!(pending_settled_elsewhere(&hot, "j2"));
+        assert!(!pending_settled_elsewhere(&hot, "never"));
         let _ = fs::remove_dir_all(hot.parent().unwrap());
     }
 

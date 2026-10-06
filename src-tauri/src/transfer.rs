@@ -411,12 +411,15 @@ impl Journal {
         }
     }
 
-    fn signed(&self, hash: &str) {
+    /// 먼저 적기 — 적었으면 true. false 면 호출자는 제출하지 않는다.
+    fn signed(&self, hash: &str) -> bool {
         if !self.record {
-            return;
+            return true;
         }
         let id = crate::history::log_pending(&self.token, &self.to, &self.amt, hash);
+        let ok = id.is_some();
         *self.id.lock().unwrap_or_else(|e| e.into_inner()) = id;
+        ok
     }
 
     fn finish(&self, status: &str, detail: &str) {
@@ -483,7 +486,7 @@ async fn broadcast_via(
     tx: TransactionRequest,
     token: &str,
     locked: fn() -> bool,
-    on_signed: impl FnOnce(&str),
+    on_signed: impl FnOnce(&str) -> bool,
 ) -> Result<String, SendError> {
     use alloy::network::eip2718::Encodable2718;
 
@@ -538,8 +541,21 @@ async fn broadcast_via(
     if locked() {
         return Err(locked_before_submit());
     }
-    // 제출 직전 — 이 뒤로는 「나갔을 수 있다」. 해시를 먼저 내역에 남긴다(`Journal`, 개발 76).
-    on_signed(&hash);
+    // 제출 직전 — 이 뒤로는 「나갔을 수 있다」. 해시를 먼저 내역에 남긴다(`Journal`, 개발 76). 못 남겼으면 내지 않는다
+    // (코덱스 2차 P1) — 적지 못한 채 내면 앱이 꺼질 때 해시가 사라지는 바로 그 구멍이 남는다.
+    if !on_signed(&hash) {
+        return Err(SendError::Failed(
+            ts!(
+                "내역에 기록하지 못해 보내지 않았어요. 아무것도 보내지 않았습니다 — 디스크 공간을 확인하세요.",
+                "Couldn't write to the history, so nothing was sent. Check your disk space."
+            )
+            .into(),
+        ));
+    }
+    // 기록(파일 잠금·디스크)을 기다리는 사이 켠 긴급 잠금도 첫 제출을 막는다(코덱스 2차 P1).
+    if locked() {
+        return Err(locked_before_submit());
+    }
 
     // ② 제출.
     let why = match tokio::time::timeout(SEND_WAIT, provider.send_raw_transaction(&raw)).await {
@@ -1236,7 +1252,7 @@ mod tests {
     async fn lost_reply_then_already_known_is_sent() {
         let f = fake_rpc(vec![Act::Drop, Act::RpcErr("already known")]);
         let signer = PrivateKeySigner::random();
-        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| {})
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| true)
             .await
             .expect("already known 은 받힌 것이다");
         assert_same_raw(&f, &hash, 2);
@@ -1247,7 +1263,7 @@ mod tests {
     async fn lock_turned_on_before_submit_sends_nothing() {
         let f = fake_rpc(vec![Act::Ok]);
         let signer = PrivateKeySigner::random();
-        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || true, |_| {}).await {
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || true, |_| true).await {
             Err(SendError::Failed(_)) => {}
             other => panic!("확실한 실패여야 한다: {other:?}"),
         }
@@ -1262,7 +1278,8 @@ mod tests {
         // 제출 전에 해시를 넘겨받는다(개발 76 `Journal`) — 응답이 영영 안 와도 내역엔 이 해시가 먼저 남는다.
         let journaled = std::sync::Mutex::new(None::<String>);
         let sent = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |h| {
-            *journaled.lock().unwrap() = Some(h.to_string())
+            *journaled.lock().unwrap() = Some(h.to_string());
+            true
         })
         .await;
         match sent {
@@ -1280,28 +1297,45 @@ mod tests {
     async fn gateway_error_then_ok_is_sent() {
         let f = fake_rpc(vec![Act::Http(502), Act::Ok]);
         let signer = PrivateKeySigner::random();
-        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| {})
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| true)
             .await
             .unwrap();
         assert_same_raw(&f, &hash, 2);
     }
 
     /// 🔴 개발 73(코덱스 1차 P1): 첫 제출이 모름(5xx)이고 그 사이 긴급 잠금이 켜지면 **다시 내지 않는다** — 결말은 불명.
-    /// 잠금 확인은 첫 제출 직전 한 번(풀림) → 재제출 직전 한 번(잠김) 순서로 불린다.
+    /// 잠금 확인은 첫 제출 전 두 번(내역에 먼저 적기 앞뒤, 개발 76 — 풀림) → 재제출 직전 한 번(잠김) 순서로 불린다.
     #[tokio::test]
     async fn lock_between_submits_stops_the_resubmit() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static CALLS: AtomicUsize = AtomicUsize::new(0);
         fn locked_after_first() -> bool {
-            CALLS.fetch_add(1, Ordering::SeqCst) >= 1
+            CALLS.fetch_add(1, Ordering::SeqCst) >= 2
         }
         let f = fake_rpc(vec![Act::Http(502), Act::Ok]);
         let signer = PrivateKeySigner::random();
-        match broadcast_via(&f.url, &signer, native_tx(), "USDC", locked_after_first, |_| {}).await {
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC", locked_after_first, |_| true).await {
             Err(SendError::Unknown { .. }) => {}
             other => panic!("불명이어야 한다: {other:?}"),
         }
         assert_eq!(f.raws.lock().unwrap().len(), 1, "재제출하면 안 된다");
+    }
+
+    /// 🔴 개발 76(코덱스 2차 P1): 내역에 먼저 적는 사이 켠 긴급 잠금 → 첫 제출도 안 한다. 못 적으면 역시 안 낸다.
+    #[tokio::test]
+    async fn lock_during_journal_or_journal_failure_sends_nothing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn locked_after_journal() -> bool {
+            CALLS.fetch_add(1, Ordering::SeqCst) >= 1
+        }
+        let f = fake_rpc(vec![Act::Ok]);
+        let signer = PrivateKeySigner::random();
+        let r = broadcast_via(&f.url, &signer, native_tx(), "USDC", locked_after_journal, |_| true).await;
+        assert!(matches!(r, Err(SendError::Failed(_))), "{r:?}");
+        let r = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| false).await;
+        assert!(matches!(r, Err(SendError::Failed(_))), "{r:?}");
+        assert_eq!(f.raws.lock().unwrap().len(), 0, "제출하면 안 된다");
     }
 
     /// 노드가 읽고 거절 → 확실한 실패, **다시 내지 않는다**(제출 1회).
@@ -1309,7 +1343,7 @@ mod tests {
     async fn node_rejection_is_final_and_not_resent() {
         let f = fake_rpc(vec![Act::RpcErr("nonce too low")]);
         let signer = PrivateKeySigner::random();
-        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| {}).await {
+        match broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| true).await {
             Err(SendError::Failed(_)) => {}
             other => panic!("확실한 실패여야 한다: {other:?}"),
         }
@@ -1327,7 +1361,7 @@ mod tests {
         let base = crate::chain::BASE_SEPOLIA.chain_id;
         with_pinned_chain(
             base,
-            broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| {}),
+            broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| true),
         )
         .await
         .unwrap();
@@ -1341,7 +1375,7 @@ mod tests {
     async fn plain_success_sends_once() {
         let f = fake_rpc(vec![Act::Ok]);
         let signer = PrivateKeySigner::random();
-        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| {})
+        let hash = broadcast_via(&f.url, &signer, native_tx(), "USDC", || false, |_| true)
             .await
             .unwrap();
         assert_same_raw(&f, &hash, 1);

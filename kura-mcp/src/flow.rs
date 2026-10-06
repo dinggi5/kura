@@ -624,6 +624,15 @@ pub async fn run_x402(
         )
         .into());
     }
+    // 마감(approve_by)을 싣는 요청이면 그걸 지키는 앱이어야 한다(개발 76, 코덱스 2차 P1) — 0.4.x 앱은 직접 제출은 알아도 마감을
+    // 무시해, 마감 직전 승인이 꼬리를 다 먹고 증거가 만료 뒤에 닿을 수 있다.
+    if direct && budget.is_some() && !payment::app_supports(crate::policy::CAP_APPROVE_BY) {
+        return Err(ts!(
+            "켜져 있는 지갑 앱이 이 결제의 유효시간을 지킬 줄 몰라요. 앱을 업데이트한 뒤 다시 시도하세요. 아무것도 결제하지 않았습니다.",
+            "The running wallet app can't enforce this payment's time limit. Update the app and try again. Nothing was paid."
+        )
+        .into());
+    }
     if direct && !arc_direct::published_nonce_ok(req.published_nonce.as_deref(), &nonce) {
         return Err(ts!(
             "서버가 게시한 결제 번호가 우리 계산과 달라요 — 결제하지 않았습니다.",

@@ -533,6 +533,11 @@ pub const KIND_X402: &str = "x402";
 /// x402 인가를 지갑이 직접 체인에 올린다(개발 64, Arc).
 pub const KIND_X402_DIRECT: &str = "x402-direct";
 
+/// 결제 방식이 아니라 **능력** 표식 (개발 76, 코덱스 2차 P1) — 앱이 요청의 `approve_by`(제출 마감)를 보고 지났으면 안 낸다.
+/// 하트비트 `kinds` 목록에 같이 싣는다(새 칸을 만들면 옛 MCP·옛 앱 조합이 하나 더 생긴다). 이게 없는 앱(0.4.x)은 x402-direct 를
+/// 알지만 마감을 무시한다 → MCP 는 마감이 있는 요청을 그 앱에 보내지 않는다.
+pub const CAP_APPROVE_BY: &str = "approve-by";
+
 /// 하트비트에 `kinds` 가 없던 시절의 앱이 할 수 있던 것 — 송금과 x402 서명 둘뿐.
 pub fn kinds_legacy() -> Vec<String> {
     vec![KIND_TRANSFER.into(), KIND_X402.into()]
@@ -545,6 +550,7 @@ pub fn kinds_supported() -> Vec<String> {
         KIND_TRANSFER.into(),
         KIND_X402.into(),
         KIND_X402_DIRECT.into(),
+        CAP_APPROVE_BY.into(),
     ]
 }
 
