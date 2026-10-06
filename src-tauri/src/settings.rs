@@ -477,6 +477,60 @@ pub(crate) fn set_settings(mut settings: Settings) -> Result<(), String> {
     save_settings(&settings)
 }
 
+/// 설정 화면의 저장 — **이 창에서 바꾼 칸만** 지금 저장된 값 위에 얹는다 (개발 75, 코덱스 1·2차 P1).
+///
+/// 창이 둘이면 두 설정 화면이 같은 파일을 고친다. 폼 전체를 보내면(예전 `set_settings`) 손대지 않은 칸이
+/// 그 창이 열릴 때의 옛 값으로 되돌아갔다 — 다른 창에서 끈 자율 결제가 되살아나는 식. 프론트에서 읽고 합쳐
+/// 보내는 것도 안 된다(두 창이 같은 옛 값을 읽은 뒤 차례로 쓰면 같은 일이 난다). 합치기를 **여기 한 곳**에서
+/// 하면 동기 커맨드라 메인 스레드에서 한 줄로 선다.
+///
+/// `base_chain_id` = 폼을 채울 때의 체인. 네트워크 칸을 안 바꿨는데 그 사이 다른 창이 체인을 바꿨으면 거절한다 —
+/// 테스트넷을 보며 고친 한도가 메인넷에 조용히 얹히면 안 된다(메인넷 경고도 못 봤다).
+/// 파일을 못 읽는 상태(깨짐)면 예전처럼 폼 전체를 쓴다 — 그게 깨진 설정을 푸는 길이다(개발 52).
+#[tauri::command]
+pub(crate) fn save_settings_edit(
+    form: Settings,
+    changed: Vec<String>,
+    base_chain_id: u64,
+) -> Result<(), String> {
+    let Some(cur) = read_settings_for_update() else {
+        return set_settings(form);
+    };
+    let merged = merge_edit(&cur, &form, &changed, base_chain_id)?;
+    set_settings(merged)
+}
+
+/// `save_settings_edit` 의 판단만 (IO 없이 테스트하려고).
+fn merge_edit(
+    cur: &Settings,
+    form: &Settings,
+    changed: &[String],
+    base_chain_id: u64,
+) -> Result<Settings, String> {
+    if !changed.iter().any(|k| k == "chain_id") && cur.chain_id != base_chain_id {
+        return Err(ts!(
+            "설정을 연 뒤 다른 창에서 네트워크가 바뀌었어요. 저장하지 않았습니다 — 설정을 닫았다 다시 열어 주세요.",
+            "The network was changed in another window after you opened Settings. Nothing was saved — close and reopen Settings."
+        )
+        .into());
+    }
+    let bad = || ts!("설정을 합치지 못했어요", "Couldn't merge the settings").to_string();
+    let mut out = serde_json::to_value(cur).map_err(|_| bad())?;
+    let src = serde_json::to_value(form).map_err(|_| bad())?;
+    let (Some(o), Some(f)) = (out.as_object_mut(), src.as_object()) else {
+        return Err(bad());
+    };
+    for k in changed {
+        // 모르는 이름은 버린다 — 프론트가 엉뚱한 키를 보내도 파일에 새 칸이 생기지 않게.
+        if o.contains_key(k) {
+            if let Some(v) = f.get(k) {
+                o.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    serde_json::from_value(out).map_err(|_| bad())
+}
+
 /// 앱이 관리하는 필드(자동 시작 희망값·자동 업데이트 확인·화면 언어)를 `from` 에서 가져온다.
 fn preserve_managed(settings: &mut Settings, from: &Settings) {
     settings.autostart = from.autostart;
@@ -487,6 +541,32 @@ fn preserve_managed(settings: &mut Settings, from: &Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 개발 75 — 바꾼 칸만 얹고, 안 바꾼 칸은 다른 창이 저장한 값을 지킨다.
+    #[test]
+    fn edit_merge_keeps_untouched_fields() {
+        // 다른 창이 자율 결제를 껐다.
+        let cur = Settings { auto_approve_usdc: "0".into(), ..Default::default() };
+        // 이 창은 옛 값(켜짐)을 들고 있고, 바꾼 건 일일 한도뿐.
+        let form = Settings { auto_approve_usdc: "3".into(), daily_usdc: "7".into(), ..Default::default() };
+        let out = merge_edit(&cur, &form, &["daily_usdc".into()], cur.chain_id).unwrap();
+        assert_eq!(out.daily_usdc, "7");
+        assert_eq!(out.auto_approve_usdc, "0", "손대지 않은 칸이 옛 값으로 되돌아가면 안 된다");
+        // 모르는 키는 무시한다.
+        assert!(merge_edit(&cur, &form, &["nope".into()], cur.chain_id).is_ok());
+    }
+
+    // 개발 75 — 네트워크를 안 바꿨는데 그 사이 체인이 바뀌었으면 거절, 바꿨으면 그 선택을 따른다.
+    #[test]
+    fn edit_merge_rejects_chain_drift() {
+        let cur = Settings::default();
+        let form = Settings::default();
+        let other = cur.chain_id + 1;
+        assert!(merge_edit(&cur, &form, &["daily_usdc".into()], other).is_err());
+        let pick = Settings { chain_id: 84532, ..Default::default() };
+        let out = merge_edit(&cur, &pick, &["chain_id".into()], other).unwrap();
+        assert_eq!(out.chain_id, 84532);
+    }
 
     /// ERC-8004 조회는 신규·기존 파일 모두 켜짐이어야 한다 (개발 47).
     /// 기존 파일(필드 없음)까지 켜짐인 이유: 새 바깥 상대가 생기는 게 아니라 이미 쓰던 RPC 에

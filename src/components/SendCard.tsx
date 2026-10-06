@@ -1,6 +1,6 @@
 // 보내기 카드 — 입력 → 비번 승인(도장 찍듯 확정) → 전송 → 완료.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { motion } from "framer-motion";
@@ -30,6 +30,7 @@ export function SendCard({
   settings,
   spend,
   account,
+  onBusy,
   onClose,
   onSent,
 }: {
@@ -40,14 +41,30 @@ export function SendCard({
   /** 이 화면이 보고 있는 계정 번호 — 체인과 함께 보내기 명령에 실어, 그 사이 다른 창에서 바뀌었으면
    *  백엔드가 거절한다(개발 75, transfer.rs `ensure_seen_target`). */
   account: number;
+  /** 보내는 중·결과 화면인가 — 부모가 계정 전환 때 이 카드를 내리지 않게(개발 75). */
+  onBusy: (busy: boolean) => void;
   onClose: () => void;
   onSent: () => void;
 }) {
   const chain = useChain();
+  // 🔴 이 카드가 열릴 때의 체인·계정 (개발 75, 코덱스 2차 P1). 보내기 명령엔 **지금** 값이 아니라 이 값을 싣는다 —
+  // 다른 창에서 네트워크를 바꾸면 useChain() 은 새 체인을 돌려주는데, 그걸 실으면 백엔드 대조(ensure_seen_target)를
+  // 통과해 테스트넷에서 입력한 금액이 메인넷으로 나간다. 바뀌었으면: 입력·확인 중이면 카드를 닫고, 보내는 중·결과
+  // 화면이면 그대로 둔다(결과를 못 보면 다시 보낸다 — 이미 연 값으로 고정돼 나가는 중이다).
+  const seen = useRef({ chainId: chain.id, account });
   const [step, setStep] = useState<SendStep>("form");
   // 확인·보내는 중·결과 화면에선 다른 창의 언어 변경이 이 창을 다시 읽지 않게(개발 75) — 보내는 중에 다시 읽으면
   // 결과(해시·「불명」 경고)를 못 보고 다시 보내게 된다.
   useEffect(() => (step === "form" ? undefined : holdLangReload()), [step]);
+  const busy = step === "sending" || step === "done";
+  useEffect(() => {
+    onBusy(busy);
+  }, [busy, onBusy]);
+  useEffect(() => () => onBusy(false), [onBusy]);
+  useEffect(() => {
+    if (busy) return;
+    if (chain.id !== seen.current.chainId || account !== seen.current.account) onClose();
+  }, [chain.id, account, busy, onClose]);
   const [token, setToken] = useState<SendToken>("USDC");
   const [to, setTo] = useState("");
   const [amount, setAmount] = useState("");
@@ -119,8 +136,8 @@ export function SendCard({
         password: pw,
         to: to.trim(),
         [cfg.argKey]: amount.trim(),
-        chainId: chain.id,
-        account,
+        chainId: seen.current.chainId,
+        account: seen.current.account,
       });
       setTxHash(hash);
       setPw(""); // 전송 성공 후 비번 즉시 비움 (완료 화면 동안 메모리에 남기지 않게)

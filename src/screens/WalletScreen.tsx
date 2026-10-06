@@ -232,6 +232,14 @@ export function WalletScreen({
     invoke<boolean>("is_locked").then(setLocked).catch(() => {});
   }, [refreshBalances, loadLimits]);
 
+  // 다른 창(개발 75)에서 네트워크·계정을 바꿨을 때 보내기 카드는 **스스로** 닫는다(SendCard `seen`) — 보내는 중이면
+  // 결과를 보여 주려고 남는다. 여기서 카드를 내리면 나가는 중인 송금의 결과 화면까지 사라진다(코덱스 2차 P1).
+  const sendBusy = useRef(false);
+  const onSendBusy = useCallback((b: boolean) => {
+    sendBusy.current = b;
+  }, []);
+  const closeSend = useCallback(() => setMode("balance"), []);
+
   // 계정을 바꾸면 옛 계정의 잔액을 새 이름 아래 1초라도 보여주지 않는다 (개발 54) —
   // 새 조회가 올 때까지 「—」. 첫 마운트엔 어차피 null 이라 무해하다. 받기/보내기 카드도
   // 옛 계정 기준이었으니 잔액 카드로 돌아온다. 내역도 같다(코덱스 개발54 2차 P2): 계정별
@@ -240,7 +248,8 @@ export function WalletScreen({
     setBalances(null);
     setBalanceError(null);
     setHistory(null);
-    setMode("balance");
+    // 보내는 중인 카드는 남긴다(위 sendBusy) — 결과를 못 보면 사람은 다시 보낸다.
+    if (!sendBusy.current) setMode("balance");
   }, [address]);
 
   // 시작 시 업데이트 자동 확인 (개발 31). 설정이 로드된 뒤 **실행당 한 번만** 돈다 —
@@ -265,12 +274,6 @@ export function WalletScreen({
     void refreshBalances();
     loadHistory();
   }, [chainId, refreshBalances, loadHistory]);
-  // 다른 창(개발 75)에서 네트워크를 바꾸면 이 창의 받기·보내기 카드는 옛 체인 기준이다 — 잔액 카드로 돌린다.
-  // (보내기 확인 화면이 남아 있어도 백엔드가 체인을 대조해 거절하지만, 옛 체인 주소·금액을 보여 줄 이유가 없다.)
-  // 첫 로드(undefined → 값)에서도 돌지만 그땐 어차피 잔액 카드다.
-  useEffect(() => {
-    setMode("balance");
-  }, [chainId]);
 
   // 입금 자동 반영(개발 35): 잔액이 시작·체인 전환·결제 직후·수동 ↻에서만 갱신돼서 외부
   // 입금은 재시작해야 보이던 문제(실사용 발견). 창이 보일 때만 30초 폴링 + 창이 다시
@@ -711,7 +714,8 @@ export function WalletScreen({
               settings={settings}
               spend={spend}
               account={active}
-              onClose={() => setMode("balance")}
+              onBusy={onSendBusy}
+              onClose={closeSend}
               onSent={() => {
                 setMode("balance");
                 void refreshBalances();

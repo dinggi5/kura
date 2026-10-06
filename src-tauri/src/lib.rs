@@ -219,6 +219,7 @@ pub fn run() {
             settings::get_settings,
             settings::settings_file_broken,
             settings::set_settings,
+            settings::save_settings_edit,
             limits::get_today_spend,
             lock::is_locked,
             lock::set_locked,

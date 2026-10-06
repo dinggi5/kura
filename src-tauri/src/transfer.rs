@@ -359,8 +359,31 @@ pub(crate) async fn broadcast(
     // 줄을 서는데, 사람 손으로 내는 송금이라 기다림(최대 한 건의 채우기+제출)은 문제가 안 된다.
     // (첫 제출이 「불명」으로 끝난 갈래는 노드가 그 tx 를 모를 수 있어 여전히 같은 번호가 나올 수 있다 — 그땐
     // 둘 중 하나만 들어가고, 불명 쪽은 체인 확인(confirm.rs)이 결말을 고친다.)
-    static SUBMIT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _turn = SUBMIT.lock().await;
+    broadcast_via(&effective_rpc(), signer, tx, token, read_lock).await
+}
+
+/// 제출 줄 — `broadcast` 주석 참고.
+static SUBMIT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// `broadcast` 와 같되 **줄을 기다리지 않는다** — 앞에 다른 제출이 있으면 아무것도 안 하고 확실한 실패로 끝낸다
+/// (개발 75, 코덱스 2차 P0). x402 직접 제출이 쓴다: 그 결제엔 seed 만료가 있고, MCP 는 승인 뒤 채우기·제출·영수증·증거
+/// 시간만 남겨 둔다(kura-mcp `BROADCAST_TAIL_SECS`). 줄에서 기다린 시간은 그 계산에 없다 — 기다렸다 나가면 돈은
+/// 나가고 증거는 만료 뒤에 도착할 수 있다. 서명 전에 멈추니 「안 나감」이 확실하고, AI 는 새 챌린지로 다시 하면 된다.
+pub(crate) async fn broadcast_now(
+    signer: &PrivateKeySigner,
+    tx: TransactionRequest,
+    token: &str,
+) -> Result<String, SendError> {
+    let Ok(_turn) = SUBMIT.try_lock() else {
+        return Err(SendError::Failed(
+            ts!(
+                "다른 송금이 나가는 중이라 이 결제는 내지 않았어요. 아무것도 보내지 않았습니다 — 잠시 뒤 다시 시도하세요.",
+                "Another transfer is going out, so this payment wasn't sent. Nothing was sent — try again shortly."
+            )
+            .into(),
+        ));
+    };
     broadcast_via(&effective_rpc(), signer, tx, token, read_lock).await
 }
 

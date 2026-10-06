@@ -295,7 +295,8 @@ async fn do_x402_direct_inner(
     nonce_hex: String,
 ) -> Result<String, SendError> {
     use crate::chain::IEIP3009;
-    use crate::transfer::{broadcast, settle_broadcast};
+    // 줄을 기다리지 않는 제출(개발 75) — seed 만료가 있는 결제라 기다린 시간이 MCP 예산 밖이다(transfer.rs `broadcast_now`).
+    use crate::transfer::{broadcast_now, settle_broadcast};
     use alloy::network::TransactionBuilder;
     use alloy::rpc::types::TransactionRequest;
     use alloy::sol_types::SolCall;
@@ -402,7 +403,7 @@ async fn do_x402_direct_inner(
     // "signed" 와 다르다. 이건 이미 나간 전송이다). 받힘·실패·불명의 내역·한도 반영은 송금과
     // **같은 함수**가 한다(개발 66).
     settle_broadcast(
-        Box::pin(broadcast(signer, tx, "USDC")).await,
+        Box::pin(broadcast_now(signer, tx, "USDC")).await,
         "USDC",
         to,
         amt,

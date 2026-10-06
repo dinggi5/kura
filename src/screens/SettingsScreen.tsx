@@ -205,18 +205,15 @@ export function SettingsScreen({
     setBusy(true);
     setError(null);
     try {
-      // 바꾼 칸만 지금 저장된 값 위에 얹는다. 지금 값을 못 읽으면 폼 전체로(예전 동작) — 저장을 막는 것보단 낫다.
-      let merged: Settings = s;
+      // 바꾼 칸만 보낸다 — 합치기는 백엔드가 한 줄로 서서 한다(settings.rs `save_settings_edit`).
+      // 폼을 채운 원본이 없으면(있을 수 없지만) 전부 바꾼 것으로 — 예전 동작.
       const from = base.current;
-      const latest = await invoke<Settings>("get_settings").catch(() => null);
-      if (from && latest) {
-        const patch: Partial<Settings> = {};
-        for (const k of Object.keys(s) as (keyof Settings)[]) {
-          if (s[k] !== from[k]) (patch as Record<string, unknown>)[k] = s[k];
-        }
-        merged = { ...latest, ...patch };
-      }
-      await invoke("set_settings", { settings: merged });
+      const changed = (Object.keys(s) as (keyof Settings)[]).filter((k) => !from || s[k] !== from[k]);
+      await invoke("save_settings_edit", {
+        form: s,
+        changed,
+        baseChainId: from?.chain_id ?? s.chain_id,
+      });
       if (closed.current) return; // 저장 도중 닫혔으면 늦은 setState·자동 닫기 타이머 생성을 막는다
       setSaved(true);
       setDirty(false);
