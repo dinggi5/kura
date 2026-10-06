@@ -1,4 +1,4 @@
-# Kura (蔵 — 보물을 지키는 곳간)
+# Kura
 
 **AI 에이전트를 위한 로컬 EVM 지갑 — Base · Arc(Circle).**
 Mac에서 Claude 같은 AI가 인터넷 결제(x402)를 할 때, 사람이 비밀번호로 승인하는 지갑이에요.
