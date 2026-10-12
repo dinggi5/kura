@@ -26,7 +26,7 @@ RPC로 잔액을 조회하며, 결제는 GUI 앱에 "요청"만 한다. **비밀
 | USDC·가스 잔액 | `get_balances` | `kura balance` | 불필요 |
 | 거래 내역 | `get_history` | `kura history [--limit N]` | 불필요 |
 | 송금 요청 | `request_payment` | `kura pay <주소> <금액> [--token USDC\|ETH] [--memo "사유"] [--agent N]` | **GUI 승인** |
-| x402 유료 리소스 | `x402_fetch` | `kura fetch <URL> [--memo "사유"]` | **GUI 승인** |
+| x402 유료 리소스 | `x402_fetch` (method·headers·body 선택) | `kura fetch <URL> [--method POST] [--data '{...}'] [--memo "사유"]` | **GUI 승인** |
 | 결제 증거 다시 내기 | `x402_resubmit` | (CLI 없음) | 불필요(새 결제 없음) |
 | 에이전트 신원 조회 | `lookup_agent` | (CLI 없음 — `pay`/`fetch` 의 `--agent N` 으로 대조) | 불필요 |
 
@@ -53,6 +53,7 @@ kura balance --json                    # 스크립트용 JSON (MCP 와 동일 �
 kura pay 0xRecipient... 1.5 --memo "데이터 API"
 kura fetch https://example.com/paid --memo "리포트 1건"
 kura fetch https://example.com/paid --agent 1   # ERC-8004 번호를 함께 넘겨 승인 창에서 대조
+kura fetch https://api.exa.ai/search --method POST --data '{"query":"x402"}'   # POST + JSON — 결제 재요청에도 같은 body
 kura pay 0xRecipient... 1.5 --agent 1          # 송금도 마찬가지 — 받는 주소가 그 에이전트의
                                                # 등록 지갑과 **다르면** 승인 창에 경고가 뜬다
                                                # (일치는 안전의 증거가 아니다 — 등록은 무허가)
@@ -81,6 +82,14 @@ GUI 와 다른 체인을 가리켜도, 결제 요청에 각인된 chain_id 를 G
 이 환경변수로 **설정과 다른 체인**을 고정하면 `settings.json` 의 `rpc_url` 은 그 체인의
 엔드포인트가 아니므로 쓰지 않고, 고정한 체인의 공개 RPC 로 폴백한다(개발 49). 커스텀 RPC 를
 쓰는 사람이 이 변수로 체인을 갈아탔을 때 잔액 조회가 `returned no data ("0x")` 로 죽던 걸 막는다.
+
+### 받은 응답 (`x402_fetch` · `kura fetch`)
+
+- 글자(JSON·텍스트)는 `body` 로 돌려준다. 10만 자를 넘으면 `body` 는 잘리고 전체는 파일로 남는다(`saved_file`).
+- 이미지·PDF·오디오 같은 바이너리는 파일로 저장하고 `saved_file`·`content_type` 을 돌려준다. MCP 에선 3MB 이하
+  PNG·JPEG·GIF·WebP 를 image content 로도 붙인다. 응답 상한은 32MB(넘는 바이너리는 저장하지 않는다).
+- 저장 폴더: `KURA_DOWNLOAD_DIR` > `~/Downloads/Kura` > (거기 못 쓰면) `~/.jigap/downloads`. 파일 이름은
+  `kura-<시각>.<확장자>` — 서버가 준 파일 이름은 쓰지 않는다.
 
 ## Claude Code에 연결 (MCP)
 

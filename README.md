@@ -176,9 +176,25 @@ claude mcp add --scope user kura -- /Applications/Kura.app/Contents/MacOS/kura-m
 { "mcpServers": { "kura": { "command": "cargo", "args": ["run", "--quiet", "--manifest-path", "./kura-mcp/Cargo.toml"] } } }
 ```
 
-AI가 쓸 수 있는 도구: `get_wallet_status` · `get_balances` · `get_history`(읽기 전용) · `request_payment`(결제 요청 → 앱 승인 팝업) · `x402_fetch`(402 결제가 걸린 URL 호출) · `x402_resubmit`(지갑이 직접 올린 결제의 증거를 다시 내기 — 새 결제 없음) · `lookup_agent`(ERC-8004 에이전트 신원 조회 — 온체인 읽기 전용).
+AI가 쓸 수 있는 도구: `get_wallet_status` · `get_balances` · `get_history`(읽기 전용) · `request_payment`(결제 요청 → 앱 승인 팝업) · `x402_fetch`(402 결제가 걸린 URL·API 호출 — GET 또는 POST 등 + JSON body, 이미지 같은 파일 응답은 저장) · `x402_resubmit`(지갑이 직접 올린 결제의 증거를 다시 내기 — 새 결제 없음) · `lookup_agent`(ERC-8004 에이전트 신원 조회 — 온체인 읽기 전용).
 
 > MCP 도구를 바꾸면 **AI 앱을 재시작**해야 반영돼요(서버가 세션 시작 때 1회 로드).
+
+---
+
+## Kura로 이런 일을 할 수 있어요
+
+x402로 값을 받는 서비스라면, AI가 Kura로 **건마다 결제하고** 결과를 받아와요. 가입·API 키가 필요 없어요. 아래 서비스 이름은 **예시**예요 — 값·네트워크·주소는 서비스마다 다르고 바뀔 수 있으니 각 서비스 문서를 확인하세요. 판매처는 대부분 **Base 메인넷 USDC**로 받아요.
+
+- **자료 찾기** — 예: [Exa](https://exa.ai/docs/reference/x402-guide). AI가 `POST https://api.exa.ai/search`에 `{"query": "…"}` 같은 JSON을 보내고, 402가 오면 검색 한 번 값을 승인받아 **같은 질문을 그대로** 다시 보내요.
+- **이미지 만들기** — 예: [402Claw](https://402claw.cloud/). 이미지 생성 요청을 결제하고, 받은 이미지는 `~/Downloads/Kura/`에 파일로 저장돼요(저장 경로는 결과의 `saved_file`). 3MB 이하 PNG·JPEG·GIF·WebP는 AI에게 이미지로도 바로 붙어요.
+
+```text
+"Exa로 x402 최신 자료 5개 찾아줘"           → x402_fetch(url, method:"POST", body:{query, numResults:5})
+"402Claw로 바닷가 고양이 그림 만들어줘"     → x402_fetch(판매처 문서의 주소, method:"POST", body:{prompt…})
+```
+
+결제 헤더를 실은 재요청은 첫 요청과 **같은 method·헤더·body**로 나가요(승인한 결제와 다른 걸 사지 않게). 결제 헤더가 붙은 요청은 리다이렉트를 따라가지 않아요. method·헤더·body를 준 요청은 첫 요청부터 리다이렉트를 따라가지 않고, 옮겨 간 주소를 알려 줘요.
 
 ---
 

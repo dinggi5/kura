@@ -9,12 +9,13 @@
 use crate::arc_direct::{self, DirectProof, ReceiptOutcome};
 use crate::chain::active_chain;
 use crate::erc8004::{self, AgentTrust};
+use crate::fetch::{self, FetchRequest, FetchedBody};
 use crate::x402::TransferMethod;
 use crate::{payment, x402};
 use crate::{tf, ts};
 
-/// 외부 서버가 거대 본문으로 어댑터 메모리를 채우지 못하게 하는 상한(바이트). 본문을 읽기 전에
-/// Content-Length 로 먼저 거른다(버퍼링 후 자르면 메모리 보호가 안 됨).
+/// 402 응답 본문 상한(바이트) — 외부 서버가 거대 본문으로 어댑터 메모리를 채우지 못하게 스트리밍으로 끊는다.
+/// 콘텐츠 응답의 상한은 `fetch::MAX_RESPONSE_BYTES`(개발 77).
 const MAX_BODY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 
 /// 직접 제출(개발 64)에서 **영수증을 기다리는 상한**. 서버는 최소 1 확인을 요구하므로 브로드캐스트
@@ -36,62 +37,10 @@ const PROOF_TAIL_SECS: u64 = 30;
 /// GUI 의 제출 줄(앞 송금을 기다리기)은 여기에 없다 — 이 결제는 줄을 기다리지 않는다(`broadcast_now`).
 const BROADCAST_TAIL_SECS: u64 = 100;
 
-/// 표시용 본문 문자 상한 — 에이전트/터미널 컨텍스트 보호. 문자 단위라 UTF-8 안전.
-const MAX_BODY_CHARS: usize = 100_000;
-
-/// 본문이 너무 길면 잘라서 돌려준다.
-fn cap_body(body: String) -> String {
-    if body.chars().count() <= MAX_BODY_CHARS {
-        return body;
-    }
-    let mut s: String = body.chars().take(MAX_BODY_CHARS).collect();
-    s.push_str(ts!(
-        "\n…(본문이 길어 잘렸어요)",
-        "\n…(body truncated — it was long)"
-    ));
-    s
-}
-
-/// 응답 본문을 **스트리밍**으로 읽되 누적 바이트가 상한을 넘으면 즉시 중단한다. Content-Length 가
-/// 없는(chunked) 응답도 전량 버퍼링하지 않으므로 악성 서버의 메모리 폭주(DoS)를 막는다.
-/// 반환: (읽은 바이트, 상한 초과로 잘렸는지). 헤더는 호출자가 먼저 챙긴 뒤 호출한다.
-async fn read_limited(mut resp: reqwest::Response) -> Result<(Vec<u8>, bool), String> {
-    let cap = MAX_BODY_BYTES as usize;
-    let mut buf: Vec<u8> = Vec::new();
-    let mut truncated = false;
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| tf!("본문 읽기 실패: {e}", "Couldn't read the body: {e}"))?
-    {
-        if buf.len() + chunk.len() > cap {
-            buf.extend_from_slice(&chunk[..cap - buf.len()]);
-            truncated = true;
-            break;
-        }
-        buf.extend_from_slice(&chunk);
-    }
-    Ok((buf, truncated))
-}
-
-/// 응답 본문을 메모리 안전하게 읽어 표시용으로 캡한다(바이트 상한 스트리밍 + 문자 상한).
-async fn read_body_capped(resp: reqwest::Response) -> String {
-    let (bytes, truncated) = match read_limited(resp).await {
-        Ok(v) => v,
-        Err(e) => return format!("({e})"),
-    };
-    let mut s = cap_body(String::from_utf8_lossy(&bytes).into_owned());
-    if truncated {
-        s.push_str(ts!(
-            "\n…(본문이 너무 커서 잘렸어요)",
-            "\n…(body truncated — it was too large)"
-        ));
-    }
-    s
-}
-
-/// 최초 probe GET 용 HTTP 클라이언트 — 리다이렉트를 따라간다(결제 헤더가 없어 유출 위험 없음 —
+/// 최초 probe 용 HTTP 클라이언트 — 리다이렉트를 따라간다(결제 헤더가 없어 유출 위험 없음 —
 /// "리다이렉트 후 402" 같은 정상 케이스를 깨지 않게). 요청당 30초 타임아웃.
+/// **인자 없는 GET 일 때만** 쓴다(개발 77) — method·headers·body 가 있으면 첫 요청도 리다이렉트를 따라가지 않는다
+/// (301/302 는 POST 를 GET 으로 바꾸고 body 를 버리며, 호출자 헤더는 다른 호스트로도 따라간다).
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -294,7 +243,7 @@ pub async fn run_payment(
 /// x402 리소스 가져오기 결과.
 pub enum X402Outcome {
     /// 402 가 아니었다 — 결제 불필요, 본문 그대로.
-    NotPaid { http_status: u16, body: String },
+    NotPaid { http_status: u16, body: FetchedBody },
     /// 결제가 필요했지만 사용자가 승인하지 않았다(rejected | failed).
     Declined { status: String, detail: String },
     /// 🔴 **돈은 나갔는데 콘텐츠를 못 받았다** (개발 64, 직접 제출 전용).
@@ -327,7 +276,7 @@ pub enum X402Outcome {
         resource: String,
         /// 정산 증빙 헤더(base64). 없으면 빈 문자열.
         settlement: String,
-        body: String,
+        body: FetchedBody,
     },
 }
 
@@ -375,10 +324,10 @@ impl X402Outcome {
     pub fn to_json(&self) -> serde_json::Value {
         let paid = self.paid();
         let payment = self.payment_state();
-        match self {
+        let mut v = match self {
             X402Outcome::NotPaid { http_status, body } => serde_json::json!({
                 "paid": paid, "payment": payment, "status": "ok",
-                "http_status": http_status, "body": body,
+                "http_status": http_status, "body": body.text,
             }),
             X402Outcome::Declined { status, detail } => serde_json::json!({
                 "paid": paid, "payment": payment,
@@ -422,8 +371,26 @@ impl X402Outcome {
                 "settlement": settlement,   // X-PAYMENT-RESPONSE (base64) — 정산 증빙
                 // 빈 값이 아니면 **돈은 나갔는데 서버가 증거를 안 받은 것**이다 — 재시도 금지.
                 "notice": notice,
-                "body": body,
+                "body": body.text,
             }),
+        };
+        // 받은 응답의 종류와 저장 위치(개발 77) — 본문이 있는 갈래에만, 값이 있을 때만 싣는다.
+        if let Some(b) = self.body() {
+            if !b.content_type.is_empty() {
+                v["content_type"] = serde_json::json!(b.content_type);
+            }
+            if !b.saved_file.is_empty() {
+                v["saved_file"] = serde_json::json!(b.saved_file);
+            }
+        }
+        v
+    }
+
+    /// 받은 응답(본문이 있는 갈래만).
+    pub fn body(&self) -> Option<&FetchedBody> {
+        match self {
+            X402Outcome::NotPaid { body, .. } | X402Outcome::Paid { body, .. } => Some(body),
+            _ => None,
         }
     }
 }
@@ -445,24 +412,44 @@ pub struct X402Result {
 ///
 /// `memo` = 호출자가 준 결제 사유(없으면 서버 설명으로 폴백). `agent_id` = AI 가 알아낸 상대의
 /// ERC-8004 에이전트 번호(선택) — 주면 온체인 기록과 대조해 승인 창에 사실 한 줄이 붙는다.
+/// `request` = 보낼 method·headers·body(개발 77). **첫 요청과 결제 재요청이 이 값 하나를 쓴다.**
 /// `Err` = 진행 불가(요청/파싱 실패·앱 꺼짐·대기 중·시간 초과·서명 누락·재요청 실패).
 pub async fn run_x402(
     url: &str,
+    request: &FetchRequest,
     memo: Option<&str>,
     agent_id: Option<u64>,
 ) -> Result<X402Result, String> {
     let url = url.trim().to_string();
-    let client = http_client()?;
+    // 인자 없는 GET 만 예전처럼 리다이렉트를 따라간다(위 `http_client` 주석).
+    let follow = request.is_plain_get();
+    let client = if follow {
+        http_client()?
+    } else {
+        http_client_no_redirect()?
+    };
 
-    // 1) 먼저 그냥 가져와 본다. 402가 아니면 결제 불필요 → 본문 그대로 반환.
-    let resp = client
-        .get(&url)
+    // 1) 먼저 그냥 보내 본다. 402가 아니면 결제 불필요 → 본문 그대로 반환.
+    let resp = request
+        .apply(&client, &url)
         .send()
         .await
         .map_err(|e| tf!("요청 실패: {e}", "The request failed: {e}"))?;
     let http_status = resp.status().as_u16();
+    if !follow && resp.status().is_redirection() {
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("?")
+            .to_string();
+        return Err(tf!(
+            "서버가 다른 주소로 가라고 했어요(HTTP {http_status} → {location}). 그 주소로 다시 요청하세요. 아무것도 결제하지 않았어요.",
+            "The server redirected this request (HTTP {http_status} → {location}). Send it to that address instead. Nothing was paid.",
+        ));
+    }
     if http_status != 402 {
-        let body = read_body_capped(resp).await;
+        let body = fetch::read_response(resp).await;
         // 결제가 없으면 대조할 결제도 없다 — 조회를 아예 하지 않는다(불필요한 RPC 0).
         return Ok(X402Result {
             outcome: X402Outcome::NotPaid { http_status, body },
@@ -483,7 +470,7 @@ pub async fn run_x402(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     // 402 본문도 스트리밍 상한으로 읽는다(Content-Length 없는 거대 응답 차단). 잘렸으면 = 비정상.
-    let (body402_bytes, truncated) = read_limited(resp).await?;
+    let (body402_bytes, truncated) = fetch::read_limited(resp, MAX_BODY_BYTES as usize).await?;
     if truncated {
         return Err(ts!(
             "402 응답 본문이 너무 큽니다",
@@ -679,7 +666,7 @@ pub async fn run_x402(
         payment::write_proof(
             &id,
             &payment::ProofRecord {
-                v: 1,
+                v: 2,
                 id: id.clone(),
                 created: payment::now_secs(),
                 chain_id: picked_chain,
@@ -694,6 +681,8 @@ pub async fn run_x402(
                 client_nonce: client_nonce.clone(),
                 seed: seed.clone(),
                 nonce: nonce.clone(),
+                // 재제출이 같은 method·headers·body 로 다시 보낸다(개발 77).
+                request: Some(request.to_stored()),
             },
         );
     }
@@ -850,6 +839,7 @@ pub async fn run_x402(
     let outcome = deliver(Delivery {
         sub,
         url: final_url.as_str(),
+        request,
         signed,
         direct_tx,
         direct_explorer,
@@ -949,9 +939,23 @@ pub async fn resubmit_x402(tx: &str) -> Result<X402Outcome, String> {
         },
     )?;
     let amount = x402::base_units_to_usdc(&req.amount)?;
+    // 결제한 그 요청을 다시 보낸다(개발 77). v1 기록은 GET 만 있던 때의 것이라 인자 없는 GET 이 맞고,
+    // v2 부터는 요청이 반드시 실린다 — 없으면 무엇을 샀는지 모르니 내지 않는다.
+    let request = match (&proof.request, proof.v) {
+        (Some(r), _) => FetchRequest::from_stored(r)?,
+        (None, 1) => FetchRequest::get(),
+        (None, _) => {
+            return Err(ts!(
+                "남은 증거에 보낸 요청이 없어 다시 낼 수 없어요. 판매자에게 tx 를 보여 주세요.",
+                "The saved proof doesn't record the request that was paid for, so it can't be resubmitted. Show the seller the tx."
+            )
+            .into())
+        }
+    };
     deliver(Delivery {
         sub,
         url: &proof.url,
+        request: &request,
         signed: None,
         direct_tx: tx,
         direct_explorer: explorer,
@@ -967,6 +971,8 @@ struct Delivery<'a> {
     sub: x402::Submission,
     /// 402 를 실제로 낸 최종 URL — 결제 헤더는 여기에만, 리다이렉트를 따라가지 않고 보낸다.
     url: &'a str,
+    /// 첫 요청과 같은 method·headers·body(개발 77) — 서명한 결제와 다른 걸 사지 않게.
+    request: &'a FetchRequest,
     /// 서명 갈래의 인가(정산 기록을 nonce 로 잇는다). 직접 제출이면 None.
     signed: Option<x402::X402Payment>,
     /// 직접 제출이면 우리가 올린 tx 와 익스플로러 링크. 서명 갈래면 빈 값.
@@ -983,6 +989,7 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
     let Delivery {
         sub,
         url,
+        request,
         signed,
         direct_tx,
         direct_explorer,
@@ -992,7 +999,10 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
     } = d;
     // 결제 헤더(서명된 인가)는 리다이렉트를 따라가지 않는 클라이언트로 최종 URL 에만 보낸다.
     let pay_client = http_client_no_redirect()?;
-    let mut builder = pay_client.get(url).header(sub.header_name, &sub.value);
+    // 첫 요청과 **같은 조립 함수**로 만들고 결제 헤더만 얹는다(개발 77).
+    let mut builder = request
+        .apply(&pay_client, url)
+        .header(sub.header_name, &sub.value);
     if let Some(alt) = sub.alt_header {
         builder = builder.header(alt, &sub.value); // 같은 값 — 헤더 이름만 다르게 읽는 서버 대비
     }
@@ -1040,7 +1050,7 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
         .find_map(|v| v.to_str().ok())
         .map(String::from)
         .unwrap_or_default();
-    let body = read_body_capped(paid_resp).await;
+    let body = fetch::read_response(paid_resp).await;
 
     // 정산 tx 해시를 뽑아 GUI 내역에 반영되도록 기록(nonce 로 "signed" 항목과 매칭).
     // **2xx(실제 정산 성공) 응답일 때만** 기록한다 — 비-2xx 응답에 위조 PAYMENT-RESPONSE 헤더를
@@ -1095,6 +1105,232 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    /// 목 서버가 받은 요청 하나.
+    #[derive(Debug, Clone)]
+    struct Seen {
+        method: String,
+        path: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    impl Seen {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        }
+    }
+
+    fn read_request(s: &mut TcpStream) -> Seen {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let head_end = loop {
+            let n = s.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break buf.len();
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+        let mut lines = head.lines();
+        let mut first = lines.next().unwrap_or("").split_whitespace();
+        let method = first.next().unwrap_or("").to_string();
+        let path = first.next().unwrap_or("").to_string();
+        let headers: Vec<(String, String)> = lines
+            .filter_map(|l| l.split_once(':'))
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .collect();
+        let len: usize = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.parse().ok())
+            .unwrap_or(0);
+        let mut body = buf[head_end..].to_vec();
+        while body.len() < len {
+            let n = s.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..n]);
+        }
+        Seen {
+            method,
+            path,
+            headers,
+            body,
+        }
+    }
+
+    /// 요청마다 `answer` 가 정한 응답(상태 줄 + 헤더 + 본문)을 쓰고, 받은 요청을 채널로 돌려준다.
+    fn spawn_mock(answers: Vec<String>) -> (String, std::sync::mpsc::Receiver<Seen>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for answer in answers {
+                let Ok((mut s, _)) = listener.accept() else {
+                    return;
+                };
+                let seen = read_request(&mut s);
+                let _ = s.write_all(answer.as_bytes());
+                let _ = s.flush();
+                let _ = tx.send(seen);
+            }
+        });
+        (base, rx)
+    }
+
+    fn http(status: &str, extra: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn sample_request() -> FetchRequest {
+        FetchRequest::build(
+            Some("POST"),
+            &[("X-Client".into(), "kura-test".into())],
+            Some(&serde_json::json!({"query": "결제한 바로 그 질문", "numResults": 3})),
+        )
+        .unwrap()
+    }
+
+    fn submission() -> x402::Submission {
+        x402::Submission {
+            header_name: "PAYMENT-SIGNATURE",
+            value: "c2lnbmVk".into(),
+            response_header: "PAYMENT-RESPONSE",
+            alt_header: None,
+        }
+    }
+
+    /// 🔴 개발 77 — **결제 재요청은 첫 요청과 같은 method·headers·body 로 나간다.** 사람이 승인한 결제는 그 요청에 대한
+    /// 값이라, 재요청이 GET 으로 바뀌거나 body 가 빠지면 서명한 것과 다른 걸 산다. 첫 요청은 실제 `run_x402` 로,
+    /// 재요청은 실제 `deliver` 로 보내 목 서버가 받은 바이트를 맞대 본다.
+    #[tokio::test]
+    async fn paid_retry_repeats_method_headers_and_body() {
+        let (base, rx) = spawn_mock(vec![
+            // run_x402 의 첫 요청에 402 를 주면 GUI 승인으로 넘어가므로, 첫 요청은 200 으로 받아 무엇이 나갔는지만 본다.
+            http("200 OK", "", r#"{"free":true}"#),
+            http("200 OK", "", r#"{"results":[]}"#),
+        ]);
+        let url = format!("{base}/search");
+        let request = sample_request();
+
+        let first = run_x402(&url, &request, None, None).await.unwrap();
+        assert!(matches!(
+            first.outcome,
+            X402Outcome::NotPaid {
+                http_status: 200,
+                ..
+            }
+        ));
+        let probe = rx.recv().unwrap();
+
+        let paid = deliver(Delivery {
+            sub: submission(),
+            url: &url,
+            request: &request,
+            signed: None,
+            direct_tx: String::new(),
+            direct_explorer: String::new(),
+            amount: "0.007".into(),
+            pay_to: "0xabc".into(),
+            resource: url.clone(),
+        })
+        .await
+        .unwrap();
+        assert!(matches!(paid, X402Outcome::Paid { ok: true, .. }));
+        let retry = rx.recv().unwrap();
+
+        assert_eq!(probe.method, "POST");
+        assert_eq!(retry.method, probe.method);
+        assert_eq!(retry.path, probe.path);
+        assert_eq!(retry.body, probe.body);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&retry.body).unwrap(),
+            serde_json::json!({"query": "결제한 바로 그 질문", "numResults": 3})
+        );
+        for h in ["x-client", "content-type"] {
+            assert!(probe.header(h).is_some(), "첫 요청에 {h} 가 없다");
+            assert_eq!(retry.header(h), probe.header(h), "{h} 가 갈렸다");
+        }
+        // 다른 건 결제 헤더 하나뿐이다.
+        assert_eq!(probe.header("payment-signature"), None);
+        assert_eq!(retry.header("payment-signature"), Some("c2lnbmVk"));
+    }
+
+    /// 🔴 결제 재요청은 리다이렉트를 따라가지 않는다(서명 유출 방지) — method·body 가 붙어도 그대로다.
+    #[tokio::test]
+    async fn paid_retry_does_not_follow_redirects() {
+        let (elsewhere, other_rx) = spawn_mock(vec![http("200 OK", "", "{}")]);
+        let (base, rx) = spawn_mock(vec![http(
+            "302 Found",
+            &format!("Location: {elsewhere}/steal\r\n"),
+            "",
+        )]);
+        let url = format!("{base}/search");
+        let out = deliver(Delivery {
+            sub: submission(),
+            url: &url,
+            request: &sample_request(),
+            signed: None,
+            direct_tx: String::new(),
+            direct_explorer: String::new(),
+            amount: "0.007".into(),
+            pay_to: "0xabc".into(),
+            resource: url.clone(),
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            out,
+            X402Outcome::Paid {
+                http_status: 302,
+                ok: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            rx.recv().unwrap().header("payment-signature"),
+            Some("c2lnbmVk")
+        );
+        assert!(
+            other_rx
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "리다이렉트를 따라가 결제 헤더가 다른 곳으로 갔다"
+        );
+    }
+
+    /// method·headers·body 가 있는 첫 요청도 리다이렉트를 따라가지 않는다 — 301/302 는 POST 를 GET 으로 바꾸고 body 를
+    /// 버리므로, 따라가면 402 를 낸 곳과 우리가 보낼 요청이 갈린다. 아무것도 결제하기 전에 멈춘다.
+    #[tokio::test]
+    async fn probe_with_body_stops_at_redirect() {
+        let (elsewhere, other_rx) = spawn_mock(vec![http("200 OK", "", "{}")]);
+        let (base, _rx) = spawn_mock(vec![http(
+            "301 Moved Permanently",
+            &format!("Location: {elsewhere}/new\r\n"),
+            "",
+        )]);
+        let err = match run_x402(&format!("{base}/old"), &sample_request(), None, None).await {
+            Err(e) => e,
+            Ok(_) => panic!("리다이렉트를 따라갔다"),
+        };
+        assert!(err.contains(&format!("{elsewhere}/new")), "{err}");
+        assert!(other_rx
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err());
+    }
 
     fn no_content(reason: &str) -> X402Outcome {
         X402Outcome::PaidNoContent {
@@ -1116,7 +1352,7 @@ mod tests {
             pay_to: "0xabc".into(),
             resource: "https://ex.com/a".into(),
             settlement: String::new(),
-            body: String::new(),
+            body: FetchedBody::default(),
         }
     }
 
@@ -1127,7 +1363,7 @@ mod tests {
             (
                 X402Outcome::NotPaid {
                     http_status: 200,
-                    body: String::new(),
+                    body: FetchedBody::default(),
                 },
                 PAYMENT_NONE,
             ),

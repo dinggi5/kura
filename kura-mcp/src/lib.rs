@@ -7,6 +7,7 @@
 pub mod arc_direct;
 pub mod chain;
 pub mod erc8004;
+pub mod fetch;
 pub mod flow;
 pub mod i18n;
 pub mod payment;

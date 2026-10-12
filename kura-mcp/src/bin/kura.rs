@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use kura_mcp::chain::active_chain;
 use kura_mcp::erc8004::AgentTrust;
+use kura_mcp::fetch::FetchRequest;
 use kura_mcp::flow::{self, X402Outcome};
 use kura_mcp::i18n::{lang, Lang};
 use kura_mcp::wallet;
@@ -32,7 +33,11 @@ Kura — AI 에이전트 전용 로컬 지갑 CLI
        --token USDC|ETH        토큰 (기본 USDC)
        --memo \"사유\"            승인 팝업에 보일 결제 사유
        --agent N               받는 쪽 ERC-8004 번호 (등록 지갑과 대조)
-  kura fetch <URL> [--memo \"사유\"] [--agent N]   x402 유료 리소스를 결제하고 가져온다
+  kura fetch <URL> [옵션]       x402 유료 리소스를 결제하고 가져온다
+       --method POST           HTTP method (기본 GET — GET·POST·PUT·PATCH·DELETE)
+       --data '{\"q\":\"…\"}'      보낼 JSON 객체 (결제 재요청에도 같은 값이 실려요)
+       --memo \"사유\"            승인 팝업에 보일 결제 사유
+       --agent N               판매자 ERC-8004 번호 (등록 지갑·도메인과 대조)
 
 전역 옵션:
   --json        기계가 읽는 JSON 으로 출력 (스크립트용)
@@ -54,7 +59,11 @@ Usage:
        --token USDC|ETH           token (USDC by default)
        --memo \"reason\"            what the payment is for, shown in the approval window
        --agent N                  recipient's ERC-8004 number (compared with the registered wallet)
-  kura fetch <URL> [--memo \"reason\"] [--agent N]   pay for an x402 resource and fetch it
+  kura fetch <URL> [options]      pay for an x402 resource and fetch it
+       --method POST              HTTP method (GET by default — GET, POST, PUT, PATCH, DELETE)
+       --data '{\"q\":\"…\"}'         JSON object to send (the paid retry sends the same)
+       --memo \"reason\"            what the payment is for, shown in the approval window
+       --agent N                  seller's ERC-8004 number (compared with the registered wallet/domain)
 
 Global options:
   --json        machine-readable JSON output (for scripts)
@@ -79,7 +88,7 @@ struct Cli {
 }
 
 /// 값을 받는 옵션들(`--key value` 또는 `--key=value`). 나머지 `--flag` 는 불리언.
-const VALUE_OPTS: [&str; 4] = ["token", "memo", "limit", "agent"];
+const VALUE_OPTS: [&str; 6] = ["token", "memo", "limit", "agent", "method", "data"];
 
 enum Parsed {
     Run(Cli),
@@ -475,14 +484,29 @@ async fn cmd_pay(cli: &Cli, rest: &[String]) -> Result<bool, String> {
 async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
     let url = rest.first().ok_or_else(|| {
         ts!(
-            "URL 이 필요해요.\n\nkura fetch <URL> [--memo \"사유\"]",
-            "A URL is required.\n\nkura fetch <URL> [--memo \"reason\"]"
+            "URL 이 필요해요.\n\nkura fetch <URL> [--method POST] [--data '{...}'] [--memo \"사유\"]",
+            "A URL is required.\n\nkura fetch <URL> [--method POST] [--data '{...}'] [--memo \"reason\"]"
         )
         .to_string()
     })?;
     let memo = cli.opts.get("memo").map(String::as_str);
     // --agent N: 상대의 ERC-8004 번호(선택). 주면 온체인 기록과 대조해 사실 한 줄을 덧붙인다.
     let agent_id = agent_opt(cli)?;
+    // --method / --data (개발 77). 못 읽으면 아무것도 보내기 전에 멈춘다.
+    let data = match cli.opts.get("data") {
+        Some(d) => Some(serde_json::from_str::<serde_json::Value>(d).map_err(|e| {
+            tf!(
+                "--data 가 JSON 이 아니에요: {e}",
+                "--data isn't valid JSON: {e}"
+            )
+        })?),
+        None => None,
+    };
+    let request = FetchRequest::build(
+        cli.opts.get("method").map(String::as_str),
+        &[],
+        data.as_ref(),
+    )?;
 
     if !cli.json {
         println!(
@@ -493,7 +517,7 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
             )
         );
     }
-    let res = flow::run_x402(url, memo, agent_id).await?;
+    let res = flow::run_x402(url, &request, memo, agent_id).await?;
     let (agent, agent_note, out) = (res.agent, res.agent_note, res.outcome);
     // 성공 = 결제 불필요(콘텐츠 받음) 또는 결제·정산까지 완료. 거부/실패/정산실패는 종료코드 1.
     // **신원 조회 결과는 성공 판정에 넣지 않는다** — 사실을 보여줄 뿐 결제를 막지 않는다.
@@ -519,7 +543,7 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                         "No payment required (HTTP {http_status})\n"
                     )
                 );
-                println!("{body}");
+                println!("{}", body.text);
             }
             X402Outcome::Declined { status, detail } => {
                 if status == "rejected" {
@@ -637,7 +661,7 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                 if !notice.is_empty() {
                     eprintln!("{notice}");
                 }
-                println!("\n{body}");
+                println!("\n{}", body.text);
             }
         }
     }
@@ -861,7 +885,7 @@ mod tests {
             pay_to: "0xabc".into(),
             resource: "https://ex.com/a".into(),
             settlement: String::new(),
-            body: "nope".into(),
+            body: kura_mcp::fetch::FetchedBody::text("nope"),
         });
         assert_eq!(v["status"], "settlement_failed");
         assert_eq!(v["tx"], "0xSENT");

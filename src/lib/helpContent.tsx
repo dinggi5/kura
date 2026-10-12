@@ -4,7 +4,7 @@
 // 두 언어를 한 섹션 안에 나란히 둔다(개발 42) — 문서 성격의 글이라 한쪽만 고치면 금세 어긋난다.
 // 번역이 아니라 **같은 말을 그 언어로** 쓴다: 영어 쪽도 짧은 문장, 조용한 톤, 느낌표 없이.
 
-import { ArrowDownLeft, Bot, KeyRound, Plug, ShieldCheck, Stamp } from "lucide-react";
+import { ArrowDownLeft, Bot, Compass, KeyRound, Plug, ShieldCheck, Stamp } from "lucide-react";
 
 import { t } from "./i18n";
 
@@ -227,6 +227,56 @@ export const HELP_SECTIONS: HelpSection[] = [
           rechecks it on-chain and sets it right.
         </li>
       </ol>,
+    ),
+  },
+  {
+    id: "uses",
+    icon: <Compass size={22} />,
+    title: t("Kura로 이런 일을 할 수 있어요", "What you can do with Kura"),
+    body: t(
+      <div className="space-y-2.5">
+        <p>
+          x402로 값을 받는 서비스라면 AI가 Kura로 <b className={em}>건마다 결제하고</b> 결과를
+          받아와요. 가입이나 API 키 없이요. 예를 들면:
+        </p>
+        <ul className="space-y-1.5">
+          <li>
+            <b className={em}>자료 찾기</b> — "이 주제 최신 자료 찾아줘"라고 하면 AI가 검색
+            서비스(예: Exa)에 질문을 보내고, 검색 한 번 값을 내요.
+          </li>
+          <li>
+            <b className={em}>이미지 만들기</b> — "이런 그림 만들어줘"라고 하면 AI가 이미지 생성
+            서비스(예: 402Claw)에 요청해요. 받은 이미지는 다운로드 폴더 안 Kura 폴더에 저장되고,
+            크기가 작으면 AI도 바로 볼 수 있어요.
+          </li>
+        </ul>
+        <p className="text-[var(--color-ink-300)]">
+          서비스 이름은 예시예요. 값·네트워크는 서비스마다 다르고 바뀔 수 있어요 — 승인 창에 뜬
+          금액과 주소를 보고 정하면 돼요. 판매처는 대부분 Base 메인넷 USDC로 받아요.
+        </p>
+      </div>,
+      <div className="space-y-2.5">
+        <p>
+          Any service that charges over x402 lets the AI <b className={em}>pay per request</b>{" "}
+          through Kura and bring back the result — no sign-up, no API key. For example:
+        </p>
+        <ul className="space-y-1.5">
+          <li>
+            <b className={em}>Finding sources</b> — ask "find recent material on this" and the AI
+            sends the query to a search service (for example Exa) and pays for that one search.
+          </li>
+          <li>
+            <b className={em}>Making images</b> — ask "make a picture like this" and the AI sends
+            the request to an image service (for example 402Claw). The image is saved to a Kura
+            folder inside Downloads, and if it's small the AI can look at it right away.
+          </li>
+        </ul>
+        <p className="text-[var(--color-ink-300)]">
+          These names are only examples. Prices and networks differ by service and can change —
+          decide from the amount and address in the approval window. Most sellers take USDC on
+          Base mainnet.
+        </p>
+      </div>,
     ),
   },
   {
