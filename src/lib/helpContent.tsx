@@ -237,7 +237,7 @@ export const HELP_SECTIONS: HelpSection[] = [
       <div className="space-y-2.5">
         <p>
           x402로 값을 받는 서비스라면 AI가 Kura로 <b className={em}>건마다 결제하고</b> 결과를
-          받아와요. 가입이나 API 키 없이요. 예를 들면:
+          받아와요. 가입이나 API 키 없이 쓸 수 있는 곳이 많아요. 예를 들면:
         </p>
         <ul className="space-y-1.5">
           <li>
@@ -252,13 +252,13 @@ export const HELP_SECTIONS: HelpSection[] = [
         </ul>
         <p className="text-[var(--color-ink-300)]">
           서비스 이름은 예시예요. 값·네트워크는 서비스마다 다르고 바뀔 수 있어요 — 승인 창에 뜬
-          금액과 주소를 보고 정하면 돼요. 판매처는 대부분 Base 메인넷 USDC로 받아요.
+          금액과 주소를 보고 정하면 돼요. Base 메인넷 USDC로 받는 곳이 많아요.
         </p>
       </div>,
       <div className="space-y-2.5">
         <p>
           Any service that charges over x402 lets the AI <b className={em}>pay per request</b>{" "}
-          through Kura and bring back the result — no sign-up, no API key. For example:
+          through Kura and bring back the result — many need no sign-up or API key. For example:
         </p>
         <ul className="space-y-1.5">
           <li>
@@ -273,8 +273,8 @@ export const HELP_SECTIONS: HelpSection[] = [
         </ul>
         <p className="text-[var(--color-ink-300)]">
           These names are only examples. Prices and networks differ by service and can change —
-          decide from the amount and address in the approval window. Most sellers take USDC on
-          Base mainnet.
+          decide from the amount and address in the approval window. Many take USDC on Base
+          mainnet.
         </p>
       </div>,
     ),

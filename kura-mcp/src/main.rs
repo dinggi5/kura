@@ -467,8 +467,8 @@ impl ServerHandler for WalletServer {
                  lookup_agent reads an ERC-8004 record on-chain; registration there is permissionless, so a \
                  record is a claim, not proof of safety.\n\n\
                  What x402_fetch can do — examples, not endorsements; check each seller's own docs for the current \
-                 endpoint, price and network, and that the network matches the user's setting (sellers usually \
-                 take Base mainnet USDC): web search for sources, e.g. Exa (POST https://api.exa.ai/search with a \
+                 endpoint, price and network, and that the network matches the user's setting (many take \
+                 Base mainnet USDC): web search for sources, e.g. Exa (POST https://api.exa.ai/search with a \
                  body like {\"query\": \"...\"}; see exa.ai/docs/reference/x402-guide); image generation, e.g. \
                  402Claw (402claw.cloud) — the image comes back as a file in saved_file and, when small, as an \
                  attached image."

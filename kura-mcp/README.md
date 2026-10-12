@@ -90,6 +90,12 @@ GUI 와 다른 체인을 가리켜도, 결제 요청에 각인된 chain_id 를 G
   PNG·JPEG·GIF·WebP 를 image content 로도 붙인다. 응답 상한은 32MB(넘는 바이너리는 저장하지 않는다).
 - 저장 폴더: `KURA_DOWNLOAD_DIR` > `~/Downloads/Kura` > (거기 못 쓰면) `~/.jigap/downloads`. 파일 이름은
   `kura-<시각>.<확장자>` — 서버가 준 파일 이름은 쓰지 않는다.
+- 저장 파일은 0600, macOS 에선 `com.apple.quarantine` 표시를 붙인다. 저장이 20초 안에 안 끝나면(권한 창 등)
+  기다리지 않고 그렇게 알린다.
+- 서명 갈래의 결제 재요청은 180초까지 기다린다(이미지 생성 등). 결제 뒤 응답이 중간에 끊기면 받은 만큼을 남기고
+  `notice` 에 「다시 요청하면 또 결제될 수 있다」를 싣는다.
+- `Accept-Encoding` 등 연결·결제 헤더는 `headers` 로 줄 수 없다. 증거 기록(`<id>.proof.json`, 0600)엔 보낸 헤더도
+  남는다(재제출이 같은 요청을 보내야 해서) — API 키를 헤더로 준 경우 그 값도 7일간 남는다.
 
 ## Claude Code에 연결 (MCP)
 
