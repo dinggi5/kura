@@ -57,8 +57,19 @@ fn http_client() -> Result<reqwest::Client, String> {
 /// (서명된 EIP-3009 인가)는 reqwest 의 cross-host 민감 헤더 제거 대상이 아니라, 리다이렉트를 따라가면
 /// 다른 origin 으로 서명이 유출될 수 있다 → 402 를 낸 바로 그 최종 URL 에만 결제 헤더를 보낸다.
 fn http_client_no_redirect() -> Result<reqwest::Client, String> {
+    http_client_no_redirect_for(HTTP_TIMEOUT)
+}
+
+/// 요청당 시간 상한(기본). 직접 제출의 증거 꼬리(`PROOF_TAIL_SECS`)가 이 값에 맞춰져 있다 — 그 갈래는 이 값을 쓴다.
+const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 서명 갈래의 결제 재요청 시간 상한(개발 77) — 이미지 생성처럼 응답까지 수십 초 걸리는 유료 API 가 있다.
+/// 30초에 끊으면 페이실리테이터는 정산했는데 콘텐츠는 못 받는다. 직접 제출 갈래엔 쓰지 않는다(위 주석).
+const PAID_SIGNED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+fn http_client_no_redirect_for(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| {
@@ -436,13 +447,19 @@ pub async fn run_x402(
         .await
         .map_err(|e| tf!("요청 실패: {e}", "The request failed: {e}"))?;
     let http_status = resp.status().as_u16();
-    if !follow && resp.status().is_redirection() {
+    if !follow && matches!(http_status, 301 | 302 | 303 | 307 | 308) {
+        // 상대 경로면 요청한 주소 기준으로 풀어서 알려 준다.
         let location = resp
             .headers()
             .get(reqwest::header::LOCATION)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("?")
-            .to_string();
+            .map(|l| {
+                resp.url()
+                    .join(l)
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|_| l.to_string())
+            })
+            .unwrap_or_else(|| "?".to_string());
         return Err(tf!(
             "서버가 다른 주소로 가라고 했어요(HTTP {http_status} → {location}). 그 주소로 다시 요청하세요. 아무것도 결제하지 않았어요.",
             "The server redirected this request (HTTP {http_status} → {location}). Send it to that address instead. Nothing was paid.",
@@ -998,7 +1015,11 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
         resource,
     } = d;
     // 결제 헤더(서명된 인가)는 리다이렉트를 따라가지 않는 클라이언트로 최종 URL 에만 보낸다.
-    let pay_client = http_client_no_redirect()?;
+    let pay_client = if signed.is_some() {
+        http_client_no_redirect_for(PAID_SIGNED_TIMEOUT)?
+    } else {
+        http_client_no_redirect()?
+    };
     // 첫 요청과 **같은 조립 함수**로 만들고 결제 헤더만 얹는다(개발 77).
     let mut builder = request
         .apply(&pay_client, url)
@@ -1084,6 +1105,13 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
                 "the server refused the proof: HTTP {paid_status}"
             ),
         )
+    } else if body.incomplete {
+        // 결제는 됐거나 됐을 수 있는데 응답이 중간에 끊겼다(개발 77) — 다시 부르면 또 결제된다.
+        ts!(
+            "결제 뒤 응답을 끝까지 받지 못했어요. 다시 요청하면 또 결제될 수 있어요 — 받은 부분은 body·saved_file 에 있어요. 사용자에게 알리세요.",
+            "The response after payment didn't arrive in full. Asking again may pay again — what arrived is in body / saved_file. Tell the user."
+        )
+        .to_string()
     } else {
         String::new()
     };
@@ -1310,6 +1338,63 @@ mod tests {
                 .is_err(),
             "리다이렉트를 따라가 결제 헤더가 다른 곳으로 갔다"
         );
+    }
+
+    /// 결제 뒤 응답이 중간에 끊기면 받은 만큼을 남기고 「다시 부르면 또 결제된다」를 싣는다(개발 77 사전 점검 P1).
+    #[tokio::test]
+    async fn paid_response_cut_short_is_not_plain_success() {
+        // Content-Length 는 100 인데 10 바이트만 보내고 닫는다.
+        let (base, _rx) = spawn_mock(vec![
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{\"part\":1,".to_string(),
+        ]);
+        let url = format!("{base}/gen");
+        let out = deliver(Delivery {
+            sub: submission(),
+            url: &url,
+            request: &sample_request(),
+            signed: None,
+            direct_tx: String::new(),
+            direct_explorer: String::new(),
+            amount: "0.03".into(),
+            pay_to: "0xabc".into(),
+            resource: url.clone(),
+        })
+        .await
+        .unwrap();
+        let X402Outcome::Paid { notice, body, .. } = &out else {
+            panic!("Paid 가 아니다");
+        };
+        assert!(body.incomplete);
+        assert!(body.text.starts_with("{\"part\":1,"), "{}", body.text);
+        assert!(!notice.is_empty());
+        assert_eq!(out.to_json()["notice"], *notice);
+    }
+
+    /// 상대 경로 Location 은 요청 주소 기준으로 풀어서 알려 준다. 304 같은 3xx 는 리다이렉트로 보지 않는다.
+    #[tokio::test]
+    async fn probe_redirect_location_is_resolved() {
+        let (base, _rx) = spawn_mock(vec![http(
+            "308 Permanent Redirect",
+            "Location: /v2/search\r\n",
+            "",
+        )]);
+        let err = match run_x402(&format!("{base}/search"), &sample_request(), None, None).await {
+            Err(e) => e,
+            Ok(_) => panic!("리다이렉트를 따라갔다"),
+        };
+        assert!(err.contains(&format!("{base}/v2/search")), "{err}");
+
+        let (base, _rx) = spawn_mock(vec![http("304 Not Modified", "", "")]);
+        let out = run_x402(&format!("{base}/x"), &sample_request(), None, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            out.outcome,
+            X402Outcome::NotPaid {
+                http_status: 304,
+                ..
+            }
+        ));
     }
 
     /// method·headers·body 가 있는 첫 요청도 리다이렉트를 따라가지 않는다 — 301/302 는 POST 를 GET 으로 바꾸고 body 를

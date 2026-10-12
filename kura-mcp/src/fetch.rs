@@ -45,6 +45,8 @@ const RESERVED_HEADERS: &[&str] = &[
     "trailer",
     "upgrade",
     "expect",
+    // 압축 해제 기능을 켜지 않은 클라이언트라, 압축된 응답을 받으면 돈을 내고 깨진 본문을 받는다.
+    "accept-encoding",
 ];
 
 /// 허용하는 method. 이 밖의 값은 막는다(HEAD 는 본문이 없어 결제할 대상이 없다).
@@ -229,7 +231,12 @@ impl FetchRequest {
             })?),
         };
         // 자동으로 붙인 Content-Type 도 기록엔 들어 있다 — 그대로 되살리면 같은 값이 된다.
-        Self::build(Some(&s.method), &s.headers, body.as_ref())
+        let mut req = Self::build(Some(&s.method), &s.headers, body.as_ref())?;
+        // body 는 **남긴 바이트 그대로** 보낸다 — 다시 직렬화하면 소수의 끝자리 등이 달라질 수 있다.
+        if let Some(text) = &s.body {
+            req.body = Some(text.clone().into_bytes());
+        }
+        Ok(req)
     }
 }
 
@@ -264,6 +271,8 @@ pub struct FetchedBody {
     pub saved_file: String,
     /// 작은 이미지면 MCP image content 로 붙일 원본.
     pub image: Option<InlineImage>,
+    /// 본문을 끝까지 받지 못했다(연결 끊김·시간 초과). 받은 만큼만 `text`/`saved_file` 에 있다.
+    pub incomplete: bool,
 }
 
 impl FetchedBody {
@@ -319,7 +328,6 @@ fn extension_for(mime: &str) -> &'static str {
         "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
         "audio/ogg" => "ogg",
         "video/mp4" => "mp4",
-        "application/zip" => "zip",
         "text/csv" => "csv",
         "text/html" => "html",
         "text/markdown" => "md",
@@ -398,29 +406,72 @@ fn write_new(dir: &Path, path: &Path, bytes: &[u8]) -> Result<PathBuf, WriteErr>
         let _ = std::fs::remove_file(path);
         return Err(WriteErr::Other(e.to_string()));
     }
+    // 받은 콘텐츠는 이 사용자만 읽는다.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    mark_quarantine(path);
     Ok(path.to_path_buf())
 }
 
+/// macOS: 인터넷에서 받은 파일 표시(`com.apple.quarantine`)를 붙인다 — 열 때 Gatekeeper 가 확인한다.
+/// 붙이지 못해도 저장은 그대로 둔다.
+#[cfg(target_os = "macos")]
+fn mark_quarantine(path: &Path) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = std::process::Command::new("/usr/bin/xattr")
+        .arg("-w")
+        .arg("com.apple.quarantine")
+        .arg(format!("0081;{secs:x};Kura;"))
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mark_quarantine(_path: &Path) {}
+
 /// 응답 본문을 스트리밍으로 읽되 누적이 상한을 넘으면 즉시 멈춘다(Content-Length 없는 응답도 전량 버퍼링 안 함).
 /// 반환: (읽은 바이트, 상한을 넘어 잘렸는지).
-pub async fn read_limited(
-    mut resp: reqwest::Response,
-    cap: usize,
-) -> Result<(Vec<u8>, bool), String> {
-    let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| tf!("본문 읽기 실패: {e}", "Couldn't read the body: {e}"))?
-    {
-        if buf.len() + chunk.len() > cap {
-            buf.extend_from_slice(&chunk[..cap - buf.len()]);
-            return Ok((buf, true));
-        }
-        buf.extend_from_slice(&chunk);
+pub async fn read_limited(resp: reqwest::Response, cap: usize) -> Result<(Vec<u8>, bool), String> {
+    match read_partial(resp, cap).await {
+        (buf, truncated, None) => Ok((buf, truncated)),
+        (_, _, Some(e)) => Err(e),
     }
-    Ok((buf, false))
 }
+
+/// `read_limited` 와 같되, 중간에 끊겨도 **받은 만큼을 버리지 않는다**(결제 뒤 응답용). 세 번째 값 = 끊긴 이유.
+async fn read_partial(mut resp: reqwest::Response, cap: usize) -> (Vec<u8>, bool, Option<String>) {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if buf.len() + chunk.len() > cap {
+                    buf.extend_from_slice(&chunk[..cap - buf.len()]);
+                    return (buf, true, None);
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => return (buf, false, None),
+            Err(e) => {
+                return (
+                    buf,
+                    false,
+                    Some(tf!("본문 읽기 실패: {e}", "Couldn't read the body: {e}")),
+                )
+            }
+        }
+    }
+}
+
+/// 파일 저장을 기다리는 상한. macOS 가 다운로드 폴더 접근 권한을 묻는 동안 결과가 묶이지 않게 한다.
+const SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// 응답을 읽어 `FetchedBody` 로. **실패해도 Err 를 내지 않는다** — 결제 뒤에 부르는 자리라, 여기서 Err 가 나가면
 /// 「돈은 나갔는데 결과가 오류」가 된다. 읽기·저장 실패는 글자 본문에 적는다.
@@ -431,14 +482,35 @@ pub async fn read_response(resp: reqwest::Response) -> FetchedBody {
         .and_then(|v| v.to_str().ok())
         .map(mime_of)
         .unwrap_or_default();
-    match read_limited(resp, MAX_RESPONSE_BYTES).await {
-        Ok((bytes, truncated)) => classify(content_type, bytes, truncated),
-        Err(e) => FetchedBody {
-            text: format!("({e})"),
+    let (bytes, truncated, read_err) = read_partial(resp, MAX_RESPONSE_BYTES).await;
+    // 파일 쓰기는 막힐 수 있는 일이라(권한 창) 따로 돌리고 오래 기다리지 않는다.
+    let ct = content_type.clone();
+    let len = bytes.len();
+    let mut body = match tokio::time::timeout(
+        SAVE_WAIT,
+        tokio::task::spawn_blocking(move || classify(ct, bytes, truncated)),
+    )
+    .await
+    {
+        Ok(Ok(b)) => b,
+        _ => FetchedBody {
+            text: tf!(
+                "({len} 바이트를 받았는데 파일 저장이 끝나지 않았어요. macOS 가 다운로드 폴더 접근을 묻고 있으면 허용해 주세요.)",
+                "(Received {len} bytes, but saving the file didn't finish. If macOS is asking for access to the Downloads folder, allow it.)"
+            ),
             content_type,
+            bytes: len,
             ..FetchedBody::default()
         },
+    };
+    if let Some(e) = read_err {
+        body.incomplete = true;
+        body.text.push_str(&tf!(
+            "\n…(응답을 끝까지 받지 못했어요: {e})",
+            "\n…(the response didn't arrive in full: {e})"
+        ));
     }
+    body
 }
 
 /// 읽은 바이트를 글자/파일/이미지로 나눈다(네트워크 없이 테스트할 수 있게 따로 둔다).
@@ -487,6 +559,7 @@ pub fn classify(content_type: String, bytes: Vec<u8>, truncated: bool) -> Fetche
             bytes: len,
             saved_file,
             image: None,
+            incomplete: false,
         };
     }
 
@@ -538,6 +611,7 @@ pub fn classify(content_type: String, bytes: Vec<u8>, truncated: bool) -> Fetche
         bytes: len,
         saved_file,
         image,
+        incomplete: false,
     }
 }
 
@@ -611,12 +685,31 @@ mod tests {
             "host",
             "Content-Length",
             "Transfer-Encoding",
+            "Accept-Encoding",
         ] {
             assert!(
                 FetchRequest::build(Some("GET"), &[h(name, "v")], None).is_err(),
                 "{name} 를 받았다"
             );
         }
+    }
+
+    /// 되살린 body 는 남긴 바이트 그대로다 — 다시 직렬화하지 않는다.
+    #[test]
+    fn stored_body_is_sent_verbatim() {
+        let s = StoredRequest {
+            method: "POST".into(),
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: Some(r#"{"t": 0.30000000000000004,  "b":1}"#.into()),
+        };
+        let r = FetchRequest::from_stored(&s).unwrap();
+        assert_eq!(r.body.as_deref(), Some(s.body.as_ref().unwrap().as_bytes()));
+        // 못 읽는 body 는 막는다.
+        let bad = StoredRequest {
+            body: Some("{not json".into()),
+            ..s
+        };
+        assert!(FetchRequest::from_stored(&bad).is_err());
     }
 
     /// 증거 기록으로 남겼다 되살리면 같은 요청이다(재제출이 같은 요청을 보낸다).
