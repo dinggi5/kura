@@ -15,6 +15,7 @@
 // 핵심 보안: 비번은 절대 MCP/채팅에 노출되지 않는다. MCP는 결제를 "요청"만 하고, 서명·전송은
 // GUI 앱이 사람 승인을 받아 수행한다(파일 기반 IPC). 한도·긴급잠금도 GUI가 강제한다.
 
+use kura_mcp::fetch::FetchRequest;
 use kura_mcp::flow::{self, X402Result};
 use kura_mcp::{erc8004, payment, wallet};
 
@@ -128,6 +129,22 @@ struct PayArgs {
 struct X402Args {
     /// URL of the paid resource to fetch (http/https).
     url: String,
+    /// HTTP method: GET (default), POST, PUT, PATCH or DELETE. Many paid APIs (search, image
+    /// generation) take POST with a JSON body. The paid retry uses the same method.
+    #[serde(default)]
+    #[schemars(transform = plain_optional)]
+    method: Option<String>,
+    /// Extra request headers as a JSON object of name → value. Payment headers, Host,
+    /// Content-Length and connection headers are set by the wallet and are refused here.
+    /// The paid retry sends the same headers.
+    #[serde(default)]
+    #[schemars(transform = plain_optional)]
+    headers: Option<std::collections::BTreeMap<String, String>>,
+    /// JSON object sent as the request body (not allowed with GET). Content-Type defaults to
+    /// application/json. The paid retry sends exactly the same body.
+    #[serde(default)]
+    #[schemars(transform = plain_optional)]
+    body: Option<serde_json::Map<String, serde_json::Value>>,
     /// What the payment is for — the user reads this in the approval window, so fill it in.
     #[serde(default)]
     #[schemars(transform = plain_optional)]
@@ -168,6 +185,20 @@ fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpErro
         McpError::internal_error(format!("Couldn't serialize the result: {e}"), None)
     })?;
     Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
+/// 받은 응답이 작은 이미지면 MCP image content 로 덧붙인다(개발 77) — 파일 경로는 JSON 의 `saved_file` 에 있다.
+fn with_image(
+    mut result: CallToolResult,
+    outcome: &flow::X402Outcome,
+) -> Result<CallToolResult, McpError> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    if let Some(img) = outcome.body().and_then(|b| b.image.as_ref()) {
+        result
+            .content
+            .push(Content::image(B64.encode(&img.data), img.mime.clone()));
+    }
+    Ok(result)
 }
 
 #[tool_router]
@@ -280,17 +311,24 @@ impl WalletServer {
 
     #[tool(
         title = "Fetch a paid URL (x402)",
-        description = "Fetches an x402 paid resource (a URL). It GETs the URL first; if the server answers \
-        402 Payment Required, it asks the user to approve the required payment (exact scheme, the active \
-        network, that chain's USDC) in the wallet app, then re-requests the same URL with the payment header \
-        to return the content. If no payment is required (no 402), it just returns the body. Settlement takes \
+        description = "Calls an x402 paid API or URL. It sends the request first — GET by default, or the \
+        given method (POST, PUT, PATCH, DELETE) with optional headers and a JSON object body; if the server \
+        answers 402 Payment Required, it asks the user to approve the required payment (exact scheme, the \
+        active network, that chain's USDC) in the wallet app, then sends the SAME request (same method, \
+        headers and body) again with the payment header and returns the content. If no payment is required \
+        (no 402), it just returns the response. Redirects are not followed once a payment header is attached \
+        (nor at all when method, headers or body are given) — a redirect comes back as an error with the new \
+        address. Text and JSON come back in `body`. Binary responses (images, PDF, audio) are saved to a \
+        file whose path is in `saved_file` (with `content_type`); a PNG/JPEG/GIF/WebP image up to 3 MB is \
+        also attached as an image. Text longer than 100,000 characters is cut in `body` and kept whole in \
+        `saved_file`. Settlement takes \
         one of two shapes, chosen by the server's requirement: a facilitator settles the signed EIP-3009 \
         authorization (no gas from this wallet), or — where gas is paid in USDC itself and the server asks for \
         `eip3009-client-broadcast` — the wallet broadcasts the transfer itself, so the price AND its gas leave \
         this balance. Approval works exactly as in request_payment (password by default; automatic only when \
         the user has turned autopay on), and the app enforces per-payment and daily limits and the emergency \
-        lock. Never send a password as an argument. Arguments: url (required), memo (what the payment is for \
-        — the user reads it to decide). Returns: payment, paid, status, http_status, body, and \
+        lock. Never send a password as an argument. Arguments: url (required), method, headers, body (JSON \
+        object), memo (what the payment is for — the user reads it to decide), agent_id. Returns: payment, paid, status, http_status, body, and \
         amount/pay_to/settlement when paid; on a chain where the wallet broadcasts the payment itself, `tx` and \
         `explorer` point at that transaction (both are empty on the facilitator-settled path). IMPORTANT — \
         decide on `payment`, which says where the money is: \"none\" = nothing was paid, trying again is safe \
@@ -308,7 +346,12 @@ impl WalletServer {
         &self,
         Parameters(args): Parameters<X402Args>,
     ) -> Result<CallToolResult, McpError> {
-        let out = flow::run_x402(args.url.trim(), args.memo.as_deref(), args.agent_id)
+        // 못 읽는 method·headers·body 는 여기서 막는다 — 아무것도 보내기 전이다.
+        let headers: Vec<(String, String)> = args.headers.unwrap_or_default().into_iter().collect();
+        let body = args.body.map(serde_json::Value::Object);
+        let request = FetchRequest::build(args.method.as_deref(), &headers, body.as_ref())
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let out = flow::run_x402(args.url.trim(), &request, args.memo.as_deref(), args.agent_id)
             .await
             .map_err(|e| McpError::internal_error(e, None))?;
         let X402Result {
@@ -326,7 +369,7 @@ impl WalletServer {
         if !agent_note.is_empty() {
             body["agent_lookup_note"] = serde_json::json!(agent_note);
         }
-        json_result(&body)
+        with_image(json_result(&body)?, &outcome)
     }
 
     #[tool(
@@ -349,7 +392,7 @@ impl WalletServer {
         let outcome = flow::resubmit_x402(&args.tx)
             .await
             .map_err(|e| McpError::internal_error(e, None))?;
-        json_result(&outcome.to_json())
+        with_image(json_result(&outcome.to_json())?, &outcome)
     }
 
     #[tool(
@@ -409,8 +452,8 @@ impl ServerHandler for WalletServer {
                  Reading is free: get_wallet_status, get_balances, get_history and lookup_agent never move \
                  money and need no approval. Check get_balances before paying — on Arc there is no separate \
                  gas balance; gas comes out of the USDC.\n\n\
-                 Paying: request_payment sends to an address; x402_fetch fetches a URL and pays only if the \
-                 server answers 402. Either way the wallet app opens an approval window, and by default a \
+                 Paying: request_payment sends to an address; x402_fetch calls a URL or API (GET, or POST etc. \
+                 with a JSON body) and pays only if the server answers 402. Either way the wallet app opens an approval window, and by default a \
                  human approves with their password (it waits up to 5 minutes). Only when the user has turned \
                  autopay on can a payment go through by itself — within an unlocked session, a small limit, \
                  and a trusted address — and even then the same payment again (same token, recipient and \
@@ -422,7 +465,13 @@ impl ServerHandler for WalletServer {
                  on-chain, and get_history later shows how each one ended. If x402_fetch returned a tx but \
                  no content, x402_resubmit re-sends that payment's proof without paying again.\n\n\
                  lookup_agent reads an ERC-8004 record on-chain; registration there is permissionless, so a \
-                 record is a claim, not proof of safety."
+                 record is a claim, not proof of safety.\n\n\
+                 What x402_fetch can do — examples, not endorsements; check each seller's own docs for the current \
+                 endpoint, price and network, and that the network matches the user's setting (sellers usually \
+                 take Base mainnet USDC): web search for sources, e.g. Exa (POST https://api.exa.ai/search with a \
+                 body like {\"query\": \"...\"}; see exa.ai/docs/reference/x402-guide); image generation, e.g. \
+                 402Claw (402claw.cloud) — the image comes back as a file in saved_file and, when small, as an \
+                 attached image."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
@@ -524,7 +573,10 @@ mod tests {
     fn optional_args_are_plain_in_generated_schema() {
         assert_optional_is_plain::<HistoryArgs>("get_history", &["limit"]);
         assert_optional_is_plain::<PayArgs>("request_payment", &["token", "memo", "agent_id"]);
-        assert_optional_is_plain::<X402Args>("x402_fetch", &["memo", "agent_id"]);
+        assert_optional_is_plain::<X402Args>(
+            "x402_fetch",
+            &["method", "headers", "body", "memo", "agent_id"],
+        );
         assert_optional_is_plain::<AgentArgs>("lookup_agent", &["pay_to", "resource"]);
     }
 
@@ -556,6 +608,14 @@ mod tests {
         assert!(h.limit.is_none());
         let x: X402Args = serde_json::from_str(r#"{"url":"https://e.com"}"#).unwrap();
         assert!(x.memo.is_none() && x.agent_id.is_none());
+        assert!(x.method.is_none() && x.headers.is_none() && x.body.is_none());
+        let x: X402Args = serde_json::from_str(
+            r#"{"url":"https://e.com","method":"POST","headers":{"x-a":"1"},"body":{"query":"q"}}"#,
+        )
+        .unwrap();
+        assert_eq!(x.method.as_deref(), Some("POST"));
+        assert_eq!(x.headers.unwrap()["x-a"], "1");
+        assert_eq!(x.body.unwrap()["query"], "q");
         let a: AgentArgs = serde_json::from_str(r#"{"agent_id":1}"#).unwrap();
         assert!(a.pay_to.is_none() && a.resource.is_none());
     }

@@ -899,6 +899,9 @@ pub struct ProofRecord {
     #[serde(default)]
     pub seed: Option<String>,
     pub nonce: String,
+    /// 결제한 요청의 method·headers·body (개발 77, `v: 2` 부터). v1 기록엔 없다 — 그땐 인자 없는 GET 뿐이었다.
+    #[serde(default)]
+    pub request: Option<crate::fetch::StoredRequest>,
 }
 
 /// 증거 기록에 싣는 402 본문 상한. V2 서버는 챌린지를 헤더로 주므로 본문이 커도 잃는 게 없고,
@@ -956,6 +959,7 @@ mod tests {
             client_nonce: Some("ab".into()),
             seed: None,
             nonce: "0xn".into(),
+            request: None,
         };
         fs::write(
             ap.join("111.proof.json"),
@@ -1413,6 +1417,11 @@ mod tests {
             client_nonce: Some("ab".into()),
             seed: None,
             nonce: "0x01".into(),
+            request: Some(crate::fetch::StoredRequest {
+                method: "POST".into(),
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: Some(r#"{"q":1}"#.into()),
+            }),
         };
         let back: ProofRecord = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);
@@ -1421,5 +1430,6 @@ mod tests {
         )
         .unwrap();
         assert!(min.challenge_header.is_none() && !min.body_dropped);
+        assert!(min.request.is_none()); // v1 기록 = 인자 없는 GET 시절
     }
 }
