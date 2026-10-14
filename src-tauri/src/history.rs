@@ -193,19 +193,22 @@ pub(crate) fn log_attempt(token: &str, to: &str, amount: &str, status: &str, det
 /// 죽으면 해시는 메모리에만 있다가 사라졌다. 다시 켜면 한도는 잡혀 있는데 내역엔 나간 돈이 없고, 사람은 다시 보낸다.
 /// 먼저 적어 두면 그 줄은 체인 확인(confirm.rs)이 해시로 결말을 찾는다. 돌려준 id 로 `finish_pending` 이 고친다.
 /// 못 적었으면 None — 호출자는 끝에 예전처럼 새 줄을 적는다.
+/// 반환: `Ok(id)` = 디스크까지 적었다. `Err(Some(id))` = **줄은 제자리에 있는데** 디스크까지 못 내렸다 — 호출자는 제출하지 않고
+/// 그 id 로 줄을 「실패」로 마무리한다(개발 78, 코덱스 2차 P1: id 를 잃으면 남은 「확인 필요」 줄과 따로 적은 실패 줄이
+/// 각각 환불될 수 있었다). `Err(None)` = 적지 못했다.
 pub(crate) fn log_pending(
     token: &str,
     to: &str,
     amount: &str,
     hash: &str,
     reserved_day: u64,
-) -> Option<String> {
+) -> Result<String, Option<String>> {
     log_entry_with(token, to, amount, "unknown", hash, true, reserved_day)
 }
 
 /// x402 서명 기록(「정산 대기」) — 예약한 날을 같이 싣는다(개발 78). 만료로 확정되면 그 날에만 환불한다.
 pub(crate) fn log_signed(token: &str, to: &str, amount: &str, nonce: &str, reserved_day: u64) {
-    log_entry_with(token, to, amount, "signed", nonce, false, reserved_day);
+    let _ = log_entry_with(token, to, amount, "signed", nonce, false, reserved_day);
 }
 
 /// `log_pending` 이 적은 줄을 결말로 고친다. **아직 「확인 필요」일 때만** — 그 사이 체인 확인이 먼저 결말(되돌려짐 등)을
@@ -259,7 +262,7 @@ fn pending_settled_elsewhere(path: &PathBuf, id: &str) -> bool {
 
 /// 한 줄을 적고 그 id 를 돌려준다(저장 실패면 None).
 fn log_entry(token: &str, to: &str, amount: &str, status: &str, detail: &str) -> Option<String> {
-    log_entry_with(token, to, amount, status, detail, false, 0)
+    log_entry_with(token, to, amount, status, detail, false, 0).ok()
 }
 
 /// `durable` = 디스크까지 내린다(개발 78, 코덱스 1차 P0) — **제출 직전의 「확인 필요」 줄**(`log_pending`)만 쓴다.
@@ -275,7 +278,7 @@ fn log_entry_with(
     detail: &str,
     durable: bool,
     reserved_day: u64,
-) -> Option<String> {
+) -> Result<String, Option<String>> {
     let entry = HistoryEntry {
         ts: now_secs(),
         token: token.into(),
@@ -294,13 +297,30 @@ fn log_entry_with(
     remember_recent(&entry);
     let id = entry.id.clone();
     let _g = history_guard();
-    let path = history_path().ok()?;
+    let path = history_path().map_err(|_| None)?;
     match record_at_with(&path, entry, HISTORY_CAP, durable) {
-        Ok(()) => Some(id),
-        Err(e) => {
-            eprintln!("[history] 기록 실패: {e}");
-            None
+        Ok(()) => Ok(id),
+        Err(RecordError::InPlace(e)) => {
+            eprintln!("[history] 기록을 디스크까지 못 내림: {e}");
+            Err(Some(id))
         }
+        Err(RecordError::NotWritten(e)) => {
+            eprintln!("[history] 기록 실패: {e}");
+            Err(None)
+        }
+    }
+}
+
+/// `record_at_with` 의 실패 — 줄이 제자리에 갔는지가 뒷수습을 가른다(개발 78).
+enum RecordError {
+    NotWritten(String),
+    /// 새 내역은 제자리인데 디스크까지 못 내렸다(durable 쓰기만).
+    InPlace(String),
+}
+
+impl From<String> for RecordError {
+    fn from(e: String) -> Self {
+        RecordError::NotWritten(e)
     }
 }
 
@@ -376,7 +396,9 @@ fn new_record_id() -> String {
 /// `log_attempt` 의 본체 — 경로를 받는다(테스트가 실지갑을 안 건드리게).
 #[cfg(test)]
 fn record_at(path: &PathBuf, entry: HistoryEntry, cap: usize) -> Result<(), String> {
-    record_at_with(path, entry, cap, false)
+    record_at_with(path, entry, cap, false).map_err(|e| match e {
+        RecordError::NotWritten(m) | RecordError::InPlace(m) => m,
+    })
 }
 
 fn record_at_with(
@@ -384,7 +406,7 @@ fn record_at_with(
     entry: HistoryEntry,
     cap: usize,
     durable: bool,
-) -> Result<(), String> {
+) -> Result<(), RecordError> {
     if history_unreadable(path) {
         let aside = path.with_extension(format!("broken.{}.json", now_secs()));
         fs::rename(path, &aside).map_err(|e| e.to_string())?;
@@ -396,11 +418,12 @@ fn record_at_with(
         list.extend(evicted); // 옮기지 못했으면 자르지 않는다
     }
     if !durable {
-        return write_json(path.clone(), &list);
+        return Ok(write_json(path.clone(), &list)?);
     }
     let json = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
     crate::store::write_atomic_durable(path, json.as_bytes()).map_err(|e| match e {
-        crate::store::DurableError::NotWritten(m) | crate::store::DurableError::NotDurable(m) => m,
+        crate::store::DurableError::NotWritten(m) => RecordError::NotWritten(m),
+        crate::store::DurableError::NotDurable(m) => RecordError::InPlace(m),
     })
 }
 

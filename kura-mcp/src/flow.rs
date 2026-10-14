@@ -1016,6 +1016,14 @@ pub async fn resubmit_x402(tx: &str) -> Result<X402Outcome, String> {
             .into())
         }
     };
+    // 재제출도 같은 규칙(개발 78, 코덱스 2차) — 결제 증거를 평문 http 로 내보내지 않는다.
+    if !reqwest::Url::parse(&proof.url).is_ok_and(|u| payment_url_ok(&u)) {
+        return Err(tf!(
+            "이 주소는 암호화되지 않은 http 라 결제 증거를 보내지 않았어요: {}",
+            "Not sending the payment proof over unencrypted http: {}",
+            proof.url
+        ));
+    }
     deliver(Delivery {
         sub,
         url: &proof.url,

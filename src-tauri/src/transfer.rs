@@ -419,8 +419,17 @@ impl Journal {
         if !self.record {
             return true;
         }
-        let id = crate::history::log_pending(&self.token, &self.to, &self.amt, hash, self.reserved_day);
-        let ok = id.is_some();
+        // 디스크까지 못 내렸어도 줄이 제자리에 있으면 그 id 를 쥔다 — 제출하지 않고 `finish("failed")` 가 그 줄을 마무리한다(개발 78).
+        let (id, ok) = match crate::history::log_pending(
+            &self.token,
+            &self.to,
+            &self.amt,
+            hash,
+            self.reserved_day,
+        ) {
+            Ok(id) => (Some(id), true),
+            Err(id) => (id, false),
+        };
         *self.id.lock().unwrap_or_else(|e| e.into_inner()) = id;
         ok
     }
