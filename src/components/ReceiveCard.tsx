@@ -31,7 +31,7 @@ export function ReceiveCard({ address, onClose }: { address: string; onClose: ()
 
       <div className="mt-6 flex justify-center">
         <div className="p-4 rounded-[10px] bg-white dark:bg-[#E8E5DD] border border-[var(--color-ivory-300)] dark:border-transparent">
-          <QRCodeSVG value={address} size={176} bgColor="transparent" fgColor="#1A1814" level="M" />
+          <QRCodeSVG value={address} size={176} bgColor="transparent" fgColor="#1A1A19" level="M" />
         </div>
       </div>
 

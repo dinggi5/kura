@@ -1,10 +1,10 @@
 /* Kura 문서 페이지 공통 스타일 (개발 34).
-   앱의 디자인 토큰(src/App.css)에서 아이보리·잉크·토스블루를 그대로 가져왔다.
+   앱의 디자인 토큰(src/App.css)에서 미색·잉크·토스블루를 그대로 가져왔다.
    외부 글꼴을 부르지 않는다 — 개인정보 처리방침 페이지가 방문자를 CDN 에 흘리면
    그 페이지가 하는 말과 행동이 어긋난다. */
   :root {
-    --ivory-100: #FAFAF7; --ivory-200: #F5F4EE; --ivory-400: #E8E5DC;
-    --ink-900: #1A1814; --ink-700: #4A4640; --ink-500: #8A8478;
+    --ivory-100: #FAFAF9; --ivory-200: #F3F3F1; --ivory-400: #E4E4E0;
+    --ink-900: #1A1A19; --ink-700: #4A4A47; --ink-500: #8A8A85;
     --bg: var(--ivory-100); --surface: #FFFFFF; --border: var(--ivory-400);
     --fg: var(--ink-900); --fg-dim: var(--ink-700); --fg-faint: var(--ink-500);
     --accent: #3182F6; --code-bg: var(--ivory-200);
