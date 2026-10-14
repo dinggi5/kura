@@ -470,7 +470,7 @@ impl ServerHandler for WalletServer {
                  endpoint, price and network, and that the network matches the user's setting (many take \
                  Base mainnet USDC): web search for sources, e.g. Exa (POST https://api.exa.ai/search with a \
                  body like {\"query\": \"...\"}; see exa.ai/docs/reference/x402-guide); image generation, e.g. \
-                 402Claw (402claw.cloud) — the image comes back as a file in saved_file and, when small, as an \
+                 AiSpace (x402.aispace.bot) — the image comes back as a file in saved_file and, when small, as an \
                  attached image."
                     .into(),
             ),

@@ -246,7 +246,7 @@ export const HELP_SECTIONS: HelpSection[] = [
           </li>
           <li>
             <b className={em}>이미지 만들기</b> — "이런 그림 만들어줘"라고 하면 AI가 이미지 생성
-            서비스(예: 402Claw)에 요청해요. 받은 이미지는 다운로드 폴더 안 Kura 폴더에 저장되고,
+            서비스(예: AiSpace)에 요청해요. 받은 이미지는 다운로드 폴더 안 Kura 폴더에 저장되고,
             크기가 작으면 AI도 바로 볼 수 있어요.
           </li>
         </ul>
@@ -267,7 +267,7 @@ export const HELP_SECTIONS: HelpSection[] = [
           </li>
           <li>
             <b className={em}>Making images</b> — ask "make a picture like this" and the AI sends
-            the request to an image service (for example 402Claw). The image is saved to a Kura
+            the request to an image service (for example AiSpace). The image is saved to a Kura
             folder inside Downloads, and if it's small the AI can look at it right away.
           </li>
         </ul>

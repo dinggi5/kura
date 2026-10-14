@@ -187,11 +187,11 @@ Tools the AI gets: `get_wallet_status` · `get_balances` · `get_history` (read 
 Any service that charges over x402 lets the AI **pay per request** through Kura and bring back the result — many need no sign-up or API key. The services below are **examples** — prices, networks and addresses differ by service and can change, so check each one's own docs. Many take **USDC on Base mainnet**.
 
 - **Finding sources** — e.g. [Exa](https://exa.ai/docs/reference/x402-guide). The AI sends JSON like `{"query": "…"}` to `POST https://api.exa.ai/search`; when the 402 comes back you approve the price of one search, and **the same query** is sent again with the payment.
-- **Making images** — e.g. [402Claw](https://402claw.cloud/). The AI pays for an image-generation request, and the image is saved as a file in `~/Downloads/Kura/` (the path is in the result's `saved_file`). PNG, JPEG, GIF and WebP up to 3 MB are also attached to the result as an image the AI can see.
+- **Making images** — e.g. [AiSpace](https://x402.aispace.bot/). The AI pays for an image-generation request, and the image is saved as a file in `~/Downloads/Kura/` (the path is in the result's `saved_file`). PNG, JPEG, GIF and WebP up to 3 MB are also attached to the result as an image the AI can see.
 
 ```text
 "Find 5 recent sources on x402 with Exa"          → x402_fetch(url, method:"POST", body:{query, numResults:5})
-"Make a picture of a cat at the beach (402Claw)"  → x402_fetch(the URL from the seller's docs, method:"POST", body:{prompt…})
+"Make a picture of a cat at the beach (AiSpace)"  → x402_fetch(the URL from the seller's docs, method:"POST", body:{prompt…})
 ```
 
 The paid retry goes out with **the same method, headers and body** as the first request, so the payment goes to the same request that got the 402. A request carrying a payment header never follows a redirect, and a request with a method, headers or body doesn't follow one even before paying — it reports the new address instead.

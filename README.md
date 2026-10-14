@@ -187,11 +187,11 @@ AI가 쓸 수 있는 도구: `get_wallet_status` · `get_balances` · `get_histo
 x402로 값을 받는 서비스라면, AI가 Kura로 **건마다 결제하고** 결과를 받아와요. 가입·API 키 없이 쓸 수 있는 곳이 많아요. 아래 서비스 이름은 **예시**예요 — 값·네트워크·주소는 서비스마다 다르고 바뀔 수 있으니 각 서비스 문서를 확인하세요. **Base 메인넷 USDC**로 받는 곳이 많아요.
 
 - **자료 찾기** — 예: [Exa](https://exa.ai/docs/reference/x402-guide). AI가 `POST https://api.exa.ai/search`에 `{"query": "…"}` 같은 JSON을 보내고, 402가 오면 검색 한 번 값을 승인받아 **같은 질문을 그대로** 다시 보내요.
-- **이미지 만들기** — 예: [402Claw](https://402claw.cloud/). 이미지 생성 요청을 결제하고, 받은 이미지는 `~/Downloads/Kura/`에 파일로 저장돼요(저장 경로는 결과의 `saved_file`). 3MB 이하 PNG·JPEG·GIF·WebP는 AI에게 이미지로도 바로 붙어요.
+- **이미지 만들기** — 예: [AiSpace](https://x402.aispace.bot/). 이미지 생성 요청을 결제하고, 받은 이미지는 `~/Downloads/Kura/`에 파일로 저장돼요(저장 경로는 결과의 `saved_file`). 3MB 이하 PNG·JPEG·GIF·WebP는 AI에게 이미지로도 바로 붙어요.
 
 ```text
 "Exa로 x402 최신 자료 5개 찾아줘"           → x402_fetch(url, method:"POST", body:{query, numResults:5})
-"402Claw로 바닷가 고양이 그림 만들어줘"     → x402_fetch(판매처 문서의 주소, method:"POST", body:{prompt…})
+"AiSpace로 바닷가 고양이 그림 만들어줘"     → x402_fetch(판매처 문서의 주소, method:"POST", body:{prompt…})
 ```
 
 결제 헤더를 실은 재요청은 첫 요청과 **같은 method·헤더·body**로 나가요(승인한 결제와 다른 걸 사지 않게). 결제 헤더가 붙은 요청은 리다이렉트를 따라가지 않아요. method·헤더·body를 준 요청은 첫 요청부터 리다이렉트를 따라가지 않고, 옮겨 간 주소를 알려 줘요.
