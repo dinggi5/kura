@@ -429,7 +429,7 @@ pub fn has_pending() -> bool {
 }
 
 /// 새 요청 id — 유닉스 나노초. 로컬 single-flight 환경엔 충분히 고유하다.
-fn new_id() -> String {
+pub fn new_id() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -498,8 +498,10 @@ pub fn write_x402_direct_request(
     agent: Option<AgentTrust>,
     picked_chain: u64,
     approve_secs: Option<u64>,
+    preset_id: Option<String>,
 ) -> Result<(String, Option<AgentTrust>), String> {
-    write_request_kind(
+    write_request_kind_id(
+        preset_id,
         "USDC",
         to,
         amount,
@@ -534,7 +536,37 @@ fn write_request_kind(
     pin: Option<u64>,
     approve_secs: Option<u64>,
 ) -> Result<(String, Option<AgentTrust>, &'static str), String> {
-    let id = new_id();
+    write_request_kind_id(
+        None,
+        token,
+        to,
+        amount,
+        memo,
+        kind,
+        resource,
+        nonce,
+        agent,
+        pin,
+        approve_secs,
+    )
+}
+
+/// `preset_id` = 호출자가 미리 정한 요청 id(개발 78) — 직접 제출은 증거를 요청보다 먼저 써야 해서 id 가 먼저 필요하다.
+#[allow(clippy::too_many_arguments)]
+fn write_request_kind_id(
+    preset_id: Option<String>,
+    token: &str,
+    to: &str,
+    amount: &str,
+    memo: &str,
+    kind: &str,
+    resource: &str,
+    nonce: &str,
+    agent: Option<AgentTrust>,
+    pin: Option<u64>,
+    approve_secs: Option<u64>,
+) -> Result<(String, Option<AgentTrust>, &'static str), String> {
+    let id = preset_id.unwrap_or_else(new_id);
     let chain = crate::chain::active_chain();
     let chain_id = chain.chain_id;
     // 🔴 x402 는 **요구를 고른 체인**과 지금 각인할 체인이 같아야 한다(개발 73, 코덱스 1차 P1) — 각인하는 값과 대조하는 값이
@@ -830,16 +862,26 @@ fn read_attempt(dir: &Path, id: &str) -> Option<crate::policy::AttemptRecord> {
 /// 콘텐츠를 받을 길이 없었다**(개발 64 코덱스 P1). 요청 id 로 묶어 GUI 의 결제 시도 기록 옆에 둔다 —
 /// 그쪽이 tx 해시를, 이쪽이 증거 재료를 갖고 있어 둘을 합치면 제출물을 다시 만들 수 있다.
 ///
-/// 비밀은 없다(모두 서버와 체인에 공개되는 값이다). 실패해도 결제는 막지 않는다 — 부가 기록이다.
-pub fn write_proof(id: &str, proof: &ProofRecord) {
-    let Some(path) = jigap_dir()
+/// 비밀은 없다(모두 서버와 체인에 공개되는 값이다). **실패하면 결제를 시작하지 않는다**(개발 78, 코덱스 1차 P0) —
+/// 이 기록 없이 나간 직접 제출은 영수증이 늦으면 콘텐츠를 되찾을 길이 없다. 그래서 요청을 내걸기 **전에** 쓴다.
+pub fn write_proof(id: &str, proof: &ProofRecord) -> Result<(), String> {
+    let path = crate::policy::proof_path(&jigap_dir()?, id).ok_or_else(|| {
+        String::from(ts!(
+            "결제 요청 번호가 올바르지 않아요.",
+            "That payment request id isn't valid."
+        ))
+    })?;
+    let json = serde_json::to_string_pretty(proof).map_err(|e| e.to_string())?;
+    write_atomic(&path, json.as_bytes())
+}
+
+/// 요청을 못 낸 직접 제출의 증거를 치운다(개발 78) — 요청 없는 증거는 재제출이 어차피 안 쓰지만(시도 기록이 없다) 쌓이지 않게.
+pub fn remove_proof(id: &str) {
+    if let Some(p) = jigap_dir()
         .ok()
         .and_then(|d| crate::policy::proof_path(&d, id))
-    else {
-        return;
-    };
-    if let Ok(json) = serde_json::to_string_pretty(proof) {
-        let _ = write_atomic(&path, json.as_bytes());
+    {
+        let _ = fs::remove_file(p);
     }
 }
 

@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChain } from "@/lib/chain";
-import { accountName, fmtAmount, fmtCountdown, secsLeft, shortenAddress } from "@/lib/format";
+import { accountName, fmtAmount, fmtCountdown, fmtExact, secsLeft, shortenAddress } from "@/lib/format";
 import type { Account, AgentTrust, Balances, PaymentRequest } from "@/lib/types";
 import { modalCard, modalOverlay, primaryBtn, secondaryBtn, PwInput } from "@/components/ui";
 import { t } from "@/lib/i18n";
@@ -230,7 +230,7 @@ export function PaymentApprovalModal({
         {/* 금액 + 받는 주소 (도장 찍듯 확정) */}
         <div className="mt-4 flex flex-col items-center py-2">
           <div className="flex items-baseline gap-1.5">
-            <span className="balance text-[40px] leading-none num">{fmtAmount(request.amount, 6)}</span>
+            <span className={`balance leading-none num ${fmtExact(request.amount).length > 10 ? "text-[24px] break-all" : "text-[40px]"}`}>{fmtExact(request.amount)}</span>
             <span className="text-[14px] text-[var(--color-ink-500)]">{request.token}</span>
           </div>
           <p className="mt-2.5 flex items-center gap-1.5 text-[12px] font-mono text-[var(--color-ink-500)]">

@@ -80,6 +80,25 @@ fn http_client_no_redirect_for(timeout: std::time::Duration) -> Result<reqwest::
         })
 }
 
+/// 결제 헤더를 실어도 되는 주소인가(개발 78) — https, 또는 이 컴퓨터 안의 개발 서버(localhost·루프백 IP)만.
+fn payment_url_ok(u: &reqwest::Url) -> bool {
+    if u.scheme() == "https" {
+        return true;
+    }
+    if u.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = u.host_str() else {
+        return false;
+    };
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    let d = host.trim_end_matches('.').to_ascii_lowercase();
+    d == "localhost" || d.ends_with(".localhost")
+}
+
 /// 결제(송금) 요청 결과 — 사람 승인 팝업에서 사용자가 응답한 결과.
 pub struct PayOutcome {
     /// approved | rejected | failed.
@@ -478,6 +497,16 @@ pub async fn run_x402(
     // probe 가 리다이렉트를 따라갔을 수 있으니 402 를 실제로 낸 "최종" URL 을 잡아둔다 —
     // 결제 재요청(서명 헤더 포함)은 이 최종 URL 에만 보낸다(원본 URL 로 보내면 다시 리다이렉트).
     let final_url = resp.url().clone();
+    // 🔴 **평문 HTTP 로는 결제하지 않는다** (개발 78, 코덱스 1차 P1). 결제 헤더(서명된 인가)·호출자 헤더·본문이 그대로
+    // 보이고 바뀔 수 있다 — EIP-3009 인가는 받는 사람·금액만 묶고 method·본문은 안 묶어서, 중간자가 인가를 먼저 써 버리거나
+    // 다른 걸 사게 만들 수 있다. HTTPS → HTTP 로 내려간 리다이렉트도 여기서 걸린다(최종 주소를 본다). 로컬 개발 서버만 예외.
+    if !payment_url_ok(&final_url) {
+        return Err(tf!(
+            "이 주소는 암호화되지 않은 http 라 결제하지 않았어요: {}",
+            "Not paying over unencrypted http: {}",
+            final_url
+        ));
+    }
 
     // 2) 결제 요구 파싱 → 우리가 처리 가능한 요구 선택.
     // V2는 요구가 `payment-required` 헤더(base64)에, V1은 본문에 온다. 본문을 소비하기 전에 헤더 먼저.
@@ -644,44 +673,16 @@ pub async fn run_x402(
         )
         .into());
     }
-    // 여기도 같은 규칙 — 요청에 실린 대조만 결과로 돌려준다(개발 47 부터 있던 어긋남).
-    let (id, agent) = if direct {
-        payment::write_x402_direct_request(
-            req.pay_to.trim(),
-            &amount_usdc,
-            &memo,
-            &resource,
-            &nonce,
-            agent,
-            picked_chain,
-            // 승인 예산의 끝을 요청에 싣는다(개발 76) — 앱이 제출 직전에 다시 보고, 승인 창 카운트다운도 이걸 쓴다.
-            budget,
-        )?
-    } else {
-        payment::write_x402_request(
-            req.pay_to.trim(),
-            &amount_usdc,
-            &memo,
-            &resource,
-            agent,
-            picked_chain,
-        )?
-    };
-    // 🔴 **seed 모드면 승인 대기를 그 수명 안으로 줄인다** (개발 64 리뷰 P1). seed 는 서버가 수명을
-    // 박아 발급한 챌린지라(상대 구현 기본 300초), 5분을 꽉 채워 기다렸다 승인받으면 **브로드캐스트는
-    // 성공하고 서버는 `seed_expired` 로 거절한다** — 돈만 나간다. 만료 전에 우리가 먼저 접으면
-    // 요청 파일이 사라지고, 그 뒤 사람이 승인 버튼을 눌러도 `begin_approval` 이 막는다(개발 63).
-    // 기본 모드(clientNonce)엔 수명이 없어 `None` — 예전 그대로 5분이다.
-    let approval_wait = match budget {
-        Some(secs) => std::time::Duration::from_secs(secs), // 0 은 위에서 요청을 쓰기 전에 걸렀다
-        None => payment::APPROVAL_TIMEOUT,
-    };
     // 증거 재료를 남긴다(개발 66, 직접 제출만) — 영수증이 늦거나 이 프로세스가 죽어도 나중에 증거를
     // 다시 만들 수 있게. 서명 갈래는 남길 게 없다(서명은 GUI 결과에 실려 오고, 안 오면 아무것도 안 나갔다).
-    if direct {
+    // 🔴 **요청을 내걸기 전에 쓰고, 못 쓰면 결제하지 않는다** (개발 78, 코덱스 1차 P0). 예전엔 요청 파일을 먼저 쓰고
+    // 증거는 그 뒤에, 실패해도 무시했다 — 그 사이 이 프로세스가 죽거나 저장이 실패하면 자율 승인으로 돈은 나가는데
+    // 챌린지·clientNonce 가 없어 `x402_resubmit` 으로도 콘텐츠를 못 받는다. 그래서 id 를 먼저 정해 증거부터 둔다.
+    let preset_id = direct.then(payment::new_id);
+    if let Some(id) = &preset_id {
         let dropped = body402.len() > payment::PROOF_BODY_CAP;
         payment::write_proof(
-            &id,
+            id,
             &payment::ProofRecord {
                 v: 2,
                 id: id.clone(),
@@ -701,8 +702,54 @@ pub async fn run_x402(
                 // 재제출이 같은 method·headers·body 로 다시 보낸다(개발 77).
                 request: Some(request.to_stored()),
             },
-        );
+        )
+        .map_err(|e| {
+            tf!(
+                "결제를 되살릴 기록을 저장하지 못했어요. 아무것도 결제하지 않았습니다 — {}",
+                "Couldn't save the record needed to recover this payment. Nothing was paid — {}",
+                e
+            )
+        })?;
     }
+    // 여기도 같은 규칙 — 요청에 실린 대조만 결과로 돌려준다(개발 47 부터 있던 어긋남).
+    let (id, agent) = if direct {
+        payment::write_x402_direct_request(
+            req.pay_to.trim(),
+            &amount_usdc,
+            &memo,
+            &resource,
+            &nonce,
+            agent,
+            picked_chain,
+            // 승인 예산의 끝을 요청에 싣는다(개발 76) — 앱이 제출 직전에 다시 보고, 승인 창 카운트다운도 이걸 쓴다.
+            budget,
+            preset_id.clone(),
+        )
+        // 요청을 못 냈으면 방금 둔 증거도 치운다(아무것도 안 나갔다).
+        .inspect_err(|_| {
+            if let Some(id) = &preset_id {
+                payment::remove_proof(id);
+            }
+        })?
+    } else {
+        payment::write_x402_request(
+            req.pay_to.trim(),
+            &amount_usdc,
+            &memo,
+            &resource,
+            agent,
+            picked_chain,
+        )?
+    };
+    // 🔴 **seed 모드면 승인 대기를 그 수명 안으로 줄인다** (개발 64 리뷰 P1). seed 는 서버가 수명을
+    // 박아 발급한 챌린지라(상대 구현 기본 300초), 5분을 꽉 채워 기다렸다 승인받으면 **브로드캐스트는
+    // 성공하고 서버는 `seed_expired` 로 거절한다** — 돈만 나간다. 만료 전에 우리가 먼저 접으면
+    // 요청 파일이 사라지고, 그 뒤 사람이 승인 버튼을 눌러도 `begin_approval` 이 막는다(개발 63).
+    // 기본 모드(clientNonce)엔 수명이 없어 `None` — 예전 그대로 5분이다.
+    let approval_wait = match budget {
+        Some(secs) => std::time::Duration::from_secs(secs), // 0 은 위에서 요청을 쓰기 전에 걸렀다
+        None => payment::APPROVAL_TIMEOUT,
+    };
     let result = match payment::await_result(&id, approval_wait).await {
         Some(r) => r,
         // 아무것도 안 나갔다(요청은 await_result 가 거뒀다). 전송 중이었으면 여기가 아니라 "unknown" 이 온다.
@@ -1133,6 +1180,21 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 🔴 개발 78(코덱스 1차 P1): 결제는 https 또는 이 컴퓨터 안의 http 만.
+    #[test]
+    fn payment_only_over_https_or_loopback() {
+        let ok = |u: &str| payment_url_ok(&reqwest::Url::parse(u).unwrap());
+        assert!(ok("https://api.exa.ai/search"));
+        assert!(ok("http://localhost:4021/paid"));
+        assert!(ok("http://127.0.0.1:8080/x"));
+        assert!(ok("http://[::1]:8080/x"));
+        assert!(ok("http://kadi.localhost/x"));
+        assert!(!ok("http://api.example.com/paid"));
+        assert!(!ok("http://10.0.0.5/paid"));
+        assert!(!ok("http://localhost.evil.com/paid"));
+        assert!(!ok("ftp://localhost/x"));
+    }
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
 

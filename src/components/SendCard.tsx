@@ -7,7 +7,7 @@ import { motion } from "framer-motion";
 import { ArrowLeft, ArrowUpRight, AlertTriangle, Check, ExternalLink, Loader2, Lock } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChain } from "@/lib/chain";
-import { MAX_ETH, MAX_USDC, fmtAmount, isAddressLike, shortenAddress } from "@/lib/format";
+import { MAX_ETH, MAX_USDC, fmtAmount, fmtExact, isAddressLike, shortenAddress } from "@/lib/format";
 import type { Settings, SpendView } from "@/lib/types";
 import {
   cardBase,
@@ -343,7 +343,7 @@ export function SendCard({
         <div className="mt-6">
           <div className="flex flex-col items-center py-2">
             <div className="flex items-baseline gap-1.5">
-              <span className="balance text-[44px] leading-none num">{fmtAmount(amount, 6)}</span>
+              <span className={`balance leading-none num ${fmtExact(amount).length > 10 ? "text-[24px] break-all" : "text-[44px]"}`}>{fmtExact(amount)}</span>
               <span className="text-[14px] text-[var(--color-ink-500)]">{token}</span>
             </div>
             <p className="mt-3 flex items-center gap-1.5 text-[12px] font-mono text-[var(--color-ink-500)]">

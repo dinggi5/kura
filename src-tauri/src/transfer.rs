@@ -387,17 +387,20 @@ pub(crate) struct Journal {
     pub(crate) token: String,
     to: String,
     amt: String,
+    reserved_day: u64,
     /// false = 내역을 안 건드린다(실 RPC 를 부르는 무시된 테스트용).
     record: bool,
     id: std::sync::Mutex<Option<String>>,
 }
 
 impl Journal {
-    pub(crate) fn new(token: &str, to: &str, amt: &str) -> Self {
+    /// `reserved_day` = 이 송금이 한도를 예약한 날(`reserve_spend` 의 반환) — 먼저 적는 줄에 실어 환불이 그 날에만 가게(개발 78).
+    pub(crate) fn new(token: &str, to: &str, amt: &str, reserved_day: u64) -> Self {
         Journal {
             token: token.into(),
             to: to.into(),
             amt: amt.into(),
+            reserved_day,
             record: true,
             id: std::sync::Mutex::new(None),
         }
@@ -407,7 +410,7 @@ impl Journal {
     fn unrecorded(token: &str) -> Self {
         Journal {
             record: false,
-            ..Journal::new(token, "", "")
+            ..Journal::new(token, "", "", 0)
         }
     }
 
@@ -416,7 +419,7 @@ impl Journal {
         if !self.record {
             return true;
         }
-        let id = crate::history::log_pending(&self.token, &self.to, &self.amt, hash);
+        let id = crate::history::log_pending(&self.token, &self.to, &self.amt, hash, self.reserved_day);
         let ok = id.is_some();
         *self.id.lock().unwrap_or_else(|e| e.into_inner()) = id;
         ok
@@ -844,7 +847,7 @@ async fn do_send_eth_inner(
     let tx = TransactionRequest::default()
         .with_to(to_addr)
         .with_value(value);
-    let journal = Journal::new("ETH", to, amt);
+    let journal = Journal::new("ETH", to, amt, reserved_day);
     let hash = settle_broadcast(
         Box::pin(broadcast(signer, tx, &journal)).await,
         &journal,
@@ -1025,7 +1028,7 @@ async fn do_send_usdc_inner(
             }
             .abi_encode(),
         );
-    let journal = Journal::new("USDC", to, amt);
+    let journal = Journal::new("USDC", to, amt, reserved_day);
     settle_broadcast(
         Box::pin(broadcast(signer, tx, &journal)).await,
         &journal,

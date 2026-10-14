@@ -42,6 +42,11 @@ const KDF_M_V2: u32 = 19_456;
 const KDF_T_V2: u32 = 2;
 const KDF_P_V2: u32 = 1;
 
+/// 파일에서 읽은 KDF 비용의 상한(개발 78) — v3 의 4배·몇 배 위. 이보다 크면 손상으로 본다.
+const KDF_M_MAX: u32 = 262_144; // KiB = 256 MiB
+const KDF_T_MAX: u32 = 10;
+const KDF_P_MAX: u32 = 4;
+
 fn default_kdf_m() -> u32 {
     KDF_M_V2
 }
@@ -239,6 +244,15 @@ fn derive_key(
     p: u32,
 ) -> Result<Zeroizing<[u8; 32]>, String> {
     use argon2::{Algorithm, Params, Version};
+    // 파일에 적힌 비용을 그대로 믿지 않는다(개발 78, 코덱스 1차) — `kdf_m` 이 터무니없이 크면 Argon2 가 그만큼을
+    // 한 번에 할당하다 오류를 돌려주기 전에 프로세스가 죽는다. 우리가 쓰는 v2·v3 값보다 넉넉히 위에서 끊는다.
+    if m > KDF_M_MAX || t > KDF_T_MAX || p > KDF_P_MAX {
+        return Err(ts!(
+            "지갑 파일의 암호 설정이 비정상적으로 커요. 파일이 손상됐을 수 있습니다 — 복구 문구로 복원하세요.",
+            "The wallet file's key-derivation settings are abnormally large. The file may be damaged — restore from your recovery phrase."
+        )
+        .into());
+    }
     let params = Params::new(m, t, p, Some(32)).map_err(|e| {
         tf!(
             "KDF 파라미터 오류: {e}",
@@ -1239,5 +1253,14 @@ mod tests {
         let b = encrypt_wallet(phrase, "0x0", "pw").unwrap();
         assert_ne!(a.ciphertext, b.ciphertext);
         assert_ne!(a.salt, b.salt);
+    }
+
+    /// 🔴 개발 78(코덱스 1차): 파일에 적힌 KDF 비용이 터무니없으면 할당하지 않고 거절한다.
+    #[test]
+    fn absurd_kdf_cost_is_refused_before_allocating() {
+        assert!(derive_key("pw", &[0u8; 16], u32::MAX, 3, 1).is_err());
+        assert!(derive_key("pw", &[0u8; 16], KDF_M_V3, u32::MAX, 1).is_err());
+        assert!(derive_key("pw", &[0u8; 16], KDF_M_V3, 3, 64).is_err());
+        assert!(derive_key("pw", &[0u8; 16], KDF_M_V2, KDF_T_V2, KDF_P_V2).is_ok());
     }
 }

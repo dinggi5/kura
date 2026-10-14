@@ -393,11 +393,16 @@ enum WriteErr {
 fn write_new(dir: &Path, path: &Path, bytes: &[u8]) -> Result<PathBuf, WriteErr> {
     use std::io::Write;
     std::fs::create_dir_all(dir).map_err(|e| WriteErr::Other(e.to_string()))?;
-    let mut f = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    // 받은 콘텐츠는 이 사용자만 읽는다 — **만들 때부터** 0600(개발 78, 코덱스 1차 P2). 다 쓴 뒤에 좁히면 그 사이 연
+    // 다른 계정의 핸들은 좁힌 뒤에도 읽힌다.
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = match opts.open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(WriteErr::Exists),
         Err(e) => return Err(WriteErr::Other(e.to_string())),
@@ -405,12 +410,6 @@ fn write_new(dir: &Path, path: &Path, bytes: &[u8]) -> Result<PathBuf, WriteErr>
     if let Err(e) = f.write_all(bytes) {
         let _ = std::fs::remove_file(path);
         return Err(WriteErr::Other(e.to_string()));
-    }
-    // 받은 콘텐츠는 이 사용자만 읽는다.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
     }
     mark_quarantine(path);
     Ok(path.to_path_buf())

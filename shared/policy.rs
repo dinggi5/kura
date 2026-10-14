@@ -338,6 +338,15 @@ pub struct HistoryEntry {
     /// 확인한 기록은 다시 묻지 않는다. 옛 기록·아직 못 본 기록은 false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub checked: bool,
+    /// 이 결제가 한도를 예약한 날(UTC 일 번호, 개발 78 — 코덱스 1차 P1). 체인 확인이 「안 나갔다」로 확정해 환불할 때
+    /// **이 날에만** 돌려준다. 예전엔 기록 시각으로 추정했다 — 자정 전에 예약한 송금이 제출 줄·절전으로 늦게 기록되면
+    /// 다음 날 사용액을 깎아 한도를 더 쓰게 했다. 0 = 모름(옛 기록·예약 없는 기록) → 기록 시각 추정으로 물러선다.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub reserved_day: u64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// 이 기록이 `owner` 의 것으로 보이는가 — 주인이 적혀 있으면 주소 대조, 없으면(옛 기록) 참.

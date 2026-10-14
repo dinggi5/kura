@@ -288,7 +288,14 @@ fn refund_key(e: &HistoryEntry) -> String {
 /// 환불 대상인가 (순수 — 테스트용): 체인 확인이 「돈이 안 나갔다」로 확정했고(reverted·expired) 오늘 기록이면 그 날.
 fn refund_due(e: &HistoryEntry, now: u64) -> Option<u64> {
     (e.checked && matches!(e.status.as_str(), "reverted" | "expired"))
-        .then(|| refund_day(e.ts, now))
+        .then(|| {
+            // 예약한 날이 적혀 있으면 그 날만(개발 78) — 오늘이 아니면 그 날 장부는 이미 새로 시작했다.
+            if e.reserved_day != 0 {
+                (e.reserved_day == now / 86_400).then_some(e.reserved_day)
+            } else {
+                refund_day(e.ts, now)
+            }
+        })
         .flatten()
 }
 
@@ -479,6 +486,21 @@ mod tests {
         assert_eq!(refund_key(&e), format!("{}:{HASH}", e.ts));
         e.id = "abc".into();
         assert_eq!(refund_key(&e), "abc");
+    }
+
+    /// 🔴 개발 78(코덱스 1차 P1): 자정 전에 예약하고 다음 날 00:06 에 기록된 송금이 되돌려지면 — 예전엔 기록 시각으로
+    /// 「다음 날 예약」이라 보고 다음 날 사용액을 깎았다. 예약한 날이 적혀 있으면 그 날만 본다.
+    #[test]
+    fn refund_uses_reserved_day_when_recorded() {
+        let day = 20_000u64;
+        let recorded = (day + 1) * 86_400 + 360; // 다음 날 00:06
+        let mut e = rec(recorded, "reverted", HASH);
+        e.checked = true;
+        assert_eq!(refund_due(&e, recorded + 60), Some(day + 1)); // 옛 기록(날 모름) = 추정
+        e.reserved_day = day;
+        assert_eq!(refund_due(&e, recorded + 60), None); // 예약한 날은 어제 — 오늘 장부를 안 건드린다
+        e.reserved_day = day + 1;
+        assert_eq!(refund_due(&e, recorded + 60), Some(day + 1));
     }
 
     // 환불은 기록이 오늘이고 자정 5분 안쪽이 아닐 때만.

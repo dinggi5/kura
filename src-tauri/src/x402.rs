@@ -254,7 +254,7 @@ async fn do_sign_x402_inner(
     };
 
     // 서명 성공 → 내역 로그(status "signed", detail=nonce; 누적은 예약 단계에서 기록됨).
-    log_attempt("USDC", to, amt, "signed", &payment.authorization.nonce);
+    crate::history::log_signed("USDC", to, amt, &payment.authorization.nonce, reserved_day);
 
     Ok(payment)
 }
@@ -422,7 +422,7 @@ async fn do_x402_direct_inner(
         log_attempt("USDC", to, amt, "failed", msg);
         return Err(SendError::Failed(msg.into()));
     }
-    let journal = Journal::new("USDC", to, amt);
+    let journal = Journal::new("USDC", to, amt, reserved_day);
     settle_broadcast(
         Box::pin(broadcast_now(signer, tx, &journal)).await,
         &journal,

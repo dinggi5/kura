@@ -193,8 +193,19 @@ pub(crate) fn log_attempt(token: &str, to: &str, amount: &str, status: &str, det
 /// 죽으면 해시는 메모리에만 있다가 사라졌다. 다시 켜면 한도는 잡혀 있는데 내역엔 나간 돈이 없고, 사람은 다시 보낸다.
 /// 먼저 적어 두면 그 줄은 체인 확인(confirm.rs)이 해시로 결말을 찾는다. 돌려준 id 로 `finish_pending` 이 고친다.
 /// 못 적었으면 None — 호출자는 끝에 예전처럼 새 줄을 적는다.
-pub(crate) fn log_pending(token: &str, to: &str, amount: &str, hash: &str) -> Option<String> {
-    log_entry(token, to, amount, "unknown", hash)
+pub(crate) fn log_pending(
+    token: &str,
+    to: &str,
+    amount: &str,
+    hash: &str,
+    reserved_day: u64,
+) -> Option<String> {
+    log_entry_with(token, to, amount, "unknown", hash, true, reserved_day)
+}
+
+/// x402 서명 기록(「정산 대기」) — 예약한 날을 같이 싣는다(개발 78). 만료로 확정되면 그 날에만 환불한다.
+pub(crate) fn log_signed(token: &str, to: &str, amount: &str, nonce: &str, reserved_day: u64) {
+    log_entry_with(token, to, amount, "signed", nonce, false, reserved_day);
 }
 
 /// `log_pending` 이 적은 줄을 결말로 고친다. **아직 「확인 필요」일 때만** — 그 사이 체인 확인이 먼저 결말(되돌려짐 등)을
@@ -248,6 +259,23 @@ fn pending_settled_elsewhere(path: &PathBuf, id: &str) -> bool {
 
 /// 한 줄을 적고 그 id 를 돌려준다(저장 실패면 None).
 fn log_entry(token: &str, to: &str, amount: &str, status: &str, detail: &str) -> Option<String> {
+    log_entry_with(token, to, amount, status, detail, false, 0)
+}
+
+/// `durable` = 디스크까지 내린다(개발 78, 코덱스 1차 P0) — **제출 직전의 「확인 필요」 줄**(`log_pending`)만 쓴다.
+/// 보통 원자 쓰기는 rename 까지라, tx 를 낸 직후 전원이 나가면 이 줄이 사라질 수 있었다 — 체인엔 송금이 있는데
+/// 내역·10분 중복 검사엔 없어서 같은 결제가 한 번 더 나갈 수 있다(한도 장부는 개발 71 부터 이미 durable).
+/// 디스크까지 못 내렸으면 실패로 돌려 제출하지 않는다(개발 76 「먼저 적기 실패면 안 냄」). 디렉터리 동기화만 실패한
+/// 드문 경우엔 줄이 제자리에 남아 「확인 필요」로 보인다 — 보수 쪽(돈은 안 나갔다).
+fn log_entry_with(
+    token: &str,
+    to: &str,
+    amount: &str,
+    status: &str,
+    detail: &str,
+    durable: bool,
+    reserved_day: u64,
+) -> Option<String> {
     let entry = HistoryEntry {
         ts: now_secs(),
         token: token.into(),
@@ -259,6 +287,7 @@ fn log_entry(token: &str, to: &str, amount: &str, status: &str, detail: &str) ->
         from: crate::wallet::active_account()
             .map(|a| a.address)
             .unwrap_or_default(),
+        reserved_day,
         ..Default::default()
     };
     // 디스크와 따로 메모리에도 — 저장이 실패해도 10분 중복 검사가 방금 나간 결제를 본다(개발 73).
@@ -266,7 +295,7 @@ fn log_entry(token: &str, to: &str, amount: &str, status: &str, detail: &str) ->
     let id = entry.id.clone();
     let _g = history_guard();
     let path = history_path().ok()?;
-    match record_at(&path, entry, HISTORY_CAP) {
+    match record_at_with(&path, entry, HISTORY_CAP, durable) {
         Ok(()) => Some(id),
         Err(e) => {
             eprintln!("[history] 기록 실패: {e}");
@@ -345,7 +374,17 @@ fn new_record_id() -> String {
 }
 
 /// `log_attempt` 의 본체 — 경로를 받는다(테스트가 실지갑을 안 건드리게).
+#[cfg(test)]
 fn record_at(path: &PathBuf, entry: HistoryEntry, cap: usize) -> Result<(), String> {
+    record_at_with(path, entry, cap, false)
+}
+
+fn record_at_with(
+    path: &PathBuf,
+    entry: HistoryEntry,
+    cap: usize,
+    durable: bool,
+) -> Result<(), String> {
     if history_unreadable(path) {
         let aside = path.with_extension(format!("broken.{}.json", now_secs()));
         fs::rename(path, &aside).map_err(|e| e.to_string())?;
@@ -356,7 +395,13 @@ fn record_at(path: &PathBuf, entry: HistoryEntry, cap: usize) -> Result<(), Stri
     {
         list.extend(evicted); // 옮기지 못했으면 자르지 않는다
     }
-    write_json(path.clone(), &list)
+    if !durable {
+        return write_json(path.clone(), &list);
+    }
+    let json = serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?;
+    crate::store::write_atomic_durable(path, json.as_bytes()).map_err(|e| match e {
+        crate::store::DurableError::NotWritten(m) | crate::store::DurableError::NotDurable(m) => m,
+    })
 }
 
 /// detail 의 URL 을 가린다(출력용). 이번 패치 이전이 기록한 비redact 에러에 RPC URL·키가
