@@ -207,8 +207,17 @@ pub(crate) fn log_pending(
 }
 
 /// x402 서명 기록(「정산 대기」) — 예약한 날을 같이 싣는다(개발 78). 만료로 확정되면 그 날에만 환불한다.
-pub(crate) fn log_signed(token: &str, to: &str, amount: &str, nonce: &str, reserved_day: u64) {
-    let _ = log_entry_with(token, to, amount, "signed", nonce, false, reserved_day);
+/// **디스크까지 적는다**(개발 79, 코덱스 1차 P0) — 서명은 내보내면 판매자가 정산할 수 있는 돈이라, 기록 없이 나가면 다시
+/// 켠 뒤 같은 결제가 「처음」처럼 보인다. 반환은 `log_pending` 과 같다: `Err(Some)` = 줄은 제자리(디스크까지는 모름),
+/// `Err(None)` = 못 적음. 호출자는 어느 쪽이든 서명을 내보내지 않는다.
+pub(crate) fn log_signed(
+    token: &str,
+    to: &str,
+    amount: &str,
+    nonce: &str,
+    reserved_day: u64,
+) -> Result<String, Option<String>> {
+    log_entry_with(token, to, amount, "signed", nonce, true, reserved_day)
 }
 
 /// `log_pending` 이 적은 줄을 결말로 고친다. **아직 「확인 필요」일 때만** — 그 사이 체인 확인이 먼저 결말(되돌려짐 등)을

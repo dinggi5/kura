@@ -145,7 +145,7 @@ async fn main() {
         }
         // MCP 도구(x402_fetch)와 동일하게 정산 tx를 기록 → GUI가 내역 "signed"를 "정산됨"으로 갱신.
         if let Some((tx, success)) = x402::parse_settlement(&settlement) {
-            match payment::record_settlement(&signed.authorization.nonce, &tx, success) {
+            match payment::record_settlement(kura_mcp::chain::active_chain().chain_id, &signed.authorization.nonce, &tx, success) {
                 Ok(()) => println!("  정산 기록됨 → GUI 내역 갱신 대상: tx={tx} success={success}"),
                 Err(e) => println!("  ⚠ 정산 기록 실패: {e}"),
             }

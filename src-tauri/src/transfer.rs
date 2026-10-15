@@ -390,6 +390,8 @@ pub(crate) struct Journal {
     reserved_day: u64,
     /// false = 내역을 안 건드린다(실 RPC 를 부르는 무시된 테스트용).
     record: bool,
+    /// true = 먼저 적은 뒤 그 해시를 지금 승인의 결제 시도 기록에도 적는다(x402 직접 제출 — 재제출이 그걸로 증거를 찾는다, 개발 79).
+    note_attempt: bool,
     id: std::sync::Mutex<Option<String>>,
 }
 
@@ -402,7 +404,16 @@ impl Journal {
             amt: amt.into(),
             reserved_day,
             record: true,
+            note_attempt: false,
             id: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// x402 직접 제출용 — `new` 와 같고, 먼저 적은 해시를 결제 시도 기록에도 남긴다.
+    pub(crate) fn for_x402_direct(token: &str, to: &str, amt: &str, reserved_day: u64) -> Self {
+        Journal {
+            note_attempt: true,
+            ..Journal::new(token, to, amt, reserved_day)
         }
     }
 
@@ -431,6 +442,9 @@ impl Journal {
             Err(id) => (id, false),
         };
         *self.id.lock().unwrap_or_else(|e| e.into_inner()) = id;
+        if ok && self.note_attempt {
+            crate::ipc::note_inflight_tx(hash);
+        }
         ok
     }
 

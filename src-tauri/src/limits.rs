@@ -156,12 +156,21 @@ fn limit_known(s: &str) -> Result<(), String> {
 /// 토큰 자릿수보다 긴 소수는 거부한다 (개발 73, 코덱스 1차 P1). alloy `parse_units` 는 넘친 자리를 **조용히 버려서**
 /// 한도 「0.0000001 USDC」가 0 = 무제한이 됐고, 금액 「1.1234567」은 1.123456 으로 나갔다. 끝의 0 은 자리로 안 센다.
 fn check_decimals(s: &str, dec: u8) -> Result<(), String> {
-    let frac = s.trim().split_once('.').map(|(_, f)| f.trim_end_matches('0')).unwrap_or("");
+    let t = s.trim();
+    let frac = t.split_once('.').map(|(_, f)| f.trim_end_matches('0')).unwrap_or("");
     if frac.len() > dec as usize {
         return Err(tf!(
             "소수점 아래는 {dec}자리까지만 쓸 수 있어요",
             "Use at most {dec} digits after the decimal point"
         ));
+    }
+    // 정수부가 너무 길면 거부한다 (개발 79, 코덱스 1차 P1). alloy `parse_units` 는 자릿수를 맞추는 곱셈이 **넘치면 감아서**
+    // `2^250+1` USDC 가 1 USDC 가 됐다 — 화면엔 거대한 수, 한도 검사·송금은 1. 정수 자리 + 소수 자리 ≤ 77 이면
+    // 10^77 < 2^256 이라 넘칠 수 없다(실제 금액은 이 근처에도 안 간다).
+    let int = t.split_once('.').map_or(t, |(i, _)| i);
+    let int = int.trim_start_matches(['+', '-']).trim_start_matches('0');
+    if int.len() + dec as usize > 77 {
+        return Err(ts!("금액이 너무 커요", "That amount is too large").into());
     }
     Ok(())
 }
@@ -334,6 +343,20 @@ pub(crate) fn get_today_spend() -> Result<SpendView, String> {
 
 #[cfg(test)]
 mod tests {
+    /// 감기는 거대 금액은 거부, 경계 바로 아래는 통과(개발 79, 코덱스 1차 P1 — 예전엔 `2^250+1` USDC 가 1 USDC 였다).
+    #[test]
+    fn huge_amounts_are_refused_not_wrapped() {
+        let wrap = "1809251394333065553493296640760748560207343510400633813116524750123642650625";
+        assert!(parse_usdc_nonneg(wrap, 6).is_err());
+        assert!(parse_eth_nonneg(wrap).is_err());
+        assert!(parse_usdc_nonneg(&format!("{wrap}.5"), 6).is_err());
+        let edge = "9".repeat(71); // 71 + 6 = 77 자리 — 넘치지 않는다
+        assert_eq!(parse_usdc_nonneg(&edge, 6).unwrap().to_string(), format!("{edge}000000"));
+        assert!(parse_usdc_nonneg(&format!("{edge}9"), 6).is_err());
+        // 앞의 0 은 자리로 안 센다.
+        assert_eq!(parse_usdc_nonneg(&format!("{}1.5", "0".repeat(90)), 6).unwrap(), U256::from(1_500_000u64));
+    }
+
     use super::*;
 
     // 🔴 개발 71(코덱스 3차): 체인 확인 환불은 기록 하나당 한 번 — 같은 열쇠는 두 번째에 아무것도 안 한다. 다른 날·빈 열쇠도.
@@ -506,3 +529,4 @@ mod tests {
         assert_eq!(parse_eth_nonneg("0").unwrap(), U256::ZERO);
     }
 }
+

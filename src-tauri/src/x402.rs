@@ -254,7 +254,28 @@ async fn do_sign_x402_inner(
     };
 
     // 서명 성공 → 내역 로그(status "signed", detail=nonce; 누적은 예약 단계에서 기록됨).
-    crate::history::log_signed("USDC", to, amt, &payment.authorization.nonce, reserved_day);
+    // 🔴 **못 적으면 서명을 내보내지 않는다** (개발 79, 코덱스 1차 P0 — 직접 송금의 「먼저 적기」와 짝). 내보낸 서명은 판매자가
+    // 정산할 수 있는 돈인데, 기록이 없으면 다시 켠 뒤 중복 검사가 그 결제를 못 본다.
+    //   `Err(None)`  = 줄이 없다 → 아무 데도 안 나간 서명이니 지금 환불.
+    //   `Err(Some)` = 줄은 제자리 「정산 대기」 → 여기서 환불하지 않는다. 그 서명은 아무에게도 안 갔으니 유효시간(10분)이
+    //                 지나면 체인 확인이 「만료 · 안 나감」으로 바꾸며 예약한 날에 한 번 돌려준다(`refund_once`) — 여기서도
+    //                 돌려주면 두 번이다.
+    if let Err(row) = crate::history::log_signed(
+        "USDC",
+        to,
+        amt,
+        &payment.authorization.nonce,
+        reserved_day,
+    ) {
+        if row.is_none() {
+            refund_spend("USDC", value, reserved_day).await;
+        }
+        return Err(ts!(
+            "결제 기록을 저장하지 못해 서명을 보내지 않았어요. 아무것도 결제하지 않았습니다 — 디스크 공간을 확인하고 다시 시도하세요.",
+            "Couldn't save the payment record, so the signature wasn't sent. Nothing was paid — check disk space and try again."
+        )
+        .into());
+    }
 
     Ok(payment)
 }
@@ -422,7 +443,7 @@ async fn do_x402_direct_inner(
         log_attempt("USDC", to, amt, "failed", msg);
         return Err(SendError::Failed(msg.into()));
     }
-    let journal = Journal::new("USDC", to, amt, reserved_day);
+    let journal = Journal::for_x402_direct("USDC", to, amt, reserved_day);
     settle_broadcast(
         Box::pin(broadcast_now(signer, tx, &journal)).await,
         &journal,

@@ -697,6 +697,15 @@ pub async fn run_x402(
     let preset_id = direct.then(payment::new_id);
     if let Some(id) = &preset_id {
         let dropped = body402.len() > payment::PROOF_BODY_CAP;
+        // 챌린지가 본문에만 있는데 너무 커서 증거에 못 담으면 재제출이 그걸 다시 못 만든다 — 그런 결제는 시작하지 않는다
+        // (개발 79, 코덱스 1차 P1). 헤더(V2)에 챌린지가 있으면 본문을 버려도 잃는 게 없다.
+        if dropped && pr_header.is_none() {
+            return Err(tf!(
+                "판매자의 결제 요구가 너무 커서({} KB) 결제를 되살릴 기록에 담을 수 없어요. 아무것도 결제하지 않았습니다.",
+                "The seller's payment challenge is too large ({} KB) to keep in the record needed to recover this payment. Nothing was paid.",
+                body402.len() / 1024
+            ));
+        }
         payment::write_proof(
             id,
             &payment::ProofRecord {
@@ -924,6 +933,7 @@ pub async fn run_x402(
         direct_tx,
         direct_explorer,
         explorer_prefix: picked_explorer,
+        chain_id: picked_chain,
         amount: amount_usdc,
         pay_to: req.pay_to,
         resource,
@@ -1049,6 +1059,7 @@ pub async fn resubmit_x402(tx: &str) -> Result<X402Outcome, String> {
         direct_tx: tx,
         direct_explorer: explorer,
         explorer_prefix: active_chain().explorer_tx_prefix,
+        chain_id: active_chain().chain_id,
         amount,
         pay_to: req.pay_to,
         resource: proof.url.clone(),
@@ -1088,6 +1099,8 @@ struct Delivery<'a> {
     direct_explorer: String,
     /// 결제한 체인의 탐색기 tx 링크 앞부분 — 서명 갈래의 판매자 정산 tx 를 링크로 만들 때(개발 79).
     explorer_prefix: &'static str,
+    /// 결제한 체인 — 정산 기록 파일을 고른다(개발 79). 응답을 기다리는 사이 활성 체인이 바뀔 수 있다.
+    chain_id: u64,
     amount: String,
     pay_to: String,
     resource: String,
@@ -1104,6 +1117,7 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
         direct_tx,
         direct_explorer,
         explorer_prefix,
+        chain_id,
         amount,
         pay_to,
         resource,
@@ -1176,7 +1190,7 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
     if http_ok && !settlement.is_empty() {
         if let (Some(payment), Some((tx, success))) = (&signed, x402::parse_settlement(&settlement))
         {
-            let _ = payment::record_settlement(&payment.authorization.nonce, &tx, success);
+            let _ = payment::record_settlement(chain_id, &payment.authorization.nonce, &tx, success);
         }
     }
     let (settlement_tx, settlement_explorer) =
@@ -1201,6 +1215,13 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
                 "the server refused the proof: HTTP {paid_status}"
             ),
         )
+    } else if body.save_failed {
+        // 결제 뒤 받은 파일을 못 남겼다(개발 79, 코덱스 1차) — 바이트는 사라졌고, 다시 받으려면 또 결제된다.
+        ts!(
+            "결제한 응답을 파일로 저장하지 못했어요(저장 폴더 권한이나 디스크 공간). 다시 요청하면 또 결제돼요 — 사용자에게 알리고, 저장 문제를 고친 뒤에 다시 할지 물어보세요.",
+            "The paid response couldn't be saved to a file (folder permission or disk space). Asking again pays again — tell the user and ask before retrying once saving is fixed."
+        )
+        .to_string()
     } else if body.incomplete {
         // 결제는 됐거나 됐을 수 있는데 응답이 중간에 끊겼다(개발 77) — 다시 부르면 또 결제된다.
         ts!(
@@ -1411,6 +1432,7 @@ mod tests {
             direct_tx: String::new(),
             direct_explorer: String::new(),
             explorer_prefix: "https://x/tx/",
+            chain_id: 84532,
             amount: "0.007".into(),
             pay_to: "0xabc".into(),
             resource: url.clone(),
@@ -1455,6 +1477,7 @@ mod tests {
             direct_tx: String::new(),
             direct_explorer: String::new(),
             explorer_prefix: "https://x/tx/",
+            chain_id: 84532,
             amount: "0.007".into(),
             pay_to: "0xabc".into(),
             resource: url.clone(),
@@ -1497,6 +1520,7 @@ mod tests {
             direct_tx: String::new(),
             direct_explorer: String::new(),
             explorer_prefix: "https://x/tx/",
+            chain_id: 84532,
             amount: "0.03".into(),
             pay_to: "0xabc".into(),
             resource: url.clone(),

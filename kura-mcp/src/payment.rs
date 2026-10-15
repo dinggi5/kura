@@ -6,7 +6,6 @@
 //
 // single-flight: 한 번에 대기 요청 1건. 앱이 안 켜져 있으면(하트비트 신선도) 즉시 안내.
 
-use crate::chain::chain_file;
 use crate::erc8004::AgentTrust;
 use crate::wallet::jigap_dir;
 use crate::{tf, ts};
@@ -160,8 +159,9 @@ fn mcp_alive_path() -> Result<PathBuf, String> {
     Ok(jigap_dir()?.join("mcp_alive.json"))
 }
 
-fn settlements_path() -> Result<PathBuf, String> {
-    Ok(jigap_dir()?.join(chain_file("x402_settlements")))
+/// 정산 기록은 **결제한 체인**의 파일에 — 응답을 기다리는 사이 사용자가 체인을 바꿔도 지금 체인으로 가지 않게(개발 79, 코덱스 1차 P2).
+fn settlements_path(chain_id: u64) -> Result<PathBuf, String> {
+    Ok(jigap_dir()?.join(crate::policy::chain_file_name(chain_id, "x402_settlements")))
 }
 
 /// x402 정산 결과 1건 — GUI가 읽어 내역의 "signed"(nonce 매칭)을 "settled"+tx 로 갱신한다.
@@ -232,8 +232,8 @@ fn write_file_private(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
 
 /// 정산 결과를 ~/.jigap/x402_settlements.json 에 추가한다(append). 실패해도 결제 흐름은 안 막는다.
 /// nonce = 서명 인가의 nonce(GUI 내역 detail 과 매칭). 비밀 아님(공개 결제 증빙).
-pub fn record_settlement(nonce: &str, tx: &str, success: bool) -> Result<(), String> {
-    let path = settlements_path()?;
+pub fn record_settlement(chain_id: u64, nonce: &str, tx: &str, success: bool) -> Result<(), String> {
+    let path = settlements_path(chain_id)?;
     // 🔴 **읽기-덧붙이기-쓰기를 프로세스 사이에서 한 줄로** (개발 66, 코덱스 2차 P1). AI 클라이언트마다 MCP
     // 프로세스가 따로 떠서 두 결제가 거의 같이 정산되면, 둘 다 같은 목록을 읽고 나중에 쓴 쪽이 먼저 쓴 정산을
     // 지운다 — 그 내역은 영영 「정산 대기」다. 잠금 파일에 OS 배타 잠금(flock)을 건다; 프로세스가 죽으면 풀린다.
@@ -872,7 +872,32 @@ pub fn write_proof(id: &str, proof: &ProofRecord) -> Result<(), String> {
         ))
     })?;
     let json = serde_json::to_string_pretty(proof).map_err(|e| e.to_string())?;
-    write_atomic(&path, json.as_bytes())
+    write_atomic_durable(&path, json.as_bytes())
+}
+
+/// `write_atomic` + 파일과 디렉터리를 디스크까지 내린다 (개발 79, 코덱스 1차 P1) — 증거는 결제 **전**에 쓰는 유일한 복구 재료라,
+/// 전원이 나가 사라지면 돈과 tx 는 남고 clientNonce·챌린지만 없는 상태가 된다. 어느 단계든 실패하면 실패다(결제를 시작하지 않는다).
+fn write_atomic_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
+    let dir = path.parent().ok_or(ts!(
+        "경로에 부모 디렉터리가 없습니다",
+        "That path has no parent folder"
+    ))?;
+    fs::create_dir_all(dir)
+        .map_err(|e| tf!("디렉터리 생성 실패: {e}", "Couldn't create the folder: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    }
+    let tmp = unique_tmp(path);
+    write_file_private(&tmp, bytes)?;
+    let saved = |e: std::io::Error| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}");
+    if let Err(e) = fs::File::open(&tmp).and_then(|f| f.sync_all()) {
+        let _ = fs::remove_file(&tmp);
+        return Err(saved(e));
+    }
+    fs::rename(&tmp, path).map_err(|e| tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}"))?;
+    fs::File::open(dir).and_then(|d| d.sync_all()).map_err(saved)
 }
 
 /// 요청을 못 낸 직접 제출의 증거를 치운다(개발 78) — 요청 없는 증거는 재제출이 어차피 안 쓰지만(시도 기록이 없다) 쌓이지 않게.

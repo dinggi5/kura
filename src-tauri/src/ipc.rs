@@ -345,6 +345,31 @@ static APPROVAL_ARBITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 승인 처리 구간을 표시하는 RAII 가드. 중간에 `?` 로 빠져나가도 Drop 이 카운터를 되돌린다.
 pub(crate) struct ApprovalGuard;
 
+/// 지금 처리 중인 승인의 요청 id (개발 79) — 겹침 거절로 늘 하나다. x402 직접 제출이 제출 직전에 tx 해시를 그 결제 시도
+/// 기록에 적을 때 쓴다(`note_inflight_tx`). `ApprovalGuard` 가 놓일 때 비운다.
+static INFLIGHT_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// x402 직접 제출의 tx 해시를 **제출 전에** 지금 승인의 결제 시도 기록에 적는다 (개발 79, 코덱스 1차 P1).
+/// 예전엔 해시가 결말(`finish_approval`)에서야 기록에 들어갔다 — 노드가 tx 를 받은 뒤 앱이 죽으면 기록은 `sending`·해시 없음으로
+/// 남고, MCP 의 `x402_resubmit(tx)` 는 기록의 해시로 증거를 찾으므로 증거·온체인 결제가 다 있는데도 「증거 없음」이었다.
+/// 내역의 「확인 필요」 줄(`Journal`)을 적은 **뒤에** 부른다. 못 적어도 결제는 막지 않는다(그 줄이 이미 있다) — 재제출만 못 할 뿐.
+pub(crate) fn note_inflight_tx(hash: &str) {
+    let Some(id) = INFLIGHT_ID.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        return;
+    };
+    let Ok(Some(mut rec)) = read_attempt(&id) else {
+        return;
+    };
+    if rec.state != crate::policy::ATTEMPT_SENDING || !rec.tx_hash.is_empty() {
+        return;
+    }
+    rec.tx_hash = hash.into();
+    rec.updated = now_secs();
+    if let Err(e) = write_attempt(&rec) {
+        eprintln!("[ipc] 결제 시도 기록에 tx 를 못 적음: {e}");
+    }
+}
+
 impl ApprovalGuard {
     /// 카운터만 올린다. **`begin_approval` 안에서만 쓴다** — 밖에서 쓰면 「요청이 아직 대기
     /// 중인가」 확인과 잠금을 건너뛰어 4차 P1 의 경합이 되살아난다.
@@ -356,6 +381,7 @@ impl ApprovalGuard {
 
 impl Drop for ApprovalGuard {
     fn drop(&mut self) {
+        *INFLIGHT_ID.lock().unwrap_or_else(|e| e.into_inner()) = None;
         APPROVALS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -442,6 +468,7 @@ pub(crate) fn begin_approval(req: &PaymentRequest) -> Result<ApprovalGuard, Stri
         restore_attempt(&req.id, prev.as_ref());
         return Err(e);
     }
+    *INFLIGHT_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(req.id.clone());
     Ok(ApprovalGuard::acquire())
 }
 

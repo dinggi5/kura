@@ -24,7 +24,7 @@ use zeroize::Zeroizing;
 
 use crate::chain::chain_file;
 use crate::policy;
-use crate::store::{jigap_dir, write_atomic};
+use crate::store::jigap_dir;
 
 /// 계정 라벨 최대 글자 수(사람이 붙이는 이름 — 화면 한 줄).
 const LABEL_MAX_CHARS: usize = 24;
@@ -369,10 +369,25 @@ fn wallet_guard() -> std::sync::MutexGuard<'static, ()> {
 
 /// 암호화된 지갑을 디스크에 저장 (소유자만 읽기/쓰기, 원자 교체 —
 /// mark_backed_up 등 재작성 중 크래시로 지갑 파일이 깨지면 키 유실이라 치명적).
+/// wallet.enc 는 키 그 자체라 **디스크까지 내린다**(개발 79, 코덱스 1차 P0) — 예전엔 rename 만 해서, 전원이 나가면 새 지갑·
+/// 새 계정·KDF 업그레이드가 빈 파일로 돌아갈 수 있었다. 디렉터리 동기화만 실패한 경우(`NotDurable`)는 새 내용이 이미
+/// 제자리라 성공으로 친다 — 실패로 돌리면 「이미 지갑이 있다」와 엉킨다. 그 구분이 필요한 곳(평문 원본 삭제)은 `_strict`.
 fn write_encrypted(w: &EncryptedWallet) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(w)
-        .map_err(|e| tf!("직렬화 실패: {e}", "Couldn't serialize the wallet: {e}"))?;
-    write_atomic(&enc_path()?, json.as_bytes())
+    match write_encrypted_strict(w) {
+        Ok(()) | Err(crate::store::DurableError::NotDurable(_)) => Ok(()),
+        Err(crate::store::DurableError::NotWritten(e)) => Err(e),
+    }
+}
+
+fn write_encrypted_strict(w: &EncryptedWallet) -> Result<(), crate::store::DurableError> {
+    let json = serde_json::to_string_pretty(w).map_err(|e| {
+        crate::store::DurableError::NotWritten(tf!(
+            "직렬화 실패: {e}",
+            "Couldn't serialize the wallet: {e}"
+        ))
+    })?;
+    let path = enc_path().map_err(crate::store::DurableError::NotWritten)?;
+    crate::store::write_atomic_durable(&path, json.as_bytes())
 }
 
 pub(crate) fn read_encrypted() -> Result<EncryptedWallet, String> {
@@ -667,9 +682,22 @@ pub(crate) fn migrate_wallet(password: String) -> Result<WalletInfo, String> {
     }
 
     let w = encrypt_wallet(&mnemonic, &derived, &password)?;
-    write_encrypted(&w)?;
+    // 🔴 평문 원본은 유일한 사본일 수 있다 — 암호화본이 **디스크까지** 내려가고 다시 읽어 풀린 뒤에만 지운다(개발 79, 코덱스 1차 P0).
+    // 디렉터리 동기화가 실패했으면 원본을 남긴다(다음 실행은 암호화본을 쓰고, 평문은 사람이 지울 때까지 남는다 — 키를 잃는 것보다 낫다).
+    write_encrypted_strict(&w).map_err(|e| match e {
+        crate::store::DurableError::NotWritten(e) | crate::store::DurableError::NotDurable(e) => e,
+    })?;
+    let back = read_encrypted()?;
+    let again = decrypt_wallet(&back, &password)?;
+    if *again != *mnemonic {
+        return Err(ts!(
+            "암호화한 지갑을 다시 확인하지 못해 기존 파일을 남겼어요",
+            "Couldn't verify the encrypted wallet, so the existing file was kept"
+        )
+        .into());
+    }
 
-    // 암호화 성공 후에만 평문 파일 제거.
+    // 암호화·확인 성공 후에만 평문 파일 제거.
     fs::remove_file(&legacy).map_err(|e| {
         tf!(
             "기존 평문 파일 삭제 실패: {e}",

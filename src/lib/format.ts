@@ -46,12 +46,13 @@ export function fmtAmount(s: string | undefined, maxFrac: number, minFrac = 0): 
 
 /** 승인용 **정확한** 금액 (개발 78, 코덱스 1차 P2) — 반올림하지 않는다. 비번을 넣기 직전 화면이 `0.0000004 ETH` 를
  *  「0 ETH」로 보이면 사람은 다른 금액을 승인한다. 십진 문자열만 그대로 쓰고(자릿수 쉼표·끝의 0 정리만),
- *  모양이 다르면(지수 표기 등) `fmtAmount` 로 물러선다. */
+ *  `.001`·`1.` 처럼 한쪽 자리가 빈 표기도 백엔드가 받으니 여기서도 받는다(개발 79, 코덱스 1차 P2 — 예전엔 `Number` 로
+ *  물러서 `.001000000000000001` 이 `0.001` 로 보였다). 그 밖의 모양은 반올림하지 않고 **받은 글자 그대로** 보인다. */
 export function fmtExact(s: string | undefined): string {
   if (s == null) return "—";
-  const m = /^(\d+)(?:\.(\d+))?$/.exec(s.trim());
-  if (!m) return fmtAmount(s, 18);
-  const int = m[1].replace(/^0+(?=\d)/, "").replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const m = /^(\d*)(?:\.(\d*))?$/.exec(s.trim());
+  if (!m || (m[1] === "" && !m[2])) return s.trim() || "—";
+  const int = (m[1] || "0").replace(/^0+(?=\d)/, "").replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   const frac = (m[2] ?? "").replace(/0+$/, "");
   return frac ? `${int}.${frac}` : int;
 }

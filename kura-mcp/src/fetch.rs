@@ -272,6 +272,9 @@ pub struct FetchedBody {
     /// 저장이 기다림 상한(`SAVE_WAIT`) 안에 안 끝났을 때 **쓰고 있던 경로**(개발 79, 78 코덱스 1차 P2-6).
     /// 결과가 먼저 나가도 파일은 뒤에 여기 생긴다 — 이게 없으면 뒤늦게 저장된 파일을 아무도 못 찾는다.
     pub saving_file: String,
+    /// 남겨야 할 내용(바이너리 전체·잘린 글자의 전체)을 파일로 못 남겼다(개발 79, 코덱스 1차) — 받은 바이트는 이 호출과 함께
+    /// 사라진다. 결제 뒤라면 다시 받으려면 또 결제해야 하니 `deliver` 가 알림을 붙인다.
+    pub save_failed: bool,
     /// 작은 이미지면 MCP image content 로 붙일 원본.
     pub image: Option<InlineImage>,
     /// 본문을 끝까지 받지 못했다(연결 끊김·시간 초과). 받은 만큼만 `text`/`saved_file` 에 있다.
@@ -594,6 +597,7 @@ fn classify_tracked(
             full
         };
         let mut saved_file = String::new();
+        let mut save_failed = false;
         if over_chars || truncated {
             if truncated {
                 text.push_str(&tf!(
@@ -610,10 +614,13 @@ fn classify_tracked(
                         "\n…(body truncated — everything received is in this file: {saved_file})"
                     ));
                 }
-                Err(e) => text.push_str(&tf!(
-                    "\n…(본문이 길어 잘랐어요. 전체를 파일로 남기지 못했어요: {e})",
-                    "\n…(body truncated, and saving the full body failed: {e})"
-                )),
+                Err(e) => {
+                    save_failed = true;
+                    text.push_str(&tf!(
+                        "\n…(본문이 길어 잘랐어요. 전체를 파일로 남기지 못했어요: {e})",
+                        "\n…(body truncated, and saving the full body failed: {e})"
+                    ))
+                }
             }
         }
         return FetchedBody {
@@ -622,6 +629,7 @@ fn classify_tracked(
             bytes: len,
             saved_file,
             saving_file: String::new(),
+            save_failed,
             image: None,
             incomplete: false,
         };
@@ -650,7 +658,7 @@ fn classify_tracked(
             mime: content_type.clone(),
             data: bytes.clone(),
         });
-    let (text, saved_file) = match save_bytes(&bytes, extension_for(&content_type), trying) {
+    let (text, saved_file, save_failed) = match save_bytes(&bytes, extension_for(&content_type), trying) {
         Ok(p) => {
             let path = p.display().to_string();
             (
@@ -659,6 +667,7 @@ fn classify_tracked(
                     "({shown_type} · {len} bytes — saved to: {path})"
                 ),
                 path,
+                false,
             )
         }
         Err(e) => (
@@ -667,6 +676,7 @@ fn classify_tracked(
                 "({shown_type} · {len} bytes — couldn't save it to a file: {e})"
             ),
             String::new(),
+            true,
         ),
     };
     FetchedBody {
@@ -675,6 +685,7 @@ fn classify_tracked(
         bytes: len,
         saved_file,
         saving_file: String::new(),
+        save_failed,
         image,
         incomplete: false,
     }
