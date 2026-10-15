@@ -3,7 +3,7 @@
   "name": "io.github.dinggi5/kura",
   "title": "Kura",
   "description": "Local Ethereum wallet for AI agents on Base and Arc: balances, x402 payments. Keys stay local.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "websiteUrl": "https://dinggi5.github.io/kura/",
   "repository": {
     "url": "https://github.com/dinggi5/kura",
@@ -21,9 +21,9 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/dinggi5/kura/releases/download/v0.5.0/kura-0.5.0.mcpb",
-      "version": "0.5.0",
-      "fileSha256": "04e48e659e982404f84ab5bc68048e9f07fb628b272f83853573cef77e806dae",
+      "identifier": "https://github.com/dinggi5/kura/releases/download/v0.5.1/kura-0.5.1.mcpb",
+      "version": "0.5.1",
+      "fileSha256": "2de34fa6750b66f32d7151a415b5e9993b0e750ba291bc05c3a79e25f3cfd6c1",
       "transport": {
         "type": "stdio"
       }
