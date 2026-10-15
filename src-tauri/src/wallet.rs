@@ -372,9 +372,23 @@ fn wallet_guard() -> std::sync::MutexGuard<'static, ()> {
 /// wallet.enc 는 키 그 자체라 **디스크까지 내린다**(개발 79, 코덱스 1차 P0) — 예전엔 rename 만 해서, 전원이 나가면 새 지갑·
 /// 새 계정·KDF 업그레이드가 빈 파일로 돌아갈 수 있었다. 디렉터리 동기화만 실패한 경우(`NotDurable`)는 새 내용이 이미
 /// 제자리라 성공으로 친다 — 실패로 돌리면 「이미 지갑이 있다」와 엉킨다. 그 구분이 필요한 곳(평문 원본 삭제)은 `_strict`.
+///
+/// 디렉터리 동기화만 실패했으면 한 번 더 해 본다(개발 79 2차) — 그래도 안 되면 성공으로 두고 남긴다. 파일 자체는 동기화했고
+/// APFS 에서 디렉터리 fsync 실패는 사실상 안 생긴다. 실패로 돌리면 새 지갑이 「만들었는데 실패」가 돼 다시 만들 수도 없다.
 fn write_encrypted(w: &EncryptedWallet) -> Result<(), String> {
     match write_encrypted_strict(w) {
-        Ok(()) | Err(crate::store::DurableError::NotDurable(_)) => Ok(()),
+        Ok(()) => Ok(()),
+        Err(crate::store::DurableError::NotDurable(e)) => {
+            let again = enc_path()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .map(|d| fs::File::open(d).and_then(|f| f.sync_all()).is_ok())
+                .unwrap_or(false);
+            if !again {
+                eprintln!("[wallet] wallet.enc 디렉터리 동기화 실패(파일은 제자리): {e}");
+            }
+            Ok(())
+        }
         Err(crate::store::DurableError::NotWritten(e)) => Err(e),
     }
 }

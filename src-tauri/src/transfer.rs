@@ -442,8 +442,9 @@ impl Journal {
             Err(id) => (id, false),
         };
         *self.id.lock().unwrap_or_else(|e| e.into_inner()) = id;
+        // 재제출 연결을 못 적으면 제출하지 않는다(개발 79 2차) — false 면 `finish("failed")` 가 먼저 적은 줄을 마무리하고 환불한다.
         if ok && self.note_attempt {
-            crate::ipc::note_inflight_tx(hash);
+            return crate::ipc::note_inflight_tx(hash);
         }
         ok
     }

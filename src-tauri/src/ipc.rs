@@ -352,22 +352,31 @@ static INFLIGHT_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(Non
 /// x402 직접 제출의 tx 해시를 **제출 전에** 지금 승인의 결제 시도 기록에 적는다 (개발 79, 코덱스 1차 P1).
 /// 예전엔 해시가 결말(`finish_approval`)에서야 기록에 들어갔다 — 노드가 tx 를 받은 뒤 앱이 죽으면 기록은 `sending`·해시 없음으로
 /// 남고, MCP 의 `x402_resubmit(tx)` 는 기록의 해시로 증거를 찾으므로 증거·온체인 결제가 다 있는데도 「증거 없음」이었다.
-/// 내역의 「확인 필요」 줄(`Journal`)을 적은 **뒤에** 부른다. 못 적어도 결제는 막지 않는다(그 줄이 이미 있다) — 재제출만 못 할 뿐.
-pub(crate) fn note_inflight_tx(hash: &str) {
+/// 내역의 「확인 필요」 줄(`Journal`)을 적은 **뒤에** 부른다. **디스크까지 못 적으면 false — 호출자는 제출하지 않는다**(2차 P1):
+/// 재제출 연결 없이 나간 직접 제출은 앱이 죽으면 콘텐츠를 되찾을 길이 없다. 승인 밖(승인 id 없음)도 false — 직접 제출은
+/// 늘 `begin_approval` 안에서만 나간다.
+pub(crate) fn note_inflight_tx(hash: &str) -> bool {
     let Some(id) = INFLIGHT_ID.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
-        return;
+        return false;
     };
     let Ok(Some(mut rec)) = read_attempt(&id) else {
-        return;
+        return false;
     };
     if rec.state != crate::policy::ATTEMPT_SENDING || !rec.tx_hash.is_empty() {
-        return;
+        return false;
     }
     rec.tx_hash = hash.into();
     rec.updated = now_secs();
-    if let Err(e) = write_attempt(&rec) {
+    let written = (|| {
+        let path = crate::policy::attempt_path(&jigap_dir()?, &rec.id)
+            .ok_or_else(|| String::from("bad id"))?;
+        let json = serde_json::to_vec_pretty(&rec).map_err(|e| e.to_string())?;
+        crate::store::write_atomic_durable(&path, &json).map_err(|e| format!("{e:?}"))
+    })();
+    if let Err(e) = &written {
         eprintln!("[ipc] 결제 시도 기록에 tx 를 못 적음: {e}");
     }
+    written.is_ok()
 }
 
 impl ApprovalGuard {
