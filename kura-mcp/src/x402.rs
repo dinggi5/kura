@@ -472,6 +472,11 @@ pub fn parse_settlement(b64: &str) -> Option<(String, bool)> {
     Some((tx, success))
 }
 
+/// `0x` + 16진 64자인가 — 판매자가 준 정산 tx 를 탐색기 링크로 만들어도 되는 꼴인지(개발 79).
+pub fn is_tx_hash(s: &str) -> bool {
+    s.len() == 66 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// 정산 증빙 헤더가 **명시적으로 실패**(`success:false`)를 말하나 — tx 칸이 비어 있어도 본다 (개발 76, 코덱스 1차 P1).
 /// `parse_settlement` 은 tx 가 없으면 None 이라 이 말을 놓친다. 못 읽는 헤더는 false(말한 게 없다).
 pub fn settlement_says_failed(b64: &str) -> bool {
@@ -496,6 +501,18 @@ pub fn signed_unknown_notice(err: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 탐색기 링크로 만들 수 있는 tx 해시 꼴만 통과(개발 79).
+    #[test]
+    fn tx_hash_shape() {
+        let h = format!("0x{}", "aB".repeat(32));
+        assert!(is_tx_hash(&h));
+        assert!(!is_tx_hash(&h[..65]));
+        assert!(!is_tx_hash(&format!("{h}0")));
+        assert!(!is_tx_hash(&h.replacen("0x", "0X", 1)));
+        assert!(!is_tx_hash(&format!("0x{}", "g".repeat(64))));
+        assert!(!is_tx_hash("https://evil.example/0x00"));
+    }
 
     /// 정산 증빙의 명시적 실패는 tx 칸이 비어도 읽는다(개발 76) — 못 읽는 헤더·성공·말 없음은 false.
     #[test]

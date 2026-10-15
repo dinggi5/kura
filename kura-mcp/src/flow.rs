@@ -271,6 +271,8 @@ pub async fn run_payment(
 }
 
 /// x402 리소스 가져오기 결과.
+// 호출마다 하나 만들어 바로 JSON 으로 내보내는 값이라 갈래 크기 차이는 상관없다(개발 79 에 정산 tx 칸이 늘며 걸림).
+#[allow(clippy::large_enum_variant)]
 pub enum X402Outcome {
     /// 402 가 아니었다 — 결제 불필요, 본문 그대로.
     NotPaid { http_status: u16, body: FetchedBody },
@@ -306,6 +308,11 @@ pub enum X402Outcome {
         resource: String,
         /// 정산 증빙 헤더(base64). 없으면 빈 문자열.
         settlement: String,
+        /// 서명 갈래에서 **판매자가 정산 증빙에 적은** tx 와 그 탐색기 링크(개발 79) — 지갑이 체인에서 확인한 값이
+        /// 아니다. `tx` 에 섞지 않는 이유: `tx` 는 「우리가 올린 트랜잭션」이고 `payment_state` 가 그걸로 「나갔다」를
+        /// 판정한다. 판매자 말로 그 판정이 바뀌면 안 된다.
+        settlement_tx: String,
+        settlement_explorer: String,
         body: FetchedBody,
     },
 }
@@ -385,6 +392,8 @@ impl X402Outcome {
                 pay_to,
                 resource,
                 settlement,
+                settlement_tx,
+                settlement_explorer,
                 body,
             } => serde_json::json!({
                 "paid": paid, "payment": payment,
@@ -399,6 +408,9 @@ impl X402Outcome {
                 "tx": tx,
                 "explorer": explorer,
                 "settlement": settlement,   // X-PAYMENT-RESPONSE (base64) — 정산 증빙
+                // 판매자가 증빙에 적은 정산 tx(개발 79) — 서명 갈래 성공일 때만. 지갑이 확인한 값은 아니다.
+                "settlement_tx": settlement_tx,
+                "settlement_explorer": settlement_explorer,
                 // 빈 값이 아니면 **돈은 나갔는데 서버가 증거를 안 받은 것**이다 — 재시도 금지.
                 "notice": notice,
                 "body": body.text,
@@ -411,6 +423,10 @@ impl X402Outcome {
             }
             if !b.saved_file.is_empty() {
                 v["saved_file"] = serde_json::json!(b.saved_file);
+            }
+            // 저장이 늦어 결과가 먼저 나갔다 — 파일은 뒤에 이 경로에 생긴다(개발 79).
+            if !b.saving_file.is_empty() {
+                v["saving_file"] = serde_json::json!(b.saving_file);
             }
         }
         v
@@ -907,6 +923,7 @@ pub async fn run_x402(
         signed,
         direct_tx,
         direct_explorer,
+        explorer_prefix: picked_explorer,
         amount: amount_usdc,
         pay_to: req.pay_to,
         resource,
@@ -1031,11 +1048,30 @@ pub async fn resubmit_x402(tx: &str) -> Result<X402Outcome, String> {
         signed: None,
         direct_tx: tx,
         direct_explorer: explorer,
+        explorer_prefix: active_chain().explorer_tx_prefix,
         amount,
         pay_to: req.pay_to,
         resource: proof.url.clone(),
     })
     .await
+}
+
+/// 서명 갈래에서 판매자가 정산 증빙에 적은 tx 와 탐색기 링크(개발 79, 78 실결제에서 확인한 빈칸 — AI 가 결제 링크를
+/// 바로 못 보여 줬다). 지갑이 체인에서 확인한 값이 아니라 **판매자 주장**이다. 2xx·`success` 가 거짓이 아님·tx 해시 꼴일
+/// 때만 — 아무 문자열이나 링크로 만들면 판매자가 고른 주소로 사람을 보내게 된다. 직접 제출은 `tx` 가 이미 우리 것이라 빈 값.
+fn seller_settlement_link(
+    signed: bool,
+    http_ok: bool,
+    settlement: &str,
+    explorer_prefix: &str,
+) -> (String, String) {
+    match x402::parse_settlement(settlement) {
+        Some((tx, true)) if signed && http_ok && x402::is_tx_hash(&tx) => {
+            let link = format!("{explorer_prefix}{tx}");
+            (tx, link)
+        }
+        _ => (String::new(), String::new()),
+    }
 }
 
 /// 결제 제출물 하나를 보낼 때 필요한 것 — `deliver` 의 인자.
@@ -1050,6 +1086,8 @@ struct Delivery<'a> {
     /// 직접 제출이면 우리가 올린 tx 와 익스플로러 링크. 서명 갈래면 빈 값.
     direct_tx: String,
     direct_explorer: String,
+    /// 결제한 체인의 탐색기 tx 링크 앞부분 — 서명 갈래의 판매자 정산 tx 를 링크로 만들 때(개발 79).
+    explorer_prefix: &'static str,
     amount: String,
     pay_to: String,
     resource: String,
@@ -1065,6 +1103,7 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
         signed,
         direct_tx,
         direct_explorer,
+        explorer_prefix,
         amount,
         pay_to,
         resource,
@@ -1140,6 +1179,8 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
             let _ = payment::record_settlement(&payment.authorization.nonce, &tx, success);
         }
     }
+    let (settlement_tx, settlement_explorer) =
+        seller_settlement_link(signed.is_some(), http_ok, &settlement, explorer_prefix);
 
     // 🔴 서명 갈래에서 2xx 인데 정산 증빙이 `success:false` 라고 말하면 「정산 성공」이 아니다(개발 76, 코덱스 1차 P1) —
     // 예전엔 HTTP 2xx 만 보고 `payment:"confirmed"` 로 말했고, 같은 응답을 GUI 내역은 「정산 실패」로 적었다. 서명은 서버 손에
@@ -1181,6 +1222,8 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
         pay_to,
         resource,
         settlement,
+        settlement_tx,
+        settlement_explorer,
         body,
     })
 }
@@ -1311,6 +1354,32 @@ mod tests {
         }
     }
 
+    /// 판매자 정산 tx 는 서명 갈래·2xx·성공·해시 꼴일 때만 링크가 된다(개발 79).
+    #[test]
+    fn seller_settlement_link_only_for_clean_success() {
+        use base64::Engine;
+        let enc = |v: serde_json::Value| base64::engine::general_purpose::STANDARD.encode(v.to_string());
+        let h = format!("0x{}", "ab".repeat(32));
+        let ok = enc(serde_json::json!({"success": true, "transaction": h}));
+        let p = "https://basescan.org/tx/";
+        assert_eq!(
+            seller_settlement_link(true, true, &ok, p),
+            (h.clone(), format!("{p}{h}"))
+        );
+        // success 가 없으면 parse_settlement 처럼 성공으로 읽는다.
+        let silent = enc(serde_json::json!({"txHash": h}));
+        assert_eq!(seller_settlement_link(true, true, &silent, p).0, h);
+        let none = (String::new(), String::new());
+        // 직접 제출 · 비-2xx · 실패라 말함 · 해시 꼴 아님 · 못 읽는 헤더
+        assert_eq!(seller_settlement_link(false, true, &ok, p), none);
+        assert_eq!(seller_settlement_link(true, false, &ok, p), none);
+        let failed = enc(serde_json::json!({"success": false, "transaction": h}));
+        assert_eq!(seller_settlement_link(true, true, &failed, p), none);
+        let odd = enc(serde_json::json!({"success": true, "transaction": "https://evil.example/"}));
+        assert_eq!(seller_settlement_link(true, true, &odd, p), none);
+        assert_eq!(seller_settlement_link(true, true, "!!", p), none);
+    }
+
     /// 🔴 개발 77 — **결제 재요청은 첫 요청과 같은 method·headers·body 로 나간다.** 사람이 승인한 결제는 그 요청에 대한
     /// 값이라, 재요청이 GET 으로 바뀌거나 body 가 빠지면 서명한 것과 다른 걸 산다. 첫 요청은 실제 `run_x402` 로,
     /// 재요청은 실제 `deliver` 로 보내 목 서버가 받은 바이트를 맞대 본다.
@@ -1341,6 +1410,7 @@ mod tests {
             signed: None,
             direct_tx: String::new(),
             direct_explorer: String::new(),
+            explorer_prefix: "https://x/tx/",
             amount: "0.007".into(),
             pay_to: "0xabc".into(),
             resource: url.clone(),
@@ -1384,6 +1454,7 @@ mod tests {
             signed: None,
             direct_tx: String::new(),
             direct_explorer: String::new(),
+            explorer_prefix: "https://x/tx/",
             amount: "0.007".into(),
             pay_to: "0xabc".into(),
             resource: url.clone(),
@@ -1425,6 +1496,7 @@ mod tests {
             signed: None,
             direct_tx: String::new(),
             direct_explorer: String::new(),
+            explorer_prefix: "https://x/tx/",
             amount: "0.03".into(),
             pay_to: "0xabc".into(),
             resource: url.clone(),
@@ -1507,6 +1579,8 @@ mod tests {
             pay_to: "0xabc".into(),
             resource: "https://ex.com/a".into(),
             settlement: String::new(),
+            settlement_tx: String::new(),
+            settlement_explorer: String::new(),
             body: FetchedBody::default(),
         }
     }

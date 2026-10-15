@@ -269,6 +269,9 @@ pub struct FetchedBody {
     pub bytes: usize,
     /// 파일로 저장했으면 그 경로. 빈 값 = 저장 안 함.
     pub saved_file: String,
+    /// 저장이 기다림 상한(`SAVE_WAIT`) 안에 안 끝났을 때 **쓰고 있던 경로**(개발 79, 78 코덱스 1차 P2-6).
+    /// 결과가 먼저 나가도 파일은 뒤에 여기 생긴다 — 이게 없으면 뒤늦게 저장된 파일을 아무도 못 찾는다.
+    pub saving_file: String,
     /// 작은 이미지면 MCP image content 로 붙일 원본.
     pub image: Option<InlineImage>,
     /// 본문을 끝까지 받지 못했다(연결 끊김·시간 초과). 받은 만큼만 `text`/`saved_file` 에 있다.
@@ -354,8 +357,12 @@ fn download_dirs() -> Vec<PathBuf> {
     dirs_out
 }
 
+/// 지금 쓰려는 경로를 밖에 알리는 자리 — 저장이 늦어 결과를 먼저 낼 때 그 경로를 말하려고(개발 79).
+type Trying = std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>;
+
 /// 새 파일을 만들어 쓴다(덮어쓰지 않는다). 첫 폴더가 막히면(권한 등) 다음 폴더로.
-fn save_bytes(bytes: &[u8], ext: &str) -> Result<PathBuf, String> {
+/// `trying` 이 있으면 쓰기 **전에** 그 경로를 적어 둔다 — 쓰기가 권한 창에 막혀 있는 동안 읽힌다.
+fn save_bytes(bytes: &[u8], ext: &str, trying: Option<&Trying>) -> Result<PathBuf, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -372,7 +379,13 @@ fn save_bytes(bytes: &[u8], ext: &str) -> Result<PathBuf, String> {
                     format!("-{attempt}")
                 }
             );
-            match write_new(&dir, &dir.join(name), bytes) {
+            let path = dir.join(name);
+            if let Some(t) = trying {
+                if let Ok(mut g) = t.lock() {
+                    *g = Some(path.clone());
+                }
+            }
+            match write_new(&dir, &path, bytes) {
                 Ok(p) => return Ok(p),
                 Err(WriteErr::Exists) => continue,
                 Err(WriteErr::Other(e)) => {
@@ -485,22 +498,20 @@ pub async fn read_response(resp: reqwest::Response) -> FetchedBody {
     // 파일 쓰기는 막힐 수 있는 일이라(권한 창) 따로 돌리고 오래 기다리지 않는다.
     let ct = content_type.clone();
     let len = bytes.len();
+    let trying: Trying = Default::default();
+    let t = trying.clone();
     let mut body = match tokio::time::timeout(
         SAVE_WAIT,
-        tokio::task::spawn_blocking(move || classify(ct, bytes, truncated)),
+        tokio::task::spawn_blocking(move || classify_tracked(ct, bytes, truncated, Some(&t))),
     )
     .await
     {
         Ok(Ok(b)) => b,
-        _ => FetchedBody {
-            text: tf!(
-                "({len} 바이트를 받았는데 파일 저장이 끝나지 않았어요. macOS 가 다운로드 폴더 접근을 묻고 있으면 허용해 주세요.)",
-                "(Received {len} bytes, but saving the file didn't finish. If macOS is asking for access to the Downloads folder, allow it.)"
-            ),
+        _ => late_save_body(
             content_type,
-            bytes: len,
-            ..FetchedBody::default()
-        },
+            len,
+            trying.lock().ok().and_then(|g| g.clone()),
+        ),
     };
     if let Some(e) = read_err {
         body.incomplete = true;
@@ -512,8 +523,61 @@ pub async fn read_response(resp: reqwest::Response) -> FetchedBody {
     body
 }
 
+/// 저장이 `SAVE_WAIT` 안에 안 끝났을 때의 결과. 쓰던 경로를 알면 「끝나면 여기 생긴다」를 말하고
+/// `saving_file` 에 싣는다 — 저장 작업은 멈추지 않고 뒤에서 계속 돈다(개발 79).
+fn late_save_body(content_type: String, len: usize, trying: Option<PathBuf>) -> FetchedBody {
+    let Some(path) = trying else {
+        return FetchedBody {
+            text: tf!(
+                "({len} 바이트를 받았는데 파일 저장이 끝나지 않았어요. macOS 가 다운로드 폴더 접근을 묻고 있으면 허용해 주세요.)",
+                "(Received {len} bytes, but saving the file didn't finish. If macOS is asking for access to the Downloads folder, allow it.)"
+            ),
+            content_type,
+            bytes: len,
+            ..FetchedBody::default()
+        };
+    };
+    // 지금 폴더가 거절되면 다음 폴더에 **같은 이름**으로 쓴다(`save_bytes`) — 그 자리도 알려 준다.
+    let shown = path.display().to_string();
+    let name = path.file_name().map(PathBuf::from).unwrap_or_default();
+    let dirs = download_dirs();
+    let later: Vec<String> = dirs
+        .iter()
+        .skip_while(|d| !path.starts_with(d))
+        .skip(1)
+        .map(|d| d.join(&name).display().to_string())
+        .collect();
+    let mut text = tf!(
+        "({len} 바이트를 받았어요. 파일 저장이 아직 안 끝났어요 — 끝나면 여기 생겨요: {shown}. macOS 가 다운로드 폴더 접근을 묻고 있으면 허용해 주세요.",
+        "(Received {len} bytes. Saving the file hasn't finished yet — when it does, it will be at: {shown}. If macOS is asking for access to the Downloads folder, allow it."
+    );
+    if let Some(alt) = later.first() {
+        text.push_str(&tf!(
+            " 거절하면 여기 저장해요: {alt}",
+            " If access is denied, it goes here instead: {alt}"
+        ));
+    }
+    text.push(')');
+    FetchedBody {
+        text,
+        content_type,
+        bytes: len,
+        saving_file: shown,
+        ..FetchedBody::default()
+    }
+}
+
 /// 읽은 바이트를 글자/파일/이미지로 나눈다(네트워크 없이 테스트할 수 있게 따로 둔다).
 pub fn classify(content_type: String, bytes: Vec<u8>, truncated: bool) -> FetchedBody {
+    classify_tracked(content_type, bytes, truncated, None)
+}
+
+fn classify_tracked(
+    content_type: String,
+    bytes: Vec<u8>,
+    truncated: bool,
+    trying: Option<&Trying>,
+) -> FetchedBody {
     let len = bytes.len();
     let textual = if content_type.is_empty() {
         std::str::from_utf8(&bytes).is_ok()
@@ -538,7 +602,7 @@ pub fn classify(content_type: String, bytes: Vec<u8>, truncated: bool) -> Fetche
                     MAX_RESPONSE_BYTES / (1024 * 1024)
                 ));
             }
-            match save_bytes(&bytes, extension_for(&content_type)) {
+            match save_bytes(&bytes, extension_for(&content_type), trying) {
                 Ok(p) => {
                     saved_file = p.display().to_string();
                     text.push_str(&tf!(
@@ -557,6 +621,7 @@ pub fn classify(content_type: String, bytes: Vec<u8>, truncated: bool) -> Fetche
             content_type,
             bytes: len,
             saved_file,
+            saving_file: String::new(),
             image: None,
             incomplete: false,
         };
@@ -585,7 +650,7 @@ pub fn classify(content_type: String, bytes: Vec<u8>, truncated: bool) -> Fetche
             mime: content_type.clone(),
             data: bytes.clone(),
         });
-    let (text, saved_file) = match save_bytes(&bytes, extension_for(&content_type)) {
+    let (text, saved_file) = match save_bytes(&bytes, extension_for(&content_type), trying) {
         Ok(p) => {
             let path = p.display().to_string();
             (
@@ -609,6 +674,7 @@ pub fn classify(content_type: String, bytes: Vec<u8>, truncated: bool) -> Fetche
         content_type,
         bytes: len,
         saved_file,
+        saving_file: String::new(),
         image,
         incomplete: false,
     }
@@ -725,6 +791,24 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kura-fetch-test-{}", std::process::id()));
         std::env::set_var("KURA_DOWNLOAD_DIR", &dir);
         f(&dir)
+    }
+
+    /// 저장이 늦으면 쓰던 경로를 `saving_file` 과 글자에 싣는다(개발 79). 경로를 모르면 예전 말 그대로.
+    #[test]
+    fn late_save_reports_the_path_being_written() {
+        with_dir(|dir| {
+            let path = dir.join("kura-1-000001.png");
+            let b = late_save_body("image/png".into(), 42, Some(path.clone()));
+            let shown = path.display().to_string();
+            assert_eq!(b.saving_file, shown);
+            assert!(b.saved_file.is_empty() && b.image.is_none());
+            assert!(b.text.contains(&shown), "{}", b.text);
+            assert_eq!((b.bytes, b.content_type.as_str()), (42, "image/png"));
+            // 지정한 폴더뿐이라 「거절하면 여기」는 없다.
+            assert!(!b.text.contains("거절하면") && !b.text.contains("denied"));
+        });
+        let b = late_save_body("image/png".into(), 42, None);
+        assert!(b.saving_file.is_empty() && b.saved_file.is_empty());
     }
 
     #[test]

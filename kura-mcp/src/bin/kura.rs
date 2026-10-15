@@ -619,6 +619,8 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                 pay_to,
                 resource,
                 settlement,
+                settlement_tx,
+                settlement_explorer,
                 body,
             } => {
                 if ok {
@@ -646,6 +648,20 @@ async fn cmd_fetch(cli: &Cli, rest: &[String]) -> Result<bool, String> {
                     if !explorer.is_empty() {
                         println!("{}", tf!("  링크    {explorer}", "  link      {explorer}"));
                     }
+                }
+                // 서명 갈래: 판매자가 증빙에 적은 정산 tx(개발 79) — 지갑이 확인한 값이 아니라 그렇게 적는다.
+                if !settlement_tx.is_empty() {
+                    println!(
+                        "{}",
+                        tf!(
+                            "  정산 tx {settlement_tx} (판매자 증빙)",
+                            "  settle tx {settlement_tx} (seller's receipt)"
+                        )
+                    );
+                    println!(
+                        "{}",
+                        tf!("  링크    {settlement_explorer}", "  link      {settlement_explorer}")
+                    );
                 }
                 if !settlement.is_empty() {
                     // settlement 은 base64(ASCII) → 바이트 슬라이스 안전. 앞부분만 미리보기.
@@ -885,6 +901,8 @@ mod tests {
             pay_to: "0xabc".into(),
             resource: "https://ex.com/a".into(),
             settlement: String::new(),
+            settlement_tx: String::new(),
+            settlement_explorer: String::new(),
             body: kura_mcp::fetch::FetchedBody::text("nope"),
         });
         assert_eq!(v["status"], "settlement_failed");

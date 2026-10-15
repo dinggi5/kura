@@ -321,7 +321,8 @@ impl WalletServer {
         address. Text and JSON come back in `body`. Binary responses (images, PDF, audio) are saved to a \
         file whose path is in `saved_file` (with `content_type`); a PNG/JPEG/GIF/WebP image up to 3 MB is \
         also attached as an image. Text longer than 100,000 characters is cut in `body` and kept whole in \
-        `saved_file`. Settlement takes \
+        `saved_file`. If saving takes too long (macOS asking for Downloads access), the result comes back \
+        first and `saving_file` names where the file will appear. Settlement takes \
         one of two shapes, chosen by the server's requirement: a facilitator settles the signed EIP-3009 \
         authorization (no gas from this wallet), or — where gas is paid in USDC itself and the server asks for \
         `eip3009-client-broadcast` — the wallet broadcasts the transfer itself, so the price AND its gas leave \
@@ -330,7 +331,9 @@ impl WalletServer {
         lock. Never send a password as an argument. Arguments: url (required), method, headers, body (JSON \
         object), memo (what the payment is for — the user reads it to decide), agent_id. Returns: payment, paid, status, http_status, body, and \
         amount/pay_to/settlement when paid; on a chain where the wallet broadcasts the payment itself, `tx` and \
-        `explorer` point at that transaction (both are empty on the facilitator-settled path). IMPORTANT — \
+        `explorer` point at that transaction (both are empty on the facilitator-settled path, where \
+        `settlement_tx`/`settlement_explorer` carry the transaction the seller reports in its receipt — the \
+        seller's word, not checked on-chain by the wallet). IMPORTANT — \
         decide on `payment`, which says where the money is: \"none\" = nothing was paid, trying again is safe \
         (declined, no 402, or \"reverted\": the chain rejected the transfer and only gas was spent); \
         \"confirmed\" = the money left the wallet; \"unknown\" = it MAY have left (status pending/unknown, or \
