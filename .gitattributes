@@ -1,2 +1,10 @@
-# GitHub 언어 통계에서 배포 스크립트 제외 (제품 코드 = Rust + TypeScript)
+# GitHub 언어 통계는 제품 코드만 — Rust + TypeScript (개발 80: 짜투리 CSS·Shell·HTML 정리)
+# 배포 스크립트
 scripts/* linguist-vendored
+# MCP 확장의 셸 런처(앱 안 kura-mcp 를 exec 할 뿐)
+mcpb/server/kura-mcp linguist-vendored
+# GitHub Pages 소개 페이지
+docs/** linguist-documentation
+# 앱 껍데기 HTML·CSS(몇 줄)
+index.html linguist-detectable=false
+*.css linguist-detectable=false
