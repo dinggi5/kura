@@ -534,7 +534,11 @@ pub(crate) fn finish_approval(
             rec.detail = r.detail.clone();
             rec.x402 = r.x402.as_ref().and_then(|p| serde_json::to_value(p).ok());
             let _ = write_attempt(&rec);
-            resolve_request(&r)?;
+            // 결과 파일만 못 썼어도 결제는 끝났다 — 오류로 돌리면 화면이 「실패」로 보인다(개발 80, 코덱스 1차 P1).
+            // MCP 는 결과가 안 오면 시간 초과 뒤 위 기록을 읽고, 남은 요청의 거부·감시 실패는 `settled_attempt_result` 가 막는다.
+            if let Err(e) = resolve_request(&r) {
+                eprintln!("[ipc] 결과 파일을 못 씀: {e}");
+            }
             Ok(r)
         }
         // 자율이 사람에게 넘긴 것(NEEDS_PASSWORD)은 실패가 아니다 — 「넘김」으로 적는다(개발 71).
@@ -577,6 +581,28 @@ pub(crate) fn result_from_send(
         }),
         Err(SendError::Failed(m)) => Err(m),
     }
+}
+
+/// 거부·「실패」로 덮어도 되는 요청인가 (개발 80, 코덱스 1차 P1). 결과 파일만 못 쓴 승인 뒤엔 요청이 남는데, 그 칸에 거부나
+/// 감시 스레드의 실패가 들어가면 **나간 돈이 「안 나감」으로** 읽혔다. 시도 기록에 결말(done·unknown)이 있으면 그 결과를
+/// 돌려준다(그걸 다시 전한다). 덮어도 되면 `Ok(None)`, 나가는 중이었거나 기록을 못 읽으면 `Err` — 아무것도 쓰지 않는다.
+fn settled_attempt_result(id: &str) -> Result<Option<PaymentResult>, ()> {
+    let Some(rec) = read_attempt(id)? else {
+        return Ok(None);
+    };
+    if crate::policy::attempt_allows_retry(Some(&rec)) {
+        return Ok(None);
+    }
+    if rec.state != crate::policy::ATTEMPT_DONE && rec.state != crate::policy::ATTEMPT_UNKNOWN {
+        return Err(());
+    }
+    Ok(Some(PaymentResult {
+        id: rec.id,
+        status: rec.status,
+        tx_hash: rec.tx_hash,
+        detail: rec.detail,
+        x402: rec.x402.and_then(|v| serde_json::from_value(v).ok()),
+    }))
 }
 
 /// 결제 시도 기록 — 없으면 Ok(None), 있는데 못 읽으면 Err (개발 73). 홈을 못 정해도 Err.
@@ -851,18 +877,28 @@ fn watchdog(app: tauri::AppHandle) {
             if let Ok(_lock) = APPROVAL_ARBITER.lock() {
                 if !approval_in_flight() {
                     if let Some(req) = live_request() {
-                        told_dead = true;
-                        let _ = resolve_request(&PaymentResult {
-                            id: req.id,
-                            status: "failed".into(),
-                            tx_hash: String::new(),
-                            detail: ts!(
-                                "지갑 앱 화면이 응답하지 않아 승인 창을 띄우지 못했어요. 앱을 다시 시작한 뒤 다시 요청하세요.",
-                                "The wallet app's window isn't responding, so the approval prompt couldn't be shown. Restart the app and try again."
-                            )
-                            .into(),
-                            x402: None,
-                        });
+                        // 이미 끝난 결제는 실패가 아니라 그 결과를 다시 전하고, 나가는 중이었으면 손대지 않는다(개발 80).
+                        let deliver = match settled_attempt_result(&req.id) {
+                            Ok(Some(r)) => Some(r),
+                            Err(()) => None,
+                            Ok(None) => {
+                                told_dead = true;
+                                Some(PaymentResult {
+                                    id: req.id,
+                                    status: "failed".into(),
+                                    tx_hash: String::new(),
+                                    detail: ts!(
+                                        "지갑 앱 화면이 응답하지 않아 승인 창을 띄우지 못했어요. 앱을 다시 시작한 뒤 다시 요청하세요.",
+                                        "The wallet app's window isn't responding, so the approval prompt couldn't be shown. Restart the app and try again."
+                                    )
+                                    .into(),
+                                    x402: None,
+                                })
+                            }
+                        };
+                        if let Some(r) = deliver {
+                            let _ = resolve_request(&r);
+                        }
                     }
                 }
             }
@@ -1155,6 +1191,24 @@ pub(crate) fn reject_payment(id: String, reason: Option<String>) -> Result<(), S
             "That payment is being processed right now, so it can't be rejected — and if it stays this way, restart the app."
         )
         .into());
+    }
+    match settled_attempt_result(&req.id) {
+        Ok(None) => {}
+        Ok(Some(r)) => {
+            resolve_request(&r)?;
+            return Err(ts!(
+                "이 결제는 이미 처리돼서 거부할 수 없어요. 처리 결과를 AI 에게 다시 전했어요 — 내역을 확인하세요.",
+                "This payment was already processed, so it can't be rejected. Its result was passed to the AI again — check the history."
+            )
+            .into());
+        }
+        Err(()) => {
+            return Err(ts!(
+                "이 결제는 나갔는지 확인하지 못한 상태라 거부할 수 없어요 — 내역을 확인하세요.",
+                "This payment's outcome couldn't be confirmed, so it can't be rejected — check the history."
+            )
+            .into());
+        }
     }
     resolve_request(&PaymentResult {
         id: req.id,

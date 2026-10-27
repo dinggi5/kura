@@ -149,6 +149,17 @@ pub(crate) enum DurableError {
 /// 디렉터리 동기화 실패는 `NotDurable` 로 따로 돌려준다(개발 71 코덱스 2·3차) — 성공으로 치면 전원 장애 때 예약이 사라지고(3차 P1),
 /// 그냥 실패로 치면 새 장부는 이미 제자리라 결제 없이 한도만 깎인다(2차 P2). 호출자가 예전 내용으로 되돌리고 거절한다.
 pub(crate) fn write_atomic_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), DurableError> {
+    write_durable(path, bytes, true)
+}
+
+/// `write_atomic_durable` 과 같되 **이미 있으면 실패한다** (개발 80, 코덱스 1차 P0) — 새 지갑(만들기·가져오기·평문 이전)만 쓴다.
+/// 「없나 보고 쓰기」는 프로세스 안 잠금만 지켜서, 앱 잠금을 못 쥔 앱 둘이 동시에 만들면 나중 것이 먼저 만든 시드를 덮었다.
+/// rename 대신 하드링크로 내건다 — 링크는 자리에 무엇이 있으면 실패하므로 확인과 쓰기가 한 걸음이다.
+pub(crate) fn create_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), DurableError> {
+    write_durable(path, bytes, false)
+}
+
+fn write_durable(path: &PathBuf, bytes: &[u8], replace: bool) -> Result<(), DurableError> {
     let not = |e: String| DurableError::NotWritten(e);
     let dir = path.parent().ok_or_else(|| {
         not(ts!(
@@ -180,8 +191,20 @@ pub(crate) fn write_atomic_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), D
     fs::File::open(&tmp)
         .and_then(|f| f.sync_all())
         .map_err(|e| not(tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}")))?;
-    fs::rename(&tmp, path)
-        .map_err(|e| not(tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}")))?;
+    if replace {
+        fs::rename(&tmp, path)
+            .map_err(|e| not(tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}")))?;
+    } else {
+        let linked = fs::hard_link(&tmp, path);
+        let _ = fs::remove_file(&tmp);
+        linked.map_err(|e| {
+            not(if e.kind() == std::io::ErrorKind::AlreadyExists {
+                ts!("이미 파일이 있어요", "The file already exists").into()
+            } else {
+                tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}")
+            })
+        })?;
+    }
     #[cfg(test)]
     if fault == fault::Fail::NotDurable {
         return Err(DurableError::NotDurable("주입된 실패".into()));
@@ -294,6 +317,20 @@ mod tests {
             let got = fs::read(&path).unwrap();
             assert!(got == a || got == b, "섞인 내용: len={}", got.len());
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // 새 지갑 쓰기: 있던 파일을 덮지 않는다 (개발 80).
+    #[test]
+    fn create_durable_never_replaces() {
+        let dir = std::env::temp_dir().join(format!("kura-create-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("wallet.enc");
+        create_durable(&path, b"first").unwrap();
+        assert!(matches!(create_durable(&path, b"second"), Err(DurableError::NotWritten(_))));
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        // 임시 파일이 남지 않는다(링크 뒤에도, 실패 뒤에도).
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

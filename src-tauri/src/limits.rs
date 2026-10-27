@@ -161,6 +161,15 @@ fn limit_known(s: &str) -> Result<(), String> {
 /// 한도 「0.0000001 USDC」가 0 = 무제한이 됐고, 금액 「1.1234567」은 1.123456 으로 나갔다. 끝의 0 은 자리로 안 센다.
 fn check_decimals(s: &str, dec: u8) -> Result<(), String> {
     let t = s.trim();
+    // 십진수 꼴만 받는다 (개발 80, 코덱스 1차 P1) — 부호 하나·숫자·점 하나, 숫자는 적어도 한 자리. alloy 는 "." 를 0 으로 읽어
+    // 한도 칸의 「.」 이 0 = 무제한이 됐다. `_` 구분자·지수 표기도 여기서 막는다.
+    let body = t.strip_prefix(['+', '-']).unwrap_or(t);
+    if !body.bytes().any(|b| b.is_ascii_digit())
+        || !body.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        || body.matches('.').count() > 1
+    {
+        return Err(ts!("숫자로 입력해 주세요", "Enter a number").into());
+    }
     let frac = t.split_once('.').map(|(_, f)| f.trim_end_matches('0')).unwrap_or("");
     if frac.len() > dec as usize {
         return Err(tf!(
@@ -362,6 +371,20 @@ mod tests {
     }
 
     use super::*;
+
+    // 개발 80(코덱스 1차 P1): 숫자가 없는 글자는 0 = 무제한이 되지 않는다 — alloy 는 "." 를 0 으로 읽었다.
+    #[test]
+    fn digitless_input_is_not_zero() {
+        for s in [".", "_", "-", "+", "", " . ", "1_000", "1e3", "1.2.3", "0x10"] {
+            assert!(parse_usdc_nonneg(s, 6).is_err(), "usdc {s:?}");
+            assert!(parse_eth_nonneg(s).is_err(), "eth {s:?}");
+        }
+        assert!(parse_limit_usdc(".", 6).is_err());
+        assert_eq!(parse_usdc_nonneg(".5", 6).unwrap(), U256::from(500_000u64));
+        assert_eq!(parse_usdc_nonneg("1.", 6).unwrap(), U256::from(1_000_000u64));
+        assert_eq!(parse_usdc_nonneg("0", 6).unwrap(), U256::ZERO);
+        assert!(parse_usdc_nonneg("-1", 6).is_err());
+    }
 
     // 개발 80: 예약 장부 쓰기의 실패 갈래를 실제로 밟는다(개발 71 이후 읽기만 했다).
     #[test]

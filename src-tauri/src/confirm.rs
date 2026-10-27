@@ -85,7 +85,8 @@ fn ask_for(e: &HistoryEntry, now: u64) -> Option<Ask> {
             e.detail.parse().ok().map(Ask::Receipt)
         }
         // 「정산 실패」도 묻는다(개발 73, 코덱스 1차 P1) — 서버가 실패라고 해도 서명은 유효 시간 동안 살아 있어 누가 정산할 수 있다.
-        "signed" | "settle_failed" if now - e.ts > SIGN_VALID_SECS + SIGN_EXPIRY_MARGIN_SECS => {
+        // 「정산됨」도 묻는다(개발 80, 코덱스 1차 P1) — 판매자의 말일 뿐이라, 안 쓰인 서명이 영영 「정산됨」으로 남을 수 있었다.
+        "signed" | "settle_failed" | "settled" if now - e.ts > SIGN_VALID_SECS + SIGN_EXPIRY_MARGIN_SECS => {
             e.detail.parse().ok().map(Ask::AuthUsed)
         }
         _ => None,
@@ -111,14 +112,18 @@ pub(crate) fn apply_verdict(e: &mut HistoryEntry, v: Verdict) -> (bool, bool) {
     let (from, refund): (&[&str], bool) = match v {
         Verdict::Mined => (&["sent", "unknown"], false),
         Verdict::Reverted => (&["sent", "unknown"], true),
-        Verdict::AuthUsed => (&["signed", "settle_failed"], false),
-        Verdict::AuthExpired => (&["signed", "settle_failed"], true),
+        Verdict::AuthUsed => (&["signed", "settle_failed", "settled"], false),
+        Verdict::AuthExpired => (&["signed", "settle_failed", "settled"], true),
     };
     if !from.contains(&e.status.as_str()) {
         return (false, false);
     }
     e.status = verdict_status(v).into();
     e.checked = true;
+    // 체인이 「안 쓰였다」고 했으면 판매자가 준 정산 tx 는 거짓이다 — 링크로 남기지 않는다(개발 80).
+    if v == Verdict::AuthExpired {
+        e.settle_tx.clear();
+    }
     (true, refund)
 }
 
@@ -386,11 +391,10 @@ mod tests {
             Some(Ask::AuthUsed(h))
         );
         assert_eq!(ask_for(&rec(expired + 2, "signed", HASH), now), None); // 아직 쓰일 수 있다
-        // 🔴 개발 73: 서버가 「정산 실패」라고 한 서명도 체인에서 묻는다 — 서명은 살아 있다.
-        assert_eq!(
-            ask_for(&rec(expired, "settle_failed", HASH), now),
-            Some(Ask::AuthUsed(h))
-        );
+        // 🔴 개발 73: 서버가 「정산 실패」라고 한 서명도 체인에서 묻는다 — 서명은 살아 있다. 개발 80: 「정산됨」도.
+        for st in ["settle_failed", "settled"] {
+            assert_eq!(ask_for(&rec(expired, st, HASH), now), Some(Ask::AuthUsed(h)), "{st}");
+        }
         let mut done = rec(now - 20, "sent", HASH);
         done.checked = true;
         assert_eq!(ask_for(&done, now), None);
@@ -400,7 +404,7 @@ mod tests {
         );
         assert_eq!(ask_for(&rec(now - 20, "sent", "사유"), now), None);
         for s in [
-            "blocked", "failed", "settled", "received", "reverted", "expired",
+            "blocked", "failed", "received", "reverted", "expired",
         ] {
             assert_eq!(ask_for(&rec(now - 20_000, s, HASH), now), None, "{s}");
         }
@@ -459,9 +463,15 @@ mod tests {
         assert_eq!(apply_verdict(&mut e, Verdict::AuthExpired), (true, true));
         assert_eq!(e.status, "expired");
 
-        // 그새 MCP 정산이 먼저 와서 「settled」 가 된 기록엔 만료를 적지 않는다.
+        // 🔴 개발 80(코덱스 1차 P1): 「정산됨」은 판매자의 말이다 — 유효 시간이 지난 블록에서 안 쓰였으면 만료로 바꾸고
+        // 한도를 돌려주며 판매자의 정산 tx 는 지운다. 쓰였으면 그대로 「정산됨」에 확인 표시만.
         let mut e = rec(0, "settled", HASH);
-        assert_eq!(apply_verdict(&mut e, Verdict::AuthExpired), (false, false));
+        e.settle_tx = "0xfake".into();
+        assert_eq!(apply_verdict(&mut e, Verdict::AuthExpired), (true, true));
+        assert_eq!((e.status.as_str(), e.settle_tx.as_str()), ("expired", ""));
+        let mut e = rec(0, "settled", HASH);
+        assert_eq!(apply_verdict(&mut e, Verdict::AuthUsed), (true, false));
+        assert!(e.checked && e.status == "settled");
         let mut e = rec(0, "signed", HASH);
         assert_eq!(apply_verdict(&mut e, Verdict::Mined), (false, false));
     }

@@ -394,6 +394,24 @@ fn write_encrypted(w: &EncryptedWallet) -> Result<(), String> {
 }
 
 fn write_encrypted_strict(w: &EncryptedWallet) -> Result<(), crate::store::DurableError> {
+    write_wallet_file(w, true)
+}
+
+/// **새** 지갑을 내건다 — 이미 wallet.enc 가 있으면 실패한다(개발 80, 코덱스 1차 P0). 만들기·가져오기·평문 이전만 쓴다:
+/// 「없나 보고 쓰기」 사이에 다른 앱이 먼저 만들었으면 그 시드를 덮지 않는다. 실패 구분은 `write_encrypted_strict` 와 같다.
+fn create_encrypted_strict(w: &EncryptedWallet) -> Result<(), crate::store::DurableError> {
+    write_wallet_file(w, false)
+}
+
+/// 새 지갑을 내건다 — 디렉터리 동기화만 실패한 경우는 `write_encrypted` 처럼 성공으로 친다(파일은 제자리).
+fn create_encrypted(w: &EncryptedWallet) -> Result<(), String> {
+    match create_encrypted_strict(w) {
+        Ok(()) | Err(crate::store::DurableError::NotDurable(_)) => Ok(()),
+        Err(crate::store::DurableError::NotWritten(e)) => Err(e),
+    }
+}
+
+fn write_wallet_file(w: &EncryptedWallet, replace: bool) -> Result<(), crate::store::DurableError> {
     let json = serde_json::to_string_pretty(w).map_err(|e| {
         crate::store::DurableError::NotWritten(tf!(
             "직렬화 실패: {e}",
@@ -401,7 +419,11 @@ fn write_encrypted_strict(w: &EncryptedWallet) -> Result<(), crate::store::Durab
         ))
     })?;
     let path = enc_path().map_err(crate::store::DurableError::NotWritten)?;
-    crate::store::write_atomic_durable(&path, json.as_bytes())
+    if replace {
+        crate::store::write_atomic_durable(&path, json.as_bytes())
+    } else {
+        crate::store::create_durable(&path, json.as_bytes())
+    }
 }
 
 pub(crate) fn read_encrypted() -> Result<EncryptedWallet, String> {
@@ -653,7 +675,7 @@ pub(crate) fn create_wallet(password: String) -> Result<WalletInfo, String> {
     let address = derive_address(&phrase)?;
 
     let w = encrypt_wallet(&phrase, &address, &password)?;
-    write_encrypted(&w)?;
+    create_encrypted(&w)?;
 
     Ok(WalletInfo { address })
 }
@@ -698,7 +720,7 @@ pub(crate) fn migrate_wallet(password: String) -> Result<WalletInfo, String> {
     let w = encrypt_wallet(&mnemonic, &derived, &password)?;
     // 🔴 평문 원본은 유일한 사본일 수 있다 — 암호화본이 **디스크까지** 내려가고 다시 읽어 풀린 뒤에만 지운다(개발 79, 코덱스 1차 P0).
     // 디렉터리 동기화가 실패했으면 원본을 남긴다(다음 실행은 암호화본을 쓰고, 평문은 사람이 지울 때까지 남는다 — 키를 잃는 것보다 낫다).
-    write_encrypted_strict(&w).map_err(|e| match e {
+    create_encrypted_strict(&w).map_err(|e| match e {
         crate::store::DurableError::NotWritten(e) | crate::store::DurableError::NotDurable(e) => e,
     })?;
     let back = read_encrypted()?;
@@ -783,7 +805,7 @@ pub(crate) fn import_wallet(password: String, phrase: String) -> Result<WalletIn
     }
     let w = build_imported_wallet(&phrase, &password)?;
     let address = w.address.clone();
-    write_encrypted(&w)?;
+    create_encrypted(&w)?;
     Ok(WalletInfo { address })
 }
 

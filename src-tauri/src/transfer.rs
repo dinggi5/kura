@@ -312,10 +312,7 @@ fn classify_send_error(e: &alloy::providers::transport::TransportError) -> SendF
         RpcError::ErrorResp(p) => {
             let m = p.message.to_lowercase();
             // geth/reth/erigon "already known", nethermind "AlreadyKnown", besu "Known transaction".
-            if m.contains("already known")
-                || m.contains("alreadyknown")
-                || m.contains("known transaction")
-            {
+            if m.contains("already known") || m.contains("alreadyknown") || known_tx_word(&m) {
                 SendFault::AlreadyKnown
             } else if p.code == -32603 || ambiguous_error_text(&m) {
                 // 🔴 오류 응답이라고 다 「노드가 읽고 거절」은 아니다(개발 76, 코덱스 1차 P0). 중계(게이트웨이·RPC 업체)가
@@ -337,6 +334,13 @@ fn classify_send_error(e: &alloy::providers::transport::TransportError) -> SendF
         }
         _ => SendFault::Unknown,
     }
+}
+
+/// besu 의 "Known transaction" — **낱말로만** (개발 80, 코덱스 1차 P1). 그냥 포함으로 보면 "unknown transaction type"
+/// (안 받은 tx)이 「이미 받음 = 나갔다」가 됐다.
+fn known_tx_word(m: &str) -> bool {
+    m.match_indices("known transaction")
+        .any(|(i, _)| !m[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric()))
 }
 
 /// 오류 응답 문구가 「처리됐는지 모름」을 뜻하나 — 중계의 시간 초과·내부 오류 (`classify_send_error`, 소문자로 받는다).
@@ -1130,6 +1134,10 @@ mod tests {
                 SendFault::AlreadyKnown,
                 "{m}"
             );
+        }
+        // 낱말 안에 든 "known transaction" 은 아니다 — 안 받은 tx 다(개발 80).
+        for m in ["unknown transaction type", "Unknown transaction"] {
+            assert_eq!(classify_send_error(&resp(m)), SendFault::Rejected, "{m}");
         }
         // HTTP 4xx = 처리 전에 막힘(요율 제한·인증) / 5xx = 앞단 뒤에서 났을 수 있어 모름.
         assert_eq!(
