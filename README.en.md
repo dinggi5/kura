@@ -1,6 +1,6 @@
 # Kura (蔵 — the storehouse that guards what matters)
 
-**A local EVM wallet for AI agents — Base · Arc (Circle).**
+**A local crypto wallet for AI agents — Base, Arc, x402, AI, MCP**
 On a Mac, when an AI like Claude pays for something online (x402), Kura is the wallet where a human approves it with a password.
 
 - Not a wallet for people (MetaMask and friends) — **a wallet for AI agents**

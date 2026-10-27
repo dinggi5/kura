@@ -71,14 +71,18 @@ pub(crate) async fn reserve_spend(
     set_spent(&mut spend, token, spent.saturating_add(value));
     // 기록 실패면 예약도 실패(헛환불 방지). 디스크까지 내린다 — 이 뒤에 돈이 나간다(개발 71).
     let json = serde_json::to_string_pretty(&spend).map_err(|e| e.to_string())?;
-    let path = spend_path()?;
-    match crate::store::write_atomic_durable(&path, json.as_bytes()) {
-        Ok(()) => Ok(spend.day),
+    commit_reservation(&spend_path()?, &before, &json).map(|()| spend.day)
+}
+
+/// 예약한 장부를 디스크까지 적는다. 실패면 Err — 호출자는 돈을 내보내지 않는다.
+fn commit_reservation(path: &PathBuf, before: &str, after: &str) -> Result<(), String> {
+    match crate::store::write_atomic_durable(path, after.as_bytes()) {
+        Ok(()) => Ok(()),
         Err(crate::store::DurableError::NotWritten(e)) => Err(e),
         // 새 장부는 제자리인데 디스크까지 못 내렸다 — 예약 전으로 되돌리고 이 결제는 거절한다(개발 71 코덱스 2·3차 절충).
         // 되돌리기마저 실패하면 한도만 깎인 채 남는다(사용자에게 불리할 뿐 돈은 안 나간다).
         Err(crate::store::DurableError::NotDurable(e)) => {
-            let _ = crate::store::write_atomic(&path, before.as_bytes());
+            let _ = crate::store::write_atomic(path, before.as_bytes());
             Err(e)
         }
     }
@@ -358,6 +362,27 @@ mod tests {
     }
 
     use super::*;
+
+    // 개발 80: 예약 장부 쓰기의 실패 갈래를 실제로 밟는다(개발 71 이후 읽기만 했다).
+    #[test]
+    fn reservation_commit_failures_leave_old_ledger() {
+        use crate::store::fault::{next, Fail};
+        let dir = std::env::temp_dir().join(format!("kura-resv-{}", std::process::id()));
+        let path = dir.join("spend.json");
+        crate::store::write_atomic(&path, b"before").unwrap();
+        // 디렉터리 동기화만 실패 → 새 장부가 제자리에 갔어도 예약 전으로 되돌리고 거절.
+        next(Fail::NotDurable);
+        assert!(commit_reservation(&path, "before", "after").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before");
+        // 아예 못 썼다 → 거절, 파일 그대로.
+        next(Fail::NotWritten);
+        assert!(commit_reservation(&path, "before", "after").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before");
+        // 주입은 한 번만 — 다음 쓰기는 성공한다.
+        assert!(commit_reservation(&path, "before", "after").is_ok());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "after");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     // 🔴 개발 71(코덱스 3차): 체인 확인 환불은 기록 하나당 한 번 — 같은 열쇠는 두 번째에 아무것도 안 한다. 다른 날·빈 열쇠도.
     #[test]

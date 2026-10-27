@@ -892,13 +892,24 @@ fn write_atomic_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), String> {
     let tmp = unique_tmp(path);
     write_file_private(&tmp, bytes)?;
     let saved = |e: std::io::Error| tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}");
-    if let Err(e) = fs::File::open(&tmp).and_then(|f| f.sync_all()) {
+    let synced = fs::File::open(&tmp).and_then(|f| f.sync_all());
+    // 테스트 전용 실패 주입(개발 80) — 파일 동기화 실패 갈래를 밟는다.
+    #[cfg(test)]
+    let synced = if FAIL_SYNC.with(|c| c.replace(false)) {
+        Err(std::io::Error::other("주입된 실패"))
+    } else {
+        synced
+    };
+    if let Err(e) = synced {
         let _ = fs::remove_file(&tmp);
         return Err(saved(e));
     }
     fs::rename(&tmp, path).map_err(|e| tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}"))?;
     fs::File::open(dir).and_then(|d| d.sync_all()).map_err(saved)
 }
+
+#[cfg(test)]
+thread_local!(static FAIL_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
 
 /// 요청을 못 낸 직접 제출의 증거를 치운다(개발 78) — 요청 없는 증거는 재제출이 어차피 안 쓰지만(시도 기록이 없다) 쌓이지 않게.
 pub fn remove_proof(id: &str) {
@@ -978,6 +989,19 @@ pub const PROOF_BODY_CAP: usize = 64 * 1024;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 개발 80: 증거 파일을 디스크까지 못 내리면 실패이고, 임시 파일도 증거도 남지 않는다(호출자는 결제를 시작하지 않는다).
+    #[test]
+    fn durable_proof_sync_failure_leaves_nothing() {
+        let dir = std::env::temp_dir().join(format!("kura-proof-sync-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("x.proof.json");
+        FAIL_SYNC.with(|c| c.set(true));
+        assert!(write_atomic_durable(&path, b"{}").is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        assert!(write_atomic_durable(&path, b"{}").is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// 개발 74: 깨울 앱은 **우리가 든 번들**뿐이다. 번들 밖(dev·옮긴 바이너리)이면 아무것도 안 깨운다 —
     /// 엉뚱한 설치본을 띄우면 화면과 실제로 승인하는 앱이 갈린다.

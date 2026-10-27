@@ -169,6 +169,12 @@ pub(crate) fn write_atomic_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), D
         // 디렉터리 생성·0700 은 write_atomic 과 같다.
         let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
     }
+    #[cfg(test)]
+    let fault = fault::take();
+    #[cfg(test)]
+    if fault == fault::Fail::NotWritten {
+        return Err(not("주입된 실패".into()));
+    }
     let tmp = unique_tmp(path);
     write_file_private(&tmp, bytes).map_err(not)?;
     fs::File::open(&tmp)
@@ -176,9 +182,40 @@ pub(crate) fn write_atomic_durable(path: &PathBuf, bytes: &[u8]) -> Result<(), D
         .map_err(|e| not(tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}")))?;
     fs::rename(&tmp, path)
         .map_err(|e| not(tf!("파일 교체 실패: {e}", "Couldn't replace the file: {e}")))?;
+    #[cfg(test)]
+    if fault == fault::Fail::NotDurable {
+        return Err(DurableError::NotDurable("주입된 실패".into()));
+    }
     fs::File::open(dir).and_then(|d| d.sync_all()).map_err(|e| {
         DurableError::NotDurable(tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))
     })
+}
+
+/// 테스트 전용 실패 주입 (개발 80) — 디스크가 실제로 실패하는 갈래(꽉 참·디렉터리 fsync 실패)를 밟는다.
+/// 스레드마다 따로라 병렬 테스트끼리 섞이지 않고, 한 번 쓰면 풀린다.
+#[cfg(test)]
+pub(crate) mod fault {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub(crate) enum Fail {
+        None,
+        /// 새 내용이 제자리에 안 간다.
+        NotWritten,
+        /// 제자리엔 갔는데 디렉터리 동기화가 실패한다.
+        NotDurable,
+    }
+
+    thread_local!(static NEXT: Cell<Fail> = const { Cell::new(Fail::None) });
+
+    /// 이 스레드의 다음 durable 쓰기 한 번을 실패시킨다.
+    pub(crate) fn next(f: Fail) {
+        NEXT.with(|c| c.set(f));
+    }
+
+    pub(super) fn take() -> Fail {
+        NEXT.with(|c| c.replace(Fail::None))
+    }
 }
 
 /// 임시 파일을 처음부터 0600 으로 생성해 내용을 쓴다 (생성 후 chmod 사이의 노출 창 제거).

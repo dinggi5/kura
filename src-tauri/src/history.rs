@@ -244,14 +244,42 @@ pub(crate) fn finish_pending(id: &str, token: &str, to: &str, amount: &str, stat
 }
 
 /// `finish_pending` 의 본체 — 경로를 받는다(테스트용). 고쳤으면 true, 그 id 의 「확인 필요」 줄이 없으면 false.
+/// 제출을 기다리는 사이 넘친 기록에 밀려 **보관 파일**로 간 줄도 고친다(개발 80, 개발 76 3차 P2) — 노드가 거절한 tx 는 체인에
+/// 없어 체인 확인도 못 풀고, 그 줄은 「확인 필요」로 영영 남았다. 보관 덧붙이기와 본 파일 쓰기 사이에 죽어 양쪽에 사본이 있으면 둘 다.
 fn finish_at(path: &PathBuf, id: &str, status: &str, detail: &str) -> Result<bool, String> {
-    let mut list = read_history_at(path);
-    let Some(e) = list.iter_mut().find(|e| e.id == id && e.status == "unknown") else {
-        return Ok(false);
+    let pending = |e: &HistoryEntry| e.id == id && e.status == "unknown";
+    let finish = |e: &mut HistoryEntry| {
+        e.status = status.into();
+        e.detail = detail.into();
     };
-    e.status = status.into();
-    e.detail = detail.into();
-    write_json(path.clone(), &list).map(|_| true)
+    let mut list = read_history_at(path);
+    let mut done = false;
+    if let Some(e) = list.iter_mut().find(|e| pending(e)) {
+        finish(e);
+        write_json(path.clone(), &list)?;
+        done = true;
+    }
+    let archive = crate::policy::history_archive_path(path);
+    let Ok(mut rows) = read_archive_rows(&archive) else {
+        return Ok(done);
+    };
+    let Some(row) = rows
+        .iter_mut()
+        .find(|(_, e)| e.as_ref().is_some_and(pending))
+    else {
+        return Ok(done);
+    };
+    if let Some(e) = row.1.as_mut() {
+        finish(e);
+        row.0 = serde_json::to_vec(e).map_err(|e| e.to_string())?;
+    }
+    let mut body = Vec::new();
+    for (raw, _) in &rows {
+        body.extend_from_slice(raw);
+        body.push(b'\n');
+    }
+    crate::store::write_atomic(&archive, &body)?;
+    Ok(true)
 }
 
 /// 그 id 의 줄이 이미 어딘가 있나 — 본 파일에 **다른 상태로**(체인 확인이 먼저 적음) 있거나, 그새 넘친 기록에 밀려 **보관 파일**로
@@ -315,6 +343,12 @@ fn log_entry_with(
         }
         Err(RecordError::NotWritten(e)) => {
             eprintln!("[history] 기록 실패: {e}");
+            // 먼저 적기(durable)를 못 했으면 호출자는 내지 않는다 — 메모리 표식도 뺀다(개발 76 3차 P2: 안 낸 결제가
+            // 10분 동안 「확인 필요」로 남아 같은 자율 결제를 사람에게 돌렸다). 뒤에 적는 기록(`durable` 아님)은 돈이 이미
+            // 나간 뒤라 표식을 남긴다.
+            if durable {
+                forget_recent(&id);
+            }
             Err(None)
         }
     }
@@ -359,6 +393,13 @@ fn settle_recent(id: &str, status: &str) {
     } else {
         list.retain(|(_, e)| e.id != id);
     }
+}
+
+fn forget_recent(id: &str) {
+    RECENT_PAID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(_, e)| e.id != id);
 }
 
 fn recent_in_memory() -> Vec<HistoryEntry> {
@@ -969,6 +1010,42 @@ mod tests {
         list.iter().map(|e| e.detail.clone()).collect()
     }
 
+    /// 개발 80: durable 기록의 두 실패 — 못 썼으면 본 파일 그대로(`NotWritten`), 디렉터리 동기화만 실패면 줄은 제자리(`InPlace`).
+    /// 호출자(먼저 적기)는 앞쪽이면 「줄 없음 → 지금 환불」, 뒤쪽이면 「그 id 로 마무리」를 고른다 — 그 판단의 전제다.
+    #[test]
+    fn durable_record_failures_say_where_the_row_is() {
+        use crate::store::fault::{next, Fail};
+        let hot = temp_hot("durable");
+        record_at(&hot, entry("old"), 10).unwrap();
+        next(Fail::NotWritten);
+        assert!(matches!(record_at_with(&hot, entry("a"), 10, true), Err(RecordError::NotWritten(_))));
+        assert_eq!(tags(&read_history_at(&hot)), ["old"]);
+        next(Fail::NotDurable);
+        assert!(matches!(record_at_with(&hot, entry("b"), 10, true), Err(RecordError::InPlace(_))));
+        assert_eq!(tags(&read_history_at(&hot)), ["b", "old"]);
+        // 보통 쓰기(durable 아님)는 주입을 안 쓴다 — 다음 durable 쓰기에 남는다.
+        next(Fail::NotWritten);
+        record_at(&hot, entry("c"), 10).unwrap();
+        assert!(record_at_with(&hot, entry("d"), 10, true).is_err());
+        let _ = fs::remove_dir_all(hot.parent().unwrap());
+    }
+
+    /// 개발 80(개발 76 3차 P2): 먼저 적기를 못 한 결제의 메모리 표식은 빠지고, 뒤에 적는 기록 실패는 남긴다.
+    #[test]
+    fn forget_recent_drops_only_that_id() {
+        let mut a = entry("a");
+        a.id = "kura80-forget-a".into();
+        a.ts = now_secs();
+        let mut b = a.clone();
+        b.id = "kura80-forget-b".into();
+        remember_recent(&a);
+        remember_recent(&b);
+        forget_recent(&a.id);
+        let ids: Vec<_> = recent_in_memory().into_iter().map(|e| e.id).collect();
+        assert!(!ids.contains(&a.id) && ids.contains(&b.id), "{ids:?}");
+        forget_recent(&b.id);
+    }
+
     /// 🔴 개발 76: 제출 직전에 적은 「확인 필요」 줄은 결말로 고쳐진다 — 단 그새 체인 확인이 다른 결말을 적었으면 덮지 않는다.
     #[test]
     fn pending_entry_is_finished_only_while_unknown() {
@@ -985,13 +1062,20 @@ mod tests {
         assert_eq!(read_history_at(&hot)[0].status, "sent");
         // 없는 id 도 false.
         assert!(!finish_at(&hot, "nope", "sent", "h").unwrap());
-        // 넘쳐 보관 파일로 간 줄은 「이미 있음」 — 새 줄을 안 보탠다(코덱스 2차 P1).
+        // 넘쳐 보관 파일로 간 줄도 그 자리에서 결말로 고친다(개발 80) — 새 줄은 안 보탠다(코덱스 2차 P1).
         let mut q = entry("0xq");
         q.status = "unknown".into();
         q.id = "j2".into();
         record_at(&hot, q, 1).unwrap();
         record_at(&hot, entry("newer"), 1).unwrap();
-        assert!(!finish_at(&hot, "j2", "failed", "x").unwrap());
+        assert!(finish_at(&hot, "j2", "failed", "x").unwrap());
+        let archive = crate::policy::history_archive_path(&hot);
+        let arch = crate::policy::read_history_archive(&archive);
+        let j2: Vec<_> = arch.iter().filter(|e| e.id == "j2").collect();
+        assert_eq!((j2.len(), j2[0].status.as_str(), j2[0].detail.as_str()), (1, "failed", "x"));
+        assert_eq!(tags(&read_history_at(&hot)), ["newer"]);
+        // 이미 결말이 난 보관 줄은 다시 안 고친다.
+        assert!(!finish_at(&hot, "j2", "sent", "y").unwrap());
         assert!(pending_settled_elsewhere(&hot, "j2"));
         assert!(!pending_settled_elsewhere(&hot, "never"));
         let _ = fs::remove_dir_all(hot.parent().unwrap());
