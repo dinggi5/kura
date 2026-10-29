@@ -8,3 +8,6 @@ docs/** linguist-documentation
 # 앱 껍데기 HTML·CSS(몇 줄)
 index.html linguist-detectable=false
 *.css linguist-detectable=false
+
+# 홍보 캐러셀·캡처 하네스 (개발 81)
+promo/** linguist-documentation

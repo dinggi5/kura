@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>Kura 캐러셀</title>
+  <!--
+    인스타 캐러셀 샘플 (개발 81). 한 장 = .slide 하나 = 1080×1350.
+    PNG 는 promo/render.cjs 가 장마다 요소 스크린샷으로 뽑는다.
+    숫자·주소는 전부 Base 메인넷 실결제(개발 78·80, get_history)에서 왔다 — 지어낸 값을 넣지 말 것.
+    사진 넷은 Claude 가 x402 로 산 AiSpace flux-2-max 결과물이다(장당 0.045 USDC).
+  -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css" />
+  <style>
+    :root {
+      --bg: #FAFAF9;
+      --card: #F3F3F1;
+      --line: #E4E4E0;
+      --ink: #1A1A19;
+      --ink-2: #4A4A47;
+      --ink-3: #8A8A85;
+      --accent: #3182F6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #DCDCD8;
+      font-family: "Pretendard Variable", Pretendard, -apple-system, sans-serif;
+      font-feature-settings: "ss10", "tnum";
+      letter-spacing: -0.02em;
+      color: var(--ink);
+      -webkit-font-smoothing: antialiased;
+      word-break: keep-all;
+      display: flex; flex-direction: column; align-items: center; gap: 40px; padding: 40px 0;
+    }
+    .slide {
+      position: relative; width: 1080px; height: 1350px; overflow: hidden;
+      background: var(--bg);
+      padding: 112px 104px;
+      display: flex; flex-direction: column;
+    }
+    .folio {
+      position: absolute; top: 56px; left: 104px; right: 104px;
+      display: flex; justify-content: space-between;
+      font-size: 22px; font-weight: 500; color: var(--ink-3); letter-spacing: 0;
+    }
+    h1 { font-size: 76px; font-weight: 700; line-height: 1.22; letter-spacing: -0.035em; }
+    h2 { font-size: 60px; font-weight: 700; line-height: 1.25; letter-spacing: -0.03em; }
+    .lede { font-size: 34px; font-weight: 400; line-height: 1.6; color: var(--ink-2); }
+    .cap { font-size: 24px; color: var(--ink-3); line-height: 1.5; letter-spacing: -0.01em; }
+    .accent { color: var(--accent); }
+
+    /* 1 표지 — 사진이 위, 글은 아래 여백에 */
+    .cover { padding: 0; }
+    .cover img { width: 1080px; height: 930px; object-fit: cover; object-position: center 62%; display: block; }
+    .cover .text { padding: 64px 104px 0; }
+    .cover h1 { margin-bottom: 24px; }
+
+    /* 2 부탁 */
+    .ask { justify-content: center; }
+    .quote {
+      font-size: 52px; font-weight: 600; line-height: 1.4; letter-spacing: -0.03em;
+      padding-left: 36px; border-left: 4px solid var(--accent); margin: 56px 0 64px;
+    }
+
+    /* 3 승인 창 */
+    .approval { padding-bottom: 0; }
+    .approval h2 { margin-bottom: 24px; }
+    .approval .shot {
+      margin: 72px auto 0; width: 640px;
+      border-radius: 24px; overflow: hidden;
+      box-shadow: 0 8px 24px rgba(24,24,22,.08), 0 32px 80px rgba(24,24,22,.10);
+    }
+    .approval .shot img { width: 640px; display: block; }
+
+    /* 4 막힌 순간 — 사진 위 글 */
+    .stop { padding: 0; }
+    .stop img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .stop::after { content: ""; position: absolute; inset: auto 0 0 0; height: 560px;
+      background: linear-gradient(rgba(250,250,249,0), rgba(250,250,249,.94) 62%); }
+    .stop .folio { z-index: 1; color: rgba(26,26,25,.5); }
+    .stop .text { position: relative; z-index: 1; margin-top: auto; padding: 0 104px 112px; }
+    .stop .text h2 { margin-bottom: 24px; }
+
+    /* 5 사 온 사진 */
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 56px; }
+    .grid img { width: 100%; height: 470px; object-fit: cover; display: block; border-radius: 4px; }
+    .grid-cap { margin-top: 28px; }
+
+    /* 6 숫자 */
+    .nums { margin-top: 72px; border-top: 2px solid var(--ink); }
+    .row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      padding: 40px 0; border-bottom: 1px solid var(--line);
+    }
+    .row .k { font-size: 34px; color: var(--ink-2); }
+    .row .v { font-size: 56px; font-weight: 700; letter-spacing: -0.02em; }
+    .row .v small { font-size: 28px; font-weight: 500; color: var(--ink-3); margin-left: 8px; }
+
+    /* 7 Kura */
+    .kura h2 { font-size: 96px; letter-spacing: -0.04em; margin-bottom: 16px; }
+    .list { margin-top: 72px; list-style: none; }
+    .list li {
+      font-size: 34px; line-height: 1.5; color: var(--ink-2);
+      padding: 28px 0; border-top: 1px solid var(--line);
+    }
+    .list li b { color: var(--ink); font-weight: 600; }
+    .foot { margin-top: auto; display: flex; justify-content: space-between; align-items: flex-end; }
+    .foot .url { font-size: 30px; font-weight: 600; letter-spacing: -0.01em; }
+  </style>
+</head>
+<body>
+
+<!-- 1 -->
+<section class="slide cover">
+  <img src="img/kura-gate.jpg" alt="" />
+  <div class="text">
+    <h1>Claude에게<br />지갑을 맡겨 봤어요</h1>
+    <p class="lede">이 글에 쓴 사진은 전부 Claude가 직접 사 왔어요.</p>
+  </div>
+</section>
+
+<!-- 2 -->
+<section class="slide ask">
+  <div class="folio"><span>Kura</span><span>2 / 7</span></div>
+  <p class="cap">지갑에 3 USDC를 넣고</p>
+  <p class="quote">「글에 쓸 사진을<br />구해 줄래요?」</p>
+  <p class="lede">이렇게만 부탁했어요. 가입도, API 키도 건네지 않았어요.
+    Claude가 사진을 파는 곳을 찾아 값을 묻고, 지갑에 결제를 요청했어요.</p>
+</section>
+
+<!-- 3 -->
+<section class="slide approval">
+  <div class="folio"><span>Kura</span><span>3 / 7</span></div>
+  <h2>돈이 나가기 전엔<br />늘 제가 봐요</h2>
+  <p class="lede">결제마다 맥에 이 창이 떠요. 무엇을 사는지, 어디로 얼마가 가는지 보고 비밀번호를 넣어야 나가요.</p>
+  <div class="shot"><img src="img/app-approval.png" alt="" /></div>
+</section>
+
+<!-- 4 -->
+<section class="slide stop">
+  <img src="img/coin-bowl.webp" alt="" />
+  <div class="folio"><span>Kura</span><span>4 / 7</span></div>
+  <div class="text">
+    <h2>한 번은 멈췄어요</h2>
+    <p class="lede">비밀번호를 잘못 넣었더니 그 결제는 나가지 않았어요. 다시 넣고 나서야 사진 값이 나갔어요.</p>
+  </div>
+</section>
+
+<!-- 5 -->
+<section class="slide">
+  <div class="folio"><span>Kura</span><span>5 / 7</span></div>
+  <h2>그렇게 사 온 사진들</h2>
+  <div class="grid">
+    <img src="img/kura-gate.jpg" alt="" />
+    <img src="img/door.webp" alt="" />
+    <img src="img/desk-key.webp" alt="" />
+    <img src="img/coin-bowl.webp" alt="" />
+  </div>
+  <p class="cap grid-cap">한 장에 0.045 USDC · Base 메인넷 · x402</p>
+</section>
+
+<!-- 6 -->
+<section class="slide">
+  <div class="folio"><span>Kura</span><span>6 / 7</span></div>
+  <h2>실험에 든 것</h2>
+  <div class="nums">
+    <div class="row"><span class="k">쓴 돈</span><span class="v">0.367<small>USDC</small></span></div>
+    <div class="row"><span class="k">산 것</span><span class="v">사진 12장<small>· 검색 1번</small></span></div>
+    <div class="row"><span class="k">판매처</span><span class="v">2곳</span></div>
+    <div class="row"><span class="k">가입한 서비스</span><span class="v">0개</span></div>
+    <div class="row"><span class="k">제가 승인한 횟수</span><span class="v accent">13번</span></div>
+  </div>
+</section>
+
+<!-- 7 -->
+<section class="slide kura">
+  <div class="folio"><span>Kura</span><span>7 / 7</span></div>
+  <h2>Kura</h2>
+  <p class="lede">AI 에이전트를 위한 맥용 로컬 지갑이에요.</p>
+  <ul class="list">
+    <li><b>키는 내 맥에만 있어요.</b> 클라우드에 맡기지 않아요.</li>
+    <li><b>결제마다 사람이 승인해요.</b> 작은 금액은 한도 안에서 자동으로 둘 수도 있어요.</li>
+    <li><b>Claude Code·Claude 데스크톱에 붙어요.</b> MCP로 연결돼요.</li>
+    <li><b>Base · Arc</b>의 USDC, x402 결제를 써요.</li>
+  </ul>
+  <div class="foot">
+    <span class="url">github.com/dinggi5/kura</span>
+    <span class="cap">무료 · MIT</span>
+  </div>
+</section>
+
+</body>
+</html>
