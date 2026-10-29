@@ -1225,8 +1225,8 @@ async fn deliver(d: Delivery<'_>) -> Result<X402Outcome, String> {
     } else if body.incomplete {
         // 결제는 됐거나 됐을 수 있는데 응답이 중간에 끊겼다(개발 77) — 다시 부르면 또 결제된다.
         ts!(
-            "결제 뒤 응답을 끝까지 받지 못했어요. 다시 요청하면 또 결제될 수 있어요 — 받은 부분은 body·saved_file 에 있어요. 사용자에게 알리세요.",
-            "The response after payment didn't arrive in full. Asking again may pay again — what arrived is in body / saved_file. Tell the user."
+            "결제 뒤 응답을 끝까지 받지 못했어요(끊겼거나 크기 상한을 넘음). 다시 요청하면 또 결제될 수 있어요 — 남긴 부분이 있으면 body·saved_file 에 있어요. 사용자에게 알리세요.",
+            "The response after payment didn't arrive in full (cut off, or over the size limit). Asking again may pay again — whatever was kept is in body / saved_file. Tell the user."
         )
         .to_string()
     } else {
