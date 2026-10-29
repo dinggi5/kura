@@ -58,6 +58,8 @@ export function BackupFlow({
   const [words, setWords] = useState<string[] | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [challenges, setChallenges] = useState<Challenge[] | null>(null);
+  // 가져온 지갑은 15~24단어일 수 있다(개발 81, 코덱스 1차 P3) — 복호화 전엔 모르니 그때만 「단어」로 부른다.
+  const n = words?.length ?? 12;
 
   const reveal = useCallback(async (password: string) => {
     setBusy(true);
@@ -110,7 +112,7 @@ export function BackupFlow({
           <>
             <FlowIcon><KeyRound size={22} /></FlowIcon>
             <h1 className="mt-5 text-center text-[19px] tracking-tight">
-              {t("시드 12단어 보기", "Show your 12 words")}
+              {t("시드 단어 보기", "Show your recovery words")}
             </h1>
             <p className="mt-2 text-center text-[13px] leading-relaxed text-[var(--color-ink-500)]">
               {t("키를 복호화하려면 비밀번호가 필요해요.", "Your password is needed to decrypt the key.")}
@@ -151,13 +153,13 @@ export function BackupFlow({
             <p className="mt-3 text-center text-[13px] leading-relaxed text-[var(--color-ink-500)]">
               {t(
                 <>
-                  이 12단어가 자산의{" "}
+                  이 {n}단어가 자산의{" "}
                   <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">진짜 소유 증명</b>
                   이에요. 비밀번호를 잊어도 이 단어만 있으면 가져오기나 다른 표준 지갑에서 자산을
                   되찾을 수 있어요.
                 </>,
                 <>
-                  These twelve words are{" "}
+                  These {n} words are{" "}
                   <b className="text-[var(--color-ink-700)] dark:text-[#E8E5DD]">
                     the real proof the funds are yours
                   </b>
@@ -173,7 +175,7 @@ export function BackupFlow({
             </ul>
             <button type="button" onClick={() => setStep("words")} className={cn(primaryBtn, "mt-7")}>
               <Eye size={15} />
-              {t("12단어 보기", "Show the 12 words")}
+              {t(`${n}단어 보기`, `Show the ${n} words`)}
             </button>
           </>
         )}
@@ -183,7 +185,7 @@ export function BackupFlow({
           <>
             <div className="flex items-center justify-between">
               <p className="text-[11px] tracking-[0.04em] text-[var(--color-ink-500)]">
-                {t("복구 시드 (12단어)", "Recovery phrase (12 words)")}
+                {t(`복구 시드 (${n}단어)`, `Recovery phrase (${n} words)`)}
               </p>
               <button
                 type="button"

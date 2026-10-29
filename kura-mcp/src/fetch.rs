@@ -631,7 +631,8 @@ fn classify_tracked(
             saving_file: String::new(),
             save_failed,
             image: None,
-            incomplete: false,
+            // 상한에서 끊긴 응답은 다 받은 게 아니다(개발 81, 코덱스 1차 P1) — 결제 결과에 재결제 경고가 붙게 한다.
+            incomplete: truncated,
         };
     }
 
@@ -650,6 +651,7 @@ fn classify_tracked(
             ),
             content_type,
             bytes: len,
+            incomplete: true,
             ..FetchedBody::default()
         };
     }
@@ -858,6 +860,17 @@ mod tests {
     fn truncated_binary_is_not_saved() {
         let b = classify("image/png".into(), vec![1, 2, 3], true);
         assert!(b.saved_file.is_empty() && b.image.is_none());
+        // 못 받은 콘텐츠는 「불완전」이어야 결제 결과에 재결제 경고가 붙는다(개발 81).
+        assert!(b.incomplete);
+    }
+
+    #[test]
+    fn truncated_text_is_incomplete_but_long_text_is_not() {
+        with_dir(|_| {
+            assert!(classify("text/plain".into(), b"abc".to_vec(), true).incomplete);
+            let long = "가".repeat(MAX_BODY_CHARS + 10);
+            assert!(!classify("text/plain".into(), long.into_bytes(), false).incomplete);
+        });
     }
 
     #[test]
