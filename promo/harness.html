@@ -23,7 +23,8 @@
   <script>
     const scene = new URLSearchParams(location.search).get("scene") || "wallet";
     const now = Math.floor(Date.now() / 1000);
-    const ME = "0x8b7ba5077d261739f5FeBB31B10167671e590161";
+    // 공개 게시물용 — 실제 지갑 주소를 싣지 않는다(개발 81). 받는 쪽(판매자) 주소만 실제 값.
+    const ME = "0x1234567890AbcdEF1234567890aBcdef12345678";
     const AISPACE = "0xA7f3Ad0E69F61864092FAbBa6Cee00AF6e584689";
     const EXA = "0x6d6E695b09861467c7d462f5AAF31cF3540B9192";
 
@@ -63,6 +64,21 @@
       account: 0,
       from: ME,
     };
+    // ?scene=gpt — 개발 81 의 실결제(BlockRun GPT-6.1 Sol 첨삭) 그대로. 처음 보는 주소라 「신뢰 주소」 줄이 안 붙는다.
+    const BLOCKRUN = "0xe9030014F5DAe217d0A152f02A043567b16c1aBf";
+    // ?scene=exa — 개발 78 의 실결제(Exa 웹 검색 0.007). 메모는 다시 쓴 것.
+    if (scene === "exa") Object.assign(request, {
+      to: EXA,
+      amount: "0.007",
+      memo: "웹 검색 한 번 (Exa)",
+      resource: "https://api.exa.ai/search",
+    });
+    if (scene === "gpt") Object.assign(request, {
+      to: BLOCKRUN,
+      amount: "0.002366",
+      memo: "GPT-6.1 Sol에게 캐러셀 카피 첨삭 받기 (BlockRun, 1회)",
+      resource: "https://blockrun.ai/api/v1/chat/completions",
+    });
 
     const settings = {
       single_usdc: "0.5", daily_usdc: "1", single_eth: "0.001", daily_eth: "0.002",
@@ -78,10 +94,10 @@
       get_lang: "ko",
       get_history: history,
       get_today_spend: { usdc: "0.135", eth: "0" },
-      get_pending_request: scene === "approval" ? request : null,
+      get_pending_request: ["approval", "gpt", "exa"].includes(scene) ? request : null,
       session_status: { unlocked: false, remaining_secs: 0, auto_limit: "0" },
       get_agent_status: { connected: true, client: "Claude Code" },
-      is_trusted_addr: true,
+      is_trusted_addr: scene === "approval",
       recent_same_payment_secs: null,
       is_locked: false,
       settings_file_broken: false,
