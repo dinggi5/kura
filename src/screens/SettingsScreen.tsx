@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { CHAINS, chainFromId, type ChainConfig } from "@/lib/chain";
-import { fmtAmount, shortenAddress } from "@/lib/format";
+import { fmtAmount, fmtExact, shortenAddress } from "@/lib/format";
 import { GITHUB_URL } from "@/lib/helpContent";
 import type { Settings, SpendView } from "@/lib/types";
 import type { UpdateHook } from "@/lib/useUpdate";
@@ -1151,12 +1151,14 @@ function LimitGroup({
   usedToday: string | undefined;
   frac?: number;
 }) {
+  const used = token === "ETH" ? fmtAmount(usedToday, frac) : fmtExact(usedToday);
   return (
     <div className="rounded-[var(--radius-card)] border border-[var(--color-ivory-300)] dark:border-[var(--color-night-700)] px-4 py-4">
       <div className="flex items-center justify-between">
         <span className="text-[13px] tracking-tight">{token}</span>
         <span className="text-[11px] text-[var(--color-ink-300)] num">
-          {t(`오늘 ${fmtAmount(usedToday, frac)} 사용`, `${fmtAmount(usedToday, frac)} used today`)}
+          {/* USDC(frac 2)는 정확한 값 — 0.045 를 「0.05 사용」으로 반올림하면 한도 계산과 어긋나 보인다(개발 82) */}
+          {t(`오늘 ${used} 사용`, `${used} used today`)}
         </span>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-3">

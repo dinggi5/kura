@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useChain } from "@/lib/chain";
-import { fmtAmount, fmtRelTime, shortenAddress } from "@/lib/format";
+import { fmtAmount, fmtExact, fmtRelTime, shortenAddress } from "@/lib/format";
 import type { HistoryEntry } from "@/lib/types";
 import { cardBase, enter, shell } from "@/components/ui";
 import { locale, t } from "@/lib/i18n";
@@ -119,10 +119,12 @@ const HISTORY_META: Record<string, { icon: React.ReactNode; ring: string; label:
   expired: { icon: <Clock size={15} />, ring: "bg-[var(--color-ink-500)]/10 text-[var(--color-ink-500)] dark:text-[#B5AFA2]", label: t("만료 · 안 나감", "Expired · not paid"), labelColor: "text-[var(--color-ink-300)]" },
 };
 
-/** 금액 — 보통은 USDC 2자리·ETH 5자리로 줄이되, 0 이 아닌 금액이 「0」으로 보이면 원래 값 그대로
- *  (코덱스 개발 69 1차: 0.000001 USDC 입금이 「0 USDC」로 보였다). */
+/** 금액 — USDC 는 반올림하지 않는다(개발 82): 2자리로 줄이면 0.045 x402 결제가 「0.05」로, 0.007 이 「0.01」로
+ *  보여 다른 금액으로 읽힌다. USDC 는 소수 6자리가 끝이라 정확한 값도 짧다. ETH 는 18자리라 5자리로 줄이되,
+ *  0 이 아닌 금액이 「0」으로 보이면 원래 값 그대로(코덱스 개발 69 1차). */
 function amountText(entry: HistoryEntry): string {
-  const short = fmtAmount(entry.amount, entry.token === "ETH" ? 5 : 2);
+  if (entry.token !== "ETH") return fmtExact(entry.amount);
+  const short = fmtAmount(entry.amount, 5);
   return short === "0" && Number(entry.amount) > 0 ? entry.amount : short;
 }
 

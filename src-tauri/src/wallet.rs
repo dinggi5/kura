@@ -1310,6 +1310,77 @@ mod tests {
     }
 
     // 같은 입력이라도 매번 솔트/논스가 달라 암호문이 달라야 한다.
+    // ── wallet.enc 저장 실패 갈래 (개발 79·80 → 테스트는 개발 82, `store::test_dir` 로 처음 밟는다) ──────────────
+
+    const HARDHAT: &str = "test test test test test test test test test test test junk";
+
+    fn enc_bytes() -> Vec<u8> {
+        fs::read(enc_path().unwrap()).unwrap()
+    }
+
+    /// 고쳐 쓰기(`write_encrypted`): 새 내용이 제자리에 못 갔으면 오류이고 **옛 파일 그대로**, 디렉터리 동기화만 실패했으면
+    /// 성공(새 내용은 제자리 — 실패로 돌리면 「했는데 실패」가 된다).
+    #[test]
+    fn wallet_enc_rewrite_failures() {
+        let _d = crate::store::test_dir::use_temp("wallet-rewrite");
+        import_wallet("pw".into(), HARDHAT.into()).unwrap();
+        let before = enc_bytes();
+
+        crate::store::fault::next(crate::store::fault::Fail::NotWritten);
+        assert!(rename_account(0, "새 이름".into()).is_err());
+        assert_eq!(enc_bytes(), before, "못 썼으면 옛 지갑 그대로");
+
+        crate::store::fault::next(crate::store::fault::Fail::NotDurable);
+        let st = rename_account(0, "새 이름".into()).expect("동기화만 실패 → 성공");
+        assert_eq!(st.accounts[0].label, "새 이름");
+        assert_eq!(read_encrypted().unwrap().accounts()[0].label, "새 이름", "제자리에 갔다");
+        // 시드는 그대로 풀린다.
+        assert_eq!(decrypt_wallet(&read_encrypted().unwrap(), "pw").unwrap().as_str(), HARDHAT);
+    }
+
+    /// 🔴 개발 80(코덱스 1차 P0) — 새 지갑은 있는 wallet.enc 를 덮지 않는다. 「없나 보고 쓰기」 사이에 다른 앱이 먼저 만든 경우도
+    /// (`create_encrypted` 를 바로 불러) 막힌다. 새로 만들 때 동기화만 실패하면 성공으로 친다.
+    #[test]
+    fn new_wallet_never_overwrites_wallet_enc() {
+        let _d = crate::store::test_dir::use_temp("wallet-create");
+        crate::store::fault::next(crate::store::fault::Fail::NotDurable);
+        import_wallet("pw".into(), HARDHAT.into()).expect("동기화만 실패 → 성공");
+        let first = enc_bytes();
+
+        assert!(create_wallet("other".into()).is_err(), "이미 지갑이 있다");
+        assert!(import_wallet("other".into(), HARDHAT.into()).is_err());
+        let other = build_imported_wallet(HARDHAT, "other").unwrap();
+        let e = create_encrypted(&other).expect_err("확인 뒤 끼어든 경우 — 파일 단계에서 막힌다");
+        assert!(e.contains("이미 파일") || e.contains("already exists"), "{e}");
+        assert_eq!(enc_bytes(), first, "첫 지갑 그대로");
+        assert!(decrypt_wallet(&read_encrypted().unwrap(), "pw").is_ok());
+    }
+
+    /// 🔴 개발 79(코덱스 1차 P0) — 평문 wallet.json 은 유일한 사본일 수 있다. 암호화본이 **디스크까지** 내려가고 다시 풀린 뒤에만 지운다.
+    #[test]
+    fn migrate_keeps_plaintext_unless_encrypted_copy_is_durable() {
+        let legacy = format!(
+            r#"{{"mnemonic":"{HARDHAT}","address":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"}}"#
+        );
+        for (fail, enc_left) in [
+            (crate::store::fault::Fail::NotWritten, false),
+            (crate::store::fault::Fail::NotDurable, true),
+        ] {
+            let _d = crate::store::test_dir::use_temp("wallet-migrate");
+            fs::write(legacy_path().unwrap(), &legacy).unwrap();
+            crate::store::fault::next(fail);
+            assert!(migrate_wallet("pw".into()).is_err(), "{fail:?}");
+            assert!(legacy_path().unwrap().exists(), "{fail:?}: 평문 원본을 남긴다");
+            assert_eq!(enc_path().unwrap().exists(), enc_left, "{fail:?}");
+        }
+        let _d = crate::store::test_dir::use_temp("wallet-migrate");
+        fs::write(legacy_path().unwrap(), &legacy).unwrap();
+        let info = migrate_wallet("pw".into()).unwrap();
+        assert_eq!(info.address, "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+        assert!(!legacy_path().unwrap().exists(), "확인 뒤에만 지운다");
+        assert_eq!(decrypt_wallet(&read_encrypted().unwrap(), "pw").unwrap().as_str(), HARDHAT);
+    }
+
     #[test]
     fn ciphertext_is_randomized() {
         let phrase = "test test test test test test test test test test test junk";

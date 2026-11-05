@@ -605,6 +605,30 @@ fn settled_attempt_result(id: &str) -> Result<Option<PaymentResult>, ()> {
     }))
 }
 
+/// 화면이 죽어 승인 창을 못 띄울 때 기다리는 요청에 줄 답 (감시 스레드, 개발 51 → 판정만 개발 82 에 떼어 냄 — 테스트하려고).
+/// 이미 끝난 결제는 실패가 아니라 그 결과를 다시 전하고(`false`), 나가는 중이었거나 기록을 못 읽으면 손대지 않는다(`None`, 개발 80).
+/// 아무것도 시작 안 한 요청만 「실패」(`true` — 사람에게도 알린다).
+fn dead_window_result(id: String) -> Option<(PaymentResult, bool)> {
+    match settled_attempt_result(&id) {
+        Ok(Some(r)) => Some((r, false)),
+        Err(()) => None,
+        Ok(None) => Some((
+            PaymentResult {
+                id,
+                status: "failed".into(),
+                tx_hash: String::new(),
+                detail: ts!(
+                    "지갑 앱 화면이 응답하지 않아 승인 창을 띄우지 못했어요. 앱을 다시 시작한 뒤 다시 요청하세요.",
+                    "The wallet app's window isn't responding, so the approval prompt couldn't be shown. Restart the app and try again."
+                )
+                .into(),
+                x402: None,
+            },
+            true,
+        )),
+    }
+}
+
 /// 결제 시도 기록 — 없으면 Ok(None), 있는데 못 읽으면 Err (개발 73). 홈을 못 정해도 Err.
 fn read_attempt(id: &str) -> Result<Option<crate::policy::AttemptRecord>, ()> {
     crate::policy::read_attempt_at(&jigap_dir().map_err(|_| ())?, id).map_err(|_| ())
@@ -877,26 +901,8 @@ fn watchdog(app: tauri::AppHandle) {
             if let Ok(_lock) = APPROVAL_ARBITER.lock() {
                 if !approval_in_flight() {
                     if let Some(req) = live_request() {
-                        // 이미 끝난 결제는 실패가 아니라 그 결과를 다시 전하고, 나가는 중이었으면 손대지 않는다(개발 80).
-                        let deliver = match settled_attempt_result(&req.id) {
-                            Ok(Some(r)) => Some(r),
-                            Err(()) => None,
-                            Ok(None) => {
-                                told_dead = true;
-                                Some(PaymentResult {
-                                    id: req.id,
-                                    status: "failed".into(),
-                                    tx_hash: String::new(),
-                                    detail: ts!(
-                                        "지갑 앱 화면이 응답하지 않아 승인 창을 띄우지 못했어요. 앱을 다시 시작한 뒤 다시 요청하세요.",
-                                        "The wallet app's window isn't responding, so the approval prompt couldn't be shown. Restart the app and try again."
-                                    )
-                                    .into(),
-                                    x402: None,
-                                })
-                            }
-                        };
-                        if let Some(r) = deliver {
+                        if let Some((r, failed)) = dead_window_result(req.id) {
+                            told_dead = failed;
                             let _ = resolve_request(&r);
                         }
                     }
@@ -1386,6 +1392,165 @@ mod tests {
         assert!(json.contains("x402-direct"), "{json}");
     }
 
+
+    // ── 지갑 폴더를 읽고 쓰는 갈래 (개발 82 — `store::test_dir` 로 처음 밟는다) ─────────────────────────────
+
+    fn rec(id: &str, state: &str, status: &str, tx: &str) -> crate::policy::AttemptRecord {
+        crate::policy::AttemptRecord {
+            v: 1,
+            id: id.into(),
+            state: state.into(),
+            kind: "transfer".into(),
+            chain_id: 8453,
+            started: 1,
+            updated: 1,
+            status: status.into(),
+            tx_hash: tx.into(),
+            detail: String::new(),
+            x402: None,
+        }
+    }
+
+    /// 요청 파일을 내건다 — MCP 가 쓰는 것과 같은 자리.
+    fn put_request(id: &str) {
+        let mut r = req_created(now_secs());
+        r.id = id.into();
+        write_json(request_path().unwrap(), &r).unwrap();
+    }
+
+    fn written_result() -> Option<PaymentResult> {
+        fs::read_to_string(result_path().unwrap())
+            .ok()
+            .map(|s| serde_json::from_str(&s).unwrap())
+    }
+
+    /// 🔴 개발 80(코덱스 1차 P1) — 결과 파일만 못 쓴 승인 뒤 남은 요청에 무엇을 덮어도 되나. 기록 없음·실패·넘김만 덮는다.
+    /// 끝난 결제(done·unknown)는 그 결과를 돌려주고, 나가는 중(sending)이나 못 읽는 기록은 `Err` — 아무것도 쓰지 말라.
+    #[test]
+    fn settled_attempt_result_reads_the_record() {
+        let _d = crate::store::test_dir::use_temp("settled");
+        assert!(matches!(settled_attempt_result("11"), Ok(None)), "기록 없음");
+        for st in [crate::policy::ATTEMPT_FAILED, crate::policy::ATTEMPT_HANDED] {
+            write_attempt(&rec("11", st, "", "")).unwrap();
+            assert!(matches!(settled_attempt_result("11"), Ok(None)), "{st} 는 다시 승인·거부해도 된다");
+        }
+        write_attempt(&rec("11", crate::policy::ATTEMPT_SENDING, "", "")).unwrap();
+        assert!(matches!(settled_attempt_result("11"), Err(())), "나가는 중");
+        write_attempt(&rec("11", crate::policy::ATTEMPT_DONE, "approved", "0xA")).unwrap();
+        let r = settled_attempt_result("11").unwrap().expect("끝난 결제");
+        assert_eq!((r.status.as_str(), r.tx_hash.as_str()), ("approved", "0xA"));
+        write_attempt(&rec("11", crate::policy::ATTEMPT_UNKNOWN, "unknown", "0xB")).unwrap();
+        let r = settled_attempt_result("11").unwrap().expect("나갔을 수 있는 결제");
+        assert_eq!((r.status.as_str(), r.tx_hash.as_str()), ("unknown", "0xB"));
+        // 못 읽는 기록 — 「없음」으로 접으면 나간 돈을 「안 나감」으로 덮는다.
+        let p = crate::policy::attempt_path(&jigap_dir().unwrap(), "11").unwrap();
+        fs::write(&p, "{\"v\":").unwrap();
+        assert!(matches!(settled_attempt_result("11"), Err(())), "깨진 기록");
+    }
+
+    /// 🔴 거부 갈래 (개발 80 → 테스트는 개발 82). 끝난 결제의 요청을 사람이 거부하면 「거부됨」이 아니라 진짜 결과를 다시 전하고
+    /// 거부는 실패로 알린다. 나가는 중이면 결과 칸도 요청도 그대로. 아무것도 시작 안 한 요청만 「거부됨」.
+    #[test]
+    fn reject_never_overwrites_a_settled_payment() {
+        let _g = globals();
+        let _d = crate::store::test_dir::use_temp("reject");
+
+        put_request("21");
+        write_attempt(&rec("21", crate::policy::ATTEMPT_DONE, "approved", "0xA")).unwrap();
+        let e = reject_payment("21".into(), None).unwrap_err();
+        assert!(e.contains("이미 처리") || e.contains("already processed"), "{e}");
+        let r = written_result().expect("진짜 결과를 다시 전한다");
+        assert_eq!((r.id.as_str(), r.status.as_str(), r.tx_hash.as_str()), ("21", "approved", "0xA"));
+        assert!(read_request().is_none(), "결과를 전했으니 요청은 치운다");
+
+        let _ = fs::remove_file(result_path().unwrap());
+        put_request("22");
+        write_attempt(&rec("22", crate::policy::ATTEMPT_SENDING, "", "")).unwrap();
+        let e = reject_payment("22".into(), None).unwrap_err();
+        assert!(e.contains("확인하지 못한") || e.contains("couldn't be confirmed"), "{e}");
+        assert!(written_result().is_none(), "나가는 중이면 결과 칸을 안 쓴다");
+        assert_eq!(read_request().map(|r| r.id).as_deref(), Some("22"), "요청도 그대로");
+
+        put_request("23");
+        reject_payment("23".into(), Some("싫어요".into())).unwrap();
+        let r = written_result().expect("거부됨");
+        assert_eq!((r.id.as_str(), r.status.as_str(), r.detail.as_str()), ("23", "rejected", "싫어요"));
+        assert!(read_request().is_none());
+
+        // 진행 중인 승인이 있으면 끝난 기록이 없어도 거부를 안 받는다(개발 63) — 같은 문.
+        put_request("24");
+        let _ = fs::remove_file(result_path().unwrap());
+        {
+            let _a = ApprovalGuard::acquire();
+            assert!(reject_payment("24".into(), None).is_err());
+        }
+        assert!(written_result().is_none());
+    }
+
+    /// 🔴 감시 갈래 — 화면이 죽어 승인 창을 못 띄울 때. 끝난 결제는 결과를 다시 전하고(알림 없음), 나가는 중이면 손대지 않고,
+    /// 아무것도 시작 안 한 요청만 「실패」(알림).
+    #[test]
+    fn dead_window_keeps_settled_and_sending_payments() {
+        let _d = crate::store::test_dir::use_temp("dead");
+        let (r, notify) = dead_window_result("31".into()).expect("기록 없음 → 실패");
+        assert_eq!((r.status.as_str(), notify), ("failed", true));
+        write_attempt(&rec("32", crate::policy::ATTEMPT_UNKNOWN, "unknown", "0xC")).unwrap();
+        let (r, notify) = dead_window_result("32".into()).expect("불명 → 그 결과");
+        assert_eq!((r.status.as_str(), r.tx_hash.as_str(), notify), ("unknown", "0xC", false));
+        write_attempt(&rec("33", crate::policy::ATTEMPT_SENDING, "", "")).unwrap();
+        assert!(dead_window_result("33".into()).is_none(), "나가는 중 → 손대지 않는다");
+    }
+
+    /// 🔴 재제출 연결 (개발 79, 코덱스 1·2차 P1) — x402 직접 제출의 tx 해시를 제출 **전에** 결제 시도 기록에 디스크까지 적는다.
+    /// 못 적으면 false(호출자는 제출하지 않는다). 승인 밖·이미 해시가 있음·`sending` 아님도 false.
+    #[test]
+    fn note_inflight_tx_links_the_attempt_or_refuses() {
+        let _g = globals();
+        let _d = crate::store::test_dir::use_temp("inflight");
+        assert!(!note_inflight_tx("0x1"), "승인 밖");
+
+        put_request("41");
+        let mut req = req_created(now_secs());
+        req.id = "41".into();
+        let guard = begin_approval(&req).expect("승인 시작");
+        let read = || read_attempt("41").unwrap().unwrap();
+        assert_eq!(read().state, crate::policy::ATTEMPT_SENDING);
+
+        // 디스크에 못 내렸다 → false, 기록은 해시 없이 그대로(제출 안 함).
+        crate::store::fault::next(crate::store::fault::Fail::NotWritten);
+        assert!(!note_inflight_tx("0xA"));
+        assert_eq!(read().tx_hash, "");
+        // 디렉터리 동기화만 실패해도 false — 「디스크까지」가 약속이다. 파일엔 이미 해시가 들어갔지만 제출하지 않으니
+        // `finish_approval` 의 실패 갈래가 기록을 `failed`·해시 비움으로 새로 쓴다(아래에서 확인).
+        crate::store::fault::next(crate::store::fault::Fail::NotDurable);
+        assert!(!note_inflight_tx("0xA"));
+        assert_eq!(read().tx_hash, "0xA", "제자리엔 들어갔다");
+        assert!(matches!(finish_approval(&req, Err("제출 안 함".into())), Err(e) if e == "제출 안 함"));
+        let r = read();
+        assert_eq!((r.state.as_str(), r.tx_hash.as_str()), (crate::policy::ATTEMPT_FAILED, ""));
+        assert!(crate::policy::attempt_allows_retry(Some(&r)), "안 나갔으니 다시 승인해도 된다");
+        // 같은 요청으로 다시 시작(실패 기록은 다시 승인할 수 있다).
+        drop(guard);
+        let guard = begin_approval(&req).expect("다시 승인");
+
+        assert!(note_inflight_tx("0xB"));
+        assert_eq!(read().tx_hash, "0xB");
+        assert!(!note_inflight_tx("0xC"), "이미 해시가 있으면 덮지 않는다");
+        assert_eq!(read().tx_hash, "0xB");
+        drop(guard);
+        assert!(!note_inflight_tx("0xD"), "승인이 끝나면 연결할 곳이 없다");
+
+        // `sending` 이 아닌 기록(이미 끝남)에도 안 적는다.
+        put_request("42");
+        req.id = "42".into();
+        let guard = begin_approval(&req).unwrap();
+        let mut done = read_attempt("42").unwrap().unwrap();
+        done.state = crate::policy::ATTEMPT_DONE.into();
+        write_attempt(&done).unwrap();
+        assert!(!note_inflight_tx("0xE"));
+        drop(guard);
+    }
+
     use crate::x402::X402Authorization;
 
     fn req_created(created: u64) -> PaymentRequest {
@@ -1458,8 +1623,16 @@ mod tests {
         );
     }
 
+    /// 승인 카운터·`INFLIGHT_ID` 는 프로세스 전역이다 — 그걸 보는 테스트끼리는 한 줄로 선다(개발 82).
+    static GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn globals() -> std::sync::MutexGuard<'static, ()> {
+        GLOBALS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn approval_guard_marks_in_flight() {
+        let _g = globals();
         assert!(!approval_in_flight());
         {
             let _g = ApprovalGuard::acquire();

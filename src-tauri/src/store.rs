@@ -10,6 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// ~/.jigap 디렉터리 경로. 이름은 `policy::JIGAP_DIR_NAME`(MCP 와 같은 상수, 개발 57).
 pub(crate) fn jigap_dir() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(dir) = test_dir::get() {
+        return Ok(dir);
+    }
     let home = dirs::home_dir().ok_or(ts!(
         "홈 디렉터리를 찾을 수 없습니다",
         "Couldn't find your home folder"
@@ -212,6 +216,42 @@ fn write_durable(path: &PathBuf, bytes: &[u8], replace: bool) -> Result<(), Dura
     fs::File::open(dir).and_then(|d| d.sync_all()).map_err(|e| {
         DurableError::NotDurable(tf!("파일 저장 실패: {e}", "Couldn't save the file: {e}"))
     })
+}
+
+/// 테스트 전용 지갑 폴더 (개발 82) — `jigap_dir()` 이 실지갑(`~/.jigap`) 대신 임시 폴더를 가리키게 한다. 예전엔 경로가 고정이라
+/// 결제 시도 기록·wallet.enc 를 읽고 쓰는 갈래(거부·감시·재제출 연결·지갑 저장 실패)를 단위 테스트로 못 밟았다(개발 79·80 이월).
+/// `fault` 와 같이 스레드마다 따로라 병렬 테스트끼리 섞이지 않는다 — 다른 스레드로 넘어간 코드는 덮어쓰기를 못 본다(실지갑을 본다).
+/// 그래서 이걸 쓰는 테스트는 동기 코드만 부른다. 가드가 떨어지면 폴더를 지우고 덮어쓰기를 푼다.
+#[cfg(test)]
+pub(crate) mod test_dir {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    thread_local!(static DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) });
+
+    pub(super) fn get() -> Option<PathBuf> {
+        DIR.with(|d| d.borrow().clone())
+    }
+
+    pub(crate) struct Guard(pub(crate) PathBuf);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            DIR.with(|d| *d.borrow_mut() = None);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 이 스레드의 지갑 폴더를 새 임시 폴더로 바꾼다. `tag` 는 테스트마다 다르게.
+    pub(crate) fn use_temp(tag: &str) -> Guard {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kura-test-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+        Guard(dir)
+    }
 }
 
 /// 테스트 전용 실패 주입 (개발 80) — 디스크가 실제로 실패하는 갈래(꽉 참·디렉터리 fsync 실패)를 밟는다.

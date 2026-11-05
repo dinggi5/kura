@@ -4,7 +4,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { Clock, Loader2, Unlock, Zap } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { fmtAmount, fmtCountdown } from "@/lib/format";
+import { fmtCountdown, fmtExact } from "@/lib/format";
 import type { SessionStatus } from "@/lib/types";
 import { enter, modalCard, modalOverlay, primaryBtn, secondaryBtn, PwInput } from "@/components/ui";
 import { t } from "@/lib/i18n";
@@ -19,7 +19,7 @@ export function SessionBar({
   onUnlock: () => void;
   onLock: () => void;
 }) {
-  const limit = fmtAmount(session.auto_limit, 2);
+  const limit = fmtExact(session.auto_limit); // 사람이 정한 한도 — 0.005 를 「0.01」로 보이지 않게(개발 82)
 
   if (session.unlocked) {
     return (
@@ -161,12 +161,12 @@ export function UnlockSessionModal({
         <p className="mt-4 text-[13px] leading-relaxed text-[var(--color-ink-700)] dark:text-[#B5AFA2]">
           {t(
             <>
-              비밀번호를 한 번 입력하면, <span className="num">{fmtAmount(autoLimit, 2)}</span> USDC
+              비밀번호를 한 번 입력하면, <span className="num">{fmtExact(autoLimit)}</span> USDC
               이하의 AI 결제는 비번 없이 자동 승인돼요.
             </>,
             <>
               Enter your password once, and AI payments of{" "}
-              <span className="num">{fmtAmount(autoLimit, 2)}</span> USDC or less go through without
+              <span className="num">{fmtExact(autoLimit)}</span> USDC or less go through without
               asking again.
             </>,
           )}
