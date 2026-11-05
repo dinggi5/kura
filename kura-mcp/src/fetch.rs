@@ -510,11 +510,16 @@ pub async fn read_response(resp: reqwest::Response) -> FetchedBody {
     .await
     {
         Ok(Ok(b)) => b,
-        _ => late_save_body(
-            content_type,
-            len,
-            trying.lock().ok().and_then(|g| g.clone()),
-        ),
+        _ => {
+            let mut b = late_save_body(
+                content_type,
+                len,
+                trying.lock().ok().and_then(|g| g.clone()),
+            );
+            // 상한에서 끊긴 응답이면 저장이 늦어도 재결제 경고는 그대로 가야 한다(개발 82, 코덱스 1차 P2).
+            b.incomplete = truncated;
+            b
+        }
     };
     if let Some(e) = read_err {
         body.incomplete = true;

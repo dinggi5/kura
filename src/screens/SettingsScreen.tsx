@@ -433,8 +433,8 @@ export function SettingsScreen({
             >
               <p className="text-[13px] leading-relaxed text-[var(--color-ink-500)]">
                 {t(
-                  "잔액·결제가 이뤄지는 블록체인이에요. 메인넷은 실제 자금이 오가고, 테스트넷은 가짜 코인으로 연습해요. 체인별로 한도·사용액·내역·신뢰 주소가 따로 관리돼요.",
-                  "The blockchain your balance and payments live on. Mainnet moves real funds; the testnet is practice with fake coins. Limits, spending, history, and trusted addresses are kept per chain.",
+                  "잔액·결제가 이뤄지는 블록체인이에요. 메인넷은 실제 자금이 오가고, 테스트넷은 가짜 코인으로 연습해요. 사용액·내역·신뢰 주소는 체인별로 따로, 한도는 모든 체인에 같이 적용돼요.",
+                  "The blockchain your balance and payments live on. Mainnet moves real funds; the testnet is practice with fake coins. Spending, history, and trusted addresses are kept per chain; limits apply to every chain.",
                 )}
               </p>
               <div className="mt-4 grid grid-cols-2 gap-2">

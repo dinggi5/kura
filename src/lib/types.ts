@@ -41,7 +41,7 @@ export type Settings = {
   /** 자율 결제는 신뢰 주소(비번으로 승인한 적 있는 주소)만. */
   auto_trusted_only: boolean;
   /** 활성 체인 ID — 8453=Base 메인넷 / 84532=Base Sepolia / 5042002=Arc 테스트넷 / 5042=Arc 메인넷.
-   *  체인별로 한도·사용액·내역·신뢰목록 파일이 분리된다. 목록은 lib/chain.ts 의 CHAINS 가 정본. */
+   *  체인별로 사용액·내역·신뢰목록 파일이 분리된다(한도는 settings.json 하나 — 모든 체인 공통). 목록은 lib/chain.ts 의 CHAINS 가 정본. */
   chain_id: number;
   /** ERC-8004 에이전트 신원 조회 (개발 47). AI 가 에이전트 번호를 주면 온체인 기록과 대조해
    *  승인 창에 사실 한 줄을 붙인다. 읽기 전용·온체인만(웹 fetch 없음). 기본 켜짐. */
