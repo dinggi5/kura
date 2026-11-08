@@ -3,7 +3,7 @@
   "name": "io.github.dinggi5/kura",
   "title": "Kura",
   "description": "A local crypto wallet for AI agents — Base, Arc, x402, AI, MCP",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "websiteUrl": "https://dinggi5.github.io/kura/",
   "repository": {
     "url": "https://github.com/dinggi5/kura",
@@ -21,9 +21,9 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/dinggi5/kura/releases/download/v0.5.1/kura-0.5.1.mcpb",
-      "version": "0.5.1",
-      "fileSha256": "2de34fa6750b66f32d7151a415b5e9993b0e750ba291bc05c3a79e25f3cfd6c1",
+      "identifier": "https://github.com/dinggi5/kura/releases/download/v0.5.2/kura-0.5.2.mcpb",
+      "version": "0.5.2",
+      "fileSha256": "c2aa7c39457f64a1072cde457dd284b38c42bfb67d88b5cae625782444c1b08a",
       "transport": {
         "type": "stdio"
       }
